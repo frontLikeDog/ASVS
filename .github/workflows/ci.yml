@@ -194,7 +194,9 @@ jobs:
     needs: affected
     if: needs.affected.outputs.render == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # First run also downloads Chromium and a ~60 MB CJK font package; the
+    # render itself is only a few minutes of this budget.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -211,8 +213,32 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Install CJK fonts (the fixture copy is Chinese)
-        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+      # The ubuntu-26.04 runner image ships neither ffprobe nor a CJK font.
+      # Install ffmpeg explicitly (the worker and verify script both shell out
+      # to it) and cache the font package: it is ~60 MB even before apt's
+      # overhead, and re-downloading it every run dominated the gate.
+      - name: Cache CJK fonts
+        id: font-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/fonts
+          key: noto-cjk-1:20240730+repack1-1build1
+
+      - name: Install ffmpeg and CJK fonts
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 ffmpeg
+          if [ "${{ steps.font-cache.outputs.cache-hit }}" != "true" ]; then
+            sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 fonts-noto-cjk
+            mkdir -p "$HOME/.local/share/fonts"
+            if [ -d /usr/share/fonts/opentype/noto ]; then
+              sudo cp -r /usr/share/fonts/opentype/noto/. "$HOME/.local/share/fonts/"
+              sudo chown -R "$USER":"$USER" "$HOME/.local/share/fonts"
+            fi
+          fi
+          fc-cache -f "$HOME/.local/share/fonts"
 
       # Remotion downloads Chrome Headless Shell on first use. Caching it keeps
       # the gate around the render itself rather than a ~150 MB download.
@@ -222,8 +248,10 @@ jobs:
           path: node_modules/.remotion
           key: remotion-browser-${{ runner.os }}-4.0.545
 
-      - name: Verify ffprobe is available
-        run: ffprobe -version
+      - name: Verify ffmpeg and ffprobe are available
+        run: |
+          ffmpeg -version
+          ffprobe -version
 
       - name: Render 30s fixture
         run: pnpm render:fixture
