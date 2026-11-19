@@ -16,7 +16,7 @@
     "build": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "vite build --config vite.config.ts",
+        "command": "vite build --config vite.config.ts && node ../../scripts/check-bundle-budget.mjs",
         "cwd": "apps/web-studio"
       },
       "outputs": ["{workspaceRoot}/dist/apps/web-studio"]

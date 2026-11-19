@@ -64,31 +64,6 @@ export function Timeline({
         onPointerCancel={() => {
           draggingRef.current = false;
         }}
-        role="slider"
-        aria-label="视频时间轴"
-        aria-valuemin={0}
-        aria-valuemax={Math.round(total)}
-        aria-valuenow={Math.round(currentTime)}
-        aria-valuetext={`${formatTimecode(currentTime, true)} / ${formatTimecode(total, true)}`}
-        tabIndex={0}
-        onKeyDown={(event) => {
-          if (event.key === 'ArrowLeft') {
-            event.preventDefault();
-            onSeek(Math.max(0, currentTime - 0.5));
-          }
-          if (event.key === 'ArrowRight') {
-            event.preventDefault();
-            onSeek(Math.min(total, currentTime + 0.5));
-          }
-          if (event.key === 'Home') {
-            event.preventDefault();
-            onSeek(0);
-          }
-          if (event.key === 'End') {
-            event.preventDefault();
-            onSeek(total);
-          }
-        }}
         style={{ ['--timeline-accent' as string]: accent }}
       >
         <div className={cn('flex gap-[3px] overflow-hidden rounded-sm border border-line bg-ink/60 p-[3px]', compact ? 'h-9' : 'h-[62px]')}>
@@ -147,6 +122,36 @@ export function Timeline({
             );
           })}
         </div>
+        {/* Slider semantics live on an overlay without focusable descendants;
+            the scene buttons stay siblings so the track is not a nested widget. */}
+        <div
+          role="slider"
+          aria-label="视频时间轴"
+          aria-valuemin={0}
+          aria-valuemax={Math.round(total)}
+          aria-valuenow={Math.round(currentTime)}
+          aria-valuetext={`${formatTimecode(currentTime, true)} / ${formatTimecode(total, true)}`}
+          tabIndex={0}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowLeft') {
+              event.preventDefault();
+              onSeek(Math.max(0, currentTime - 0.5));
+            }
+            if (event.key === 'ArrowRight') {
+              event.preventDefault();
+              onSeek(Math.min(total, currentTime + 0.5));
+            }
+            if (event.key === 'Home') {
+              event.preventDefault();
+              onSeek(0);
+            }
+            if (event.key === 'End') {
+              event.preventDefault();
+              onSeek(total);
+            }
+          }}
+          className="pointer-events-none absolute inset-0 z-10 rounded-sm"
+        />
         <div
           className="pointer-events-none absolute bottom-0 top-0 z-10 w-px"
           style={{

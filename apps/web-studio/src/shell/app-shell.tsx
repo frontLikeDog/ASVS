@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { useStudioStore, useUiStore } from '@asvs/state';
 import { TooltipProvider } from '@asvs/ui';
@@ -7,6 +7,7 @@ import { Topbar } from './topbar';
 import { CommandPalette } from './command-palette';
 import { DemoDialog } from './demo-dialog';
 import { Toaster } from './toaster';
+import { RouteLoading } from '../route-loading';
 import { useMediaQuery } from '../lib/use-media-query';
 
 export function AppShell() {
@@ -102,7 +103,9 @@ export function AppShell() {
             onToggleCollapsed={() => setSidebarCollapsed(!sidebarCollapsed)}
           />
           <main id="main-content" className="app-toplight min-h-0 flex-1 overflow-y-auto">
-            <Outlet />
+            <Suspense fallback={<RouteLoading />}>
+              <Outlet />
+            </Suspense>
           </main>
         </div>
         <CommandPalette />

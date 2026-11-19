@@ -553,7 +553,7 @@ function SceneEditor({
               </div>
             </div>
           </div>
-          <div className="mx-auto mt-2 flex max-w-[720px] items-center justify-between text-[9px] text-white/35">
+          <div className="mx-auto mt-2 flex max-w-[720px] items-center justify-between text-[9px] text-muted">
             <span className="flex items-center gap-1"><Layers size={9} /> 模拟预览 · 非成片</span>
             <label className="flex cursor-pointer items-center gap-1.5">
               <input

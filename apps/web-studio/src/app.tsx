@@ -2,20 +2,19 @@ import { createBrowserRouter, Navigate } from 'react-router-dom';
 import {
   AllVideosPage,
   DashboardPage,
-  KnowledgePage,
-  OnboardingPage,
-  ProjectOverviewPage,
-  ProjectsPage,
-  SettingsPage,
-  VideosPage,
-} from '@asvs/features-project';
-import {
   DirectorPage,
   EditorPage,
+  KnowledgePage,
+  OnboardingPage,
+  ProductionPage,
+  ProjectOverviewPage,
+  ProjectsPage,
+  ReviewPage,
+  SettingsPage,
   StoryboardPage,
   VideoWizardPage,
-} from '@asvs/features-video';
-import { ProductionPage, ReviewPage } from '@asvs/features-production';
+  VideosPage,
+} from './route-pages';
 import { AppShell } from './shell/app-shell';
 import { NotFoundPage } from './not-found-page';
 import { RouteErrorPage } from './route-error';

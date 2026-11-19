@@ -23,8 +23,11 @@
       "@asvs/state": ["libs/state/src/index.ts"],
       "@asvs/ui": ["libs/ui/src/index.ts"],
       "@asvs/features-project": ["libs/features/project-hub/src/index.ts"],
+      "@asvs/features-project/*": ["libs/features/project-hub/src/*"],
       "@asvs/features-video": ["libs/features/video-studio/src/index.ts"],
-      "@asvs/features-production": ["libs/features/production-suite/src/index.ts"]
+      "@asvs/features-video/*": ["libs/features/video-studio/src/*"],
+      "@asvs/features-production": ["libs/features/production-suite/src/index.ts"],
+      "@asvs/features-production/*": ["libs/features/production-suite/src/*"]
     }
   }
 }

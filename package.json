@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "nx serve web-studio",
     "build": "nx build web-studio",
+    "budget": "node scripts/check-bundle-budget.mjs",
     "lint": "nx run-many -t lint",
     "typecheck": "nx run-many -t typecheck",
     "test": "nx run-many -t test",
@@ -38,6 +39,7 @@
     "zustand": "5.1.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.14.0",
     "@eslint/js": "9.39.5",
     "@nx/eslint-plugin": "22.7.12",
     "@playwright/test": "1.65.1",

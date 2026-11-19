@@ -142,6 +142,8 @@ export function EditorPage() {
         (target.tagName === 'INPUT' ||
           target.tagName === 'TEXTAREA' ||
           target.tagName === 'SELECT' ||
+          target.tagName === 'BUTTON' ||
+          target.tagName === 'A' ||
           target.isContentEditable ||
           target.closest?.('[role="slider"]'))
       ) {

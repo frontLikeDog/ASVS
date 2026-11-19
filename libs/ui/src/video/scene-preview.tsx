@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import type { AspectRatio, BrandKit, Feature, Project, Scene } from '@asvs/domain';
-import { readableOn, withAlpha } from '@asvs/domain';
+import { blendHex, readableAccentOn, readableOn, withAlpha } from '@asvs/domain';
 import { BrandMark } from '../brand';
 import { cn } from '../cn';
 
@@ -88,7 +88,7 @@ export function ScenePreview({
         : '#F4F2EC';
   const muted =
     surface === 'paper'
-      ? 'rgba(26,25,21,.58)'
+      ? 'rgba(26,25,21,.65)'
       : surface === 'brand'
         ? withAlpha(readableOn(brand.primary) === '#15140F' ? '#15140F' : '#FFFDF7', 0.64)
         : 'rgba(244,242,236,.56)';
@@ -176,10 +176,10 @@ export function ScenePreview({
       {showChrome ? (
         <div
           className="pointer-events-none absolute inset-x-0 top-0 flex items-center justify-between"
-          style={{ padding: u(1.4), fontSize: u(0.78), color: 'rgba(255,255,255,.66)' }}
+          style={{ padding: u(1.4), fontSize: u(0.78), color: 'var(--pv-muted)' }}
         >
           <span
-            className="rounded-[3px] border border-white/20 bg-black/35 px-1.5 py-0.5 font-medium tracking-[0.08em] backdrop-blur-sm"
+            className="rounded-[3px] border border-white/20 bg-black/70 px-1.5 py-0.5 font-medium tracking-[0.08em] text-white/90 backdrop-blur-sm"
             style={{ fontSize: u(0.76) }}
           >
             模拟预览 · 非成片
@@ -244,6 +244,11 @@ function TitleScreen({
 }) {
   const paper = surface === 'paper';
   const brand = project.brand;
+  const accentText = paper
+    ? readableAccentOn(brand.primary, blendHex('#F2EEE3', brand.primary, 0.16))
+    : surface === 'brand'
+      ? readableOn(brand.primary)
+      : brand.primary;
   return (
     <div className="absolute inset-0 flex flex-col" style={{ padding: u(4.6) }}>
       <div className="flex items-center justify-between">
@@ -270,7 +275,7 @@ function TitleScreen({
         >
           <span
             className="font-display leading-none"
-            style={{ fontSize: u(7.4), color: withAlpha(brand.primary, 0.75), fontWeight: 500 }}
+            style={{ fontSize: u(7.4), color: paper || surface === 'brand' ? accentText : withAlpha(brand.primary, 0.75), fontWeight: 500 }}
           >
             {String(scene.order + 1).padStart(2, '0')}
           </span>
@@ -284,7 +289,7 @@ function TitleScreen({
 
         <div
           className="mb-3 flex items-center gap-2"
-          style={{ color: brand.primary, fontSize: u(0.92), letterSpacing: '0.16em' }}
+          style={{ color: accentText, fontSize: u(0.92), letterSpacing: '0.16em' }}
         >
           <span style={{ width: u(2.4), height: 1, background: brand.primary }} />
           <span className="font-semibold uppercase">{feature?.name ?? 'AI SOFTWARE VIDEO STUDIO'}</span>
@@ -439,7 +444,7 @@ function ProductShell({
               key={item}
               style={{
                 fontSize: u(0.84),
-                color: item === active ? '#F4F2EC' : 'rgba(244,242,236,.42)',
+                color: item === active ? '#F4F2EC' : 'rgba(244,242,236,.62)',
                 borderBottom: item === active ? '1px solid var(--pv-accent)' : '1px solid transparent',
                 paddingBottom: u(0.55),
                 paddingTop: u(0.55),

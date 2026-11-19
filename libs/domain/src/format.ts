@@ -88,10 +88,57 @@ export function withAlpha(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${Math.min(1, Math.max(0, alpha))})`;
 }
 
+function relativeLuminance({ r, g, b }: { r: number; g: number; b: number }): number {
+  const channel = (value: number) => {
+    const normalized = value / 255;
+    return normalized <= 0.03928
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
+}
+
+function toHex({ r, g, b }: { r: number; g: number; b: number }): string {
+  return `#${[r, g, b]
+    .map((value) => Math.round(Math.min(255, Math.max(0, value))).toString(16).padStart(2, '0'))
+    .join('')
+    .toUpperCase()}`;
+}
+
+/** Linear blend of two hex colors; weight 0 keeps `hex`, weight 1 returns `target`. */
+export function blendHex(hex: string, target: string, weight: number): string {
+  const from = hexToRgb(hex);
+  const to = hexToRgb(target);
+  const mix = Math.min(1, Math.max(0, weight));
+  return toHex({
+    r: from.r + (to.r - from.r) * mix,
+    g: from.g + (to.g - from.g) * mix,
+    b: from.b + (to.b - from.b) * mix,
+  });
+}
+
+export function contrastRatio(a: string, b: string): number {
+  const first = relativeLuminance(hexToRgb(a));
+  const second = relativeLuminance(hexToRgb(b));
+  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+}
+
+/** Picks the foreground (dark or paper) with the higher WCAG contrast ratio. */
 export function readableOn(hex: string): string {
-  const { r, g, b } = hexToRgb(hex);
-  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-  return luminance > 0.62 ? '#15140F' : '#FFFDF7';
+  return contrastRatio('#15140F', hex) >= contrastRatio('#FFFDF7', hex) ? '#15140F' : '#FFFDF7';
+}
+
+/**
+ * Keeps a brand accent recognizable while guaranteeing readable text on a
+ * light surface: darkens toward ink until WCAG AA (4.5:1) is met.
+ */
+export function readableAccentOn(hex: string, background: string): string {
+  let candidate = hex;
+  for (let weight = 0; weight <= 1; weight += 0.1) {
+    candidate = blendHex(hex, '#1A1915', weight);
+    if (contrastRatio(candidate, background) >= 4.5) return candidate;
+  }
+  return candidate;
 }
 
 export function percent(value: number, total: number): number {

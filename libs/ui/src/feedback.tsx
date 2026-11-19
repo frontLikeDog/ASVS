@@ -77,7 +77,7 @@ export function ProgressBar({
         aria-valuenow={Math.round(clamped)}
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-label={label}
+        aria-label={label ?? '进度'}
         className={cn(
           'relative w-full overflow-hidden rounded-full bg-overlay',
           size === 'sm' ? 'h-1' : 'h-1.5',

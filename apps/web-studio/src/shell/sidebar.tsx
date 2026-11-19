@@ -80,7 +80,7 @@ export function Sidebar({
         style={{ width: collapsed ? 68 : 238 }}
       >
         <div className={cn('flex h-14 items-center border-b border-line', collapsed ? 'justify-center px-2' : 'justify-between px-4')}>
-          <NavLink to="/" className="flex items-center gap-2" aria-label="回到工作台">
+          <NavLink to="/" className="flex items-center gap-2" aria-label="ASVS · 回到工作台">
             <StudioLogo compact={collapsed} />
           </NavLink>
           {!collapsed ? (
@@ -100,7 +100,6 @@ export function Sidebar({
                     'flex w-full items-center rounded-md border border-line bg-raised/60 text-left transition-colors hover:border-line-strong hover:bg-raised',
                     collapsed ? 'justify-center p-2' : 'gap-2.5 px-2.5 py-2',
                   )}
-                  aria-label="切换项目"
                 >
                   <span
                     className="grid size-7 shrink-0 place-items-center rounded-sm border border-line bg-ink"
@@ -112,6 +111,7 @@ export function Sidebar({
                       title={currentProject.brand.logoText}
                     />
                   </span>
+                  <span className="sr-only">切换项目</span>
                   {!collapsed ? (
                     <>
                       <span className="min-w-0 flex-1">

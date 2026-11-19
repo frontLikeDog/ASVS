@@ -1,0 +1,10 @@
+{
+  "$comment": "Initial JS = entry chunk plus its static imports. Route budgets are the extra JS loaded when entering that route directly (shared initial code excluded). Sizes are gzip of the emitted files.",
+  "initial": { "gzipKb": 230, "rawKb": 790 },
+  "routes": {
+    "editor": { "gzipKb": 30, "rawKb": 95 },
+    "production": { "gzipKb": 24, "rawKb": 70 },
+    "review": { "gzipKb": 22, "rawKb": 65 }
+  },
+  "chunk": { "gzipKb": 160, "rawKb": 500 }
+}
