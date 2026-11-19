@@ -1,0 +1,54 @@
+{
+  "name": "web-studio",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/web-studio/src",
+  "projectType": "application",
+  "tags": ["type:app", "scope:studio"],
+  "targets": {
+    "serve": {
+      "executor": "nx:run-commands",
+      "continuous": true,
+      "options": {
+        "command": "vite --config vite.config.ts",
+        "cwd": "apps/web-studio"
+      }
+    },
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vite build --config vite.config.ts",
+        "cwd": "apps/web-studio"
+      },
+      "outputs": ["{workspaceRoot}/dist/apps/web-studio"]
+    },
+    "preview": {
+      "executor": "nx:run-commands",
+      "continuous": true,
+      "options": {
+        "command": "vite preview --config vite.config.ts",
+        "cwd": "apps/web-studio"
+      }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "eslint apps/web-studio/src apps/web-studio/e2e",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc -p apps/web-studio/tsconfig.json --noEmit",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "e2e": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "playwright test --config playwright.config.ts",
+        "cwd": "apps/web-studio/e2e"
+      }
+    }
+  }
+}

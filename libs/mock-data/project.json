@@ -1,0 +1,24 @@
+{
+  "name": "mock-data",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/mock-data/src",
+  "projectType": "library",
+  "tags": ["type:mock-data", "scope:shared", "runtime:universal"],
+  "targets": {
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": { "command": "eslint libs/mock-data/src", "cwd": "{workspaceRoot}" }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": { "command": "tsc -p libs/mock-data/tsconfig.json --noEmit", "cwd": "{workspaceRoot}" }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vitest run --config vitest.config.ts --passWithNoTests libs/mock-data",
+        "cwd": "{workspaceRoot}"
+      }
+    }
+  }
+}

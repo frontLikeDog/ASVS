@@ -1,0 +1,9 @@
+export { DashboardPage } from './dashboard-page';
+export { ProjectsPage } from './projects-page';
+export { ProjectOverviewPage } from './project-overview-page';
+export { OnboardingPage } from './onboarding-page';
+export { KnowledgePage } from './knowledge-page';
+export { VideosPage } from './videos-page';
+export { AllVideosPage } from './all-videos-page';
+export { SettingsPage } from './settings-page';
+export { NotFoundInline } from './not-found-inline';

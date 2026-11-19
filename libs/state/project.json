@@ -1,0 +1,24 @@
+{
+  "name": "state",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/state/src",
+  "projectType": "library",
+  "tags": ["type:state", "scope:shared", "runtime:browser"],
+  "targets": {
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": { "command": "eslint libs/state/src", "cwd": "{workspaceRoot}" }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": { "command": "tsc -p libs/state/tsconfig.json --noEmit", "cwd": "{workspaceRoot}" }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vitest run --config vitest.config.ts --passWithNoTests libs/state",
+        "cwd": "{workspaceRoot}"
+      }
+    }
+  }
+}

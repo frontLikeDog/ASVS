@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "useDefineForClassFields": true,
+    "baseUrl": ".",
+    "types": ["node", "vite/client"],
+    "paths": {
+      "@asvs/domain": ["libs/domain/src/index.ts"],
+      "@asvs/mock-data": ["libs/mock-data/src/index.ts"],
+      "@asvs/mock-services": ["libs/mock-services/src/index.ts"],
+      "@asvs/state": ["libs/state/src/index.ts"],
+      "@asvs/ui": ["libs/ui/src/index.ts"],
+      "@asvs/features-project": ["libs/features/project-hub/src/index.ts"],
+      "@asvs/features-video": ["libs/features/video-studio/src/index.ts"],
+      "@asvs/features-production": ["libs/features/production-suite/src/index.ts"]
+    }
+  }
+}

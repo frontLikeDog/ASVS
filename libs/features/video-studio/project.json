@@ -1,0 +1,27 @@
+{
+  "name": "video-studio",
+  "$schema": "../../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/features/video-studio/src",
+  "projectType": "library",
+  "tags": ["type:feature", "scope:video", "runtime:browser"],
+  "targets": {
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": { "command": "eslint libs/features/video-studio/src", "cwd": "{workspaceRoot}" }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc -p libs/features/video-studio/tsconfig.json --noEmit",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vitest run --config vitest.config.ts --passWithNoTests libs/features/video-studio",
+        "cwd": "{workspaceRoot}"
+      }
+    }
+  }
+}

@@ -1,0 +1,66 @@
+import type { Asset } from '@asvs/domain';
+
+export const LUMEN_ASSETS: Asset[] = [
+  {
+    id: 'asset_cap_collab',
+    projectId: 'proj_lumen',
+    name: '双人协作录屏',
+    kind: 'capture',
+    durationSec: 16,
+    description: '两位成员同时编辑 Atlas 看板，光标、在线成员与冲突合并可见。',
+    palette: ['#FF7A59', '#F5C9A8'],
+    mock: true,
+  },
+  {
+    id: 'asset_cap_share',
+    projectId: 'proj_lumen',
+    name: '分享权限录屏',
+    kind: 'capture',
+    durationSec: 11,
+    description: '从看板生成分享链接，并切换只读 / 可编辑权限。',
+    palette: ['#FFB15C', '#FF7A59'],
+    mock: true,
+  },
+  {
+    id: 'asset_cap_funnel',
+    projectId: 'proj_lumen',
+    name: '漏斗搭建录屏',
+    kind: 'capture',
+    durationSec: 12,
+    description: '拖拽三个步骤组成漏斗，右侧实时显示转化率。',
+    palette: ['#FFD08A', '#E96A45'],
+    mock: true,
+  },
+  {
+    id: 'asset_motion_data',
+    projectId: 'proj_lumen',
+    name: '数据流问题动效',
+    kind: 'b-roll',
+    durationSec: 8,
+    description: '散落的数据卡片与断开的连线，用于提出问题。',
+    palette: ['#392C28', '#FF7A59'],
+    mock: true,
+  },
+  {
+    id: 'asset_generated_aurora',
+    projectId: 'proj_lumen',
+    name: '抽象光晕素材',
+    kind: 'b-roll',
+    durationSec: 9,
+    description: '生成式抽象背景（模拟），仅用于氛围，不证明任何产品能力。',
+    palette: ['#6A3CD1', '#FF9A76'],
+    mock: true,
+  },
+  {
+    id: 'asset_audio_brand',
+    projectId: 'proj_lumen',
+    name: '品牌背景音乐',
+    kind: 'audio',
+    durationSec: 40,
+    description: '120 BPM · 模拟授权音乐，仅作时间轴占位。',
+    palette: ['#241E1A', '#FF7A59'],
+    mock: true,
+  },
+];
+
+export const PULSE_ASSETS: Asset[] = [];

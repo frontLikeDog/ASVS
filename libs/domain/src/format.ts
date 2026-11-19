@@ -1,0 +1,105 @@
+export function formatTimecode(totalSeconds: number, withTenths = false): string {
+  const safe = Math.max(0, totalSeconds);
+  const minutes = Math.floor(safe / 60);
+  const seconds = Math.floor(safe % 60);
+  const base = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  if (!withTenths) return base;
+  const tenths = Math.floor((safe % 1) * 10);
+  return `${base}.${tenths}`;
+}
+
+export function formatSrtTime(totalSeconds: number): string {
+  const safe = Math.max(0, totalSeconds);
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const seconds = Math.floor(safe % 60);
+  const milliseconds = Math.round((safe % 1) * 1000);
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')},${String(milliseconds).padStart(3, '0')}`;
+}
+
+export function formatDuration(seconds: number): string {
+  const rounded = Math.round(seconds);
+  if (rounded < 60) return `${rounded} 秒`;
+  const minutes = Math.floor(rounded / 60);
+  const rest = rounded % 60;
+  return rest === 0 ? `${minutes} 分钟` : `${minutes} 分 ${rest} 秒`;
+}
+
+export function formatElapsed(ms: number): string {
+  return formatTimecode(ms / 1000, true);
+}
+
+export function formatRelativeTime(iso: string, now: number = Date.now()): string {
+  const time = new Date(iso).getTime();
+  if (Number.isNaN(time)) return iso;
+  const diff = Math.max(0, now - time);
+  const minute = 60_000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diff < minute) return '刚刚';
+  if (diff < hour) return `${Math.floor(diff / minute)} 分钟前`;
+  if (diff < day) return `${Math.floor(diff / hour)} 小时前`;
+  if (diff < day * 2) return '昨天';
+  if (diff < day * 7) return `${Math.floor(diff / day)} 天前`;
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: 'short',
+    day: 'numeric',
+  }).format(new Date(time));
+}
+
+export function formatDate(iso: string): string {
+  const time = new Date(iso).getTime();
+  if (Number.isNaN(time)) return iso;
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(time));
+}
+
+export function formatShortDate(iso: string): string {
+  const time = new Date(iso).getTime();
+  if (Number.isNaN(time)) return iso;
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(time));
+}
+
+export function truncate(text: string, max = 80): string {
+  const clean = text.trim();
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+export function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const clean = hex.replace('#', '');
+  const value = clean.length === 3
+    ? clean.split('').map((part) => `${part}${part}`).join('')
+    : clean.padEnd(6, '0').slice(0, 6);
+  return {
+    r: Number.parseInt(value.slice(0, 2), 16) || 0,
+    g: Number.parseInt(value.slice(2, 4), 16) || 0,
+    b: Number.parseInt(value.slice(4, 6), 16) || 0,
+  };
+}
+
+export function withAlpha(hex: string, alpha: number): string {
+  const { r, g, b } = hexToRgb(hex);
+  return `rgba(${r}, ${g}, ${b}, ${Math.min(1, Math.max(0, alpha))})`;
+}
+
+export function readableOn(hex: string): string {
+  const { r, g, b } = hexToRgb(hex);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance > 0.62 ? '#15140F' : '#FFFDF7';
+}
+
+export function percent(value: number, total: number): number {
+  if (total <= 0) return 0;
+  return Math.min(100, Math.max(0, (value / total) * 100));
+}
+
+export function pluralMinutes(seconds: number): string {
+  const minutes = Math.round(seconds / 60);
+  return `${minutes} 分钟`;
+}
