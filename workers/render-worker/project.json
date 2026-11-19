@@ -1,0 +1,45 @@
+{
+  "name": "render-worker",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "workers/render-worker/src",
+  "projectType": "application",
+  "tags": ["type:worker", "scope:render", "runtime:node"],
+  "targets": {
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "eslint workers/render-worker/src workers/render-worker/fixtures",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc -p workers/render-worker/tsconfig.json --noEmit",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vitest run --config vitest.config.ts --passWithNoTests workers/render-worker",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "build-fixture": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsx fixtures/build-golden.ts",
+        "cwd": "workers/render-worker"
+      }
+    },
+    "render-fixture": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsx src/render-fixture.ts",
+        "cwd": "workers/render-worker"
+      },
+      "outputs": ["{workspaceRoot}/dist/render-worker"]
+    }
+  }
+}

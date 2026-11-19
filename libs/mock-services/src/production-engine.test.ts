@@ -16,6 +16,7 @@ function scene(id: string, order: number, durationSec: number): Scene {
   return {
     id,
     order,
+    revision: 1,
     title: `镜头 ${order + 1}`,
     intent: '演示',
     narration: '旁白',
@@ -38,6 +39,7 @@ function makeVideo(): VideoProject {
     title: '生产测试视频',
     mode: 'release_video',
     stage: 'storyboard_ready',
+    fps: 30,
     brief: {
       objective: '测试',
       audience: '测试团队',

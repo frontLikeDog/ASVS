@@ -13,7 +13,7 @@
 
 | # | 假设 | 当前状态 | 失败后果 |
 |---|---|---|---|
-| H1 | `StoryboardV1` 能被确定性渲染成可播放的 MP4 | **零实现**：仓库无 Remotion / FFmpeg 依赖，`apps/` 下只有 `web-studio` | 产品核心价值不成立，需重新选型 |
+| H1 | `StoryboardV1` 能被确定性渲染成可播放的 MP4 | **已有证据**（2026-11-20）：`libs/render` + `workers/render-worker` 产出 30 秒 MP4，见 [docs/11](11-RENDER-SLICE.md)。基线提交时为零实现 | 产品核心价值不成立，需重新选型 |
 | H2 | Playwright 能在真实 UI 上稳定录屏，且「断言通过」比「脚本退出码 0」更可信 | **零实现**：生产步骤 `capture` 为确定性模拟（`libs/mock-services/src/production-engine.ts`） | 演示素材只能靠手工，产品退化为普通编辑器 |
 | H3 | 前端状态可迁移到真实后端而不大规模返工 | **零实现**：无 `apps/api`，无接口抽象，`mock-services` 被 Store 直接调用 | 后期返工成本超过重写 |
 
@@ -49,6 +49,8 @@ docs/05 设计的 `VideoSceneV1` 与仓库中的 `sceneSchema`（`libs/domain/sr
 
 **结论**：直接接 Remotion 会卡在 IR 上。第 1 步必须包含一次 schema 变更，且这是一次**破坏性变更**，需要迁移链（见 2.3）。
 
+> 执行注记（2026-11-20）：S1-1 已按兼容策略落地——`visual` / `durationFrames` 可选，`revision` / `fps` 有默认值，旧 `visualType` 由 `deriveSceneVisual` 映射；因此现有页面无需一次性重写。详见 [docs/11](11-RENDER-SLICE.md) §3。
+
 ### 2.3 持久化
 
 `libs/state/src/studio-store.ts:1040` 使用 `persist`：
@@ -60,6 +62,8 @@ merge: (persisted, current) => { /* studioSnapshotSchema.parse 失败则回退�
 ```
 
 这是「校验失败即**丢弃整个工作区**」，不是迁移。一旦第 1 步改动 `sceneSchema`，所有已存在的本地工作区都会被清空。真实用户数据之前必须换成显式迁移链。
+
+> 执行注记（2026-11-20）：S1-6 已落地 `STUDIO_PERSIST_VERSION = 2` 与 `migratePersistedStudioState`；v1 快照补齐字段后继续可用，只有结构损坏才回退种子。见 [docs/11](11-RENDER-SLICE.md) §4。
 
 ### 2.4 前端性能（已不再是瓶颈）
 
@@ -173,6 +177,30 @@ SHA256 已记录进 manifest
 | IR 改造扩散到所有页面 | `sceneSchema` 改动触发 20+ 文件编译失败 | 先在 `domain` 加兼容字段并补默认值，页面逐页迁移，不一次性重写 |
 | Remotion 版本与 React 19 不兼容 | 装包即报 peer 冲突 | 先做 30 分钟 spike（单独目录），确认后再进 monorepo |
 | 用占位图冒充演示 | 审核页看不出 `real_demo` 是假的 | 占位必须带「未接入真实录屏」水印；`Asset.mock` 字段已在 `schemas.ts:246` 等候 |
+
+### 执行状态（2026-11-20）
+
+| ID | 状态 | 证据 |
+|---|---|---|
+| S1-1 | ✅ 完成 | `libs/domain/src/schemas.ts`：`sceneVisualSchema` 判别联合、`revision`、`durationFrames`、`VideoProject.fps`；`render.test.ts` 覆盖联合接受 / 拒绝与非法 `visualType` |
+| S1-2 | ✅ 完成 | `libs/render`：`StoryboardComposition` 只消费 `RenderInputV1`，无网络 / 随机 / 时钟；`calculateStoryboardMetadata` 为纯函数并有单测 |
+| S1-3 | ✅ 完成 | `title` / `motion_graphics` / `cta` / `generated_visual` / `real_demo` 五种组件；占位含 `MOCK`、hazard stripes、`未接入真实录屏`、`PLACEHOLDER` 与红色徽标 |
+| S1-4 | ✅ 完成 | `workers/render-worker/src/render-fixture.ts`：bundle → `selectComposition` 元数据核对 → `renderMedia` → 全片解码 + ffprobe；任一步失败非 0 退出并写 manifest |
+| S1-5 | ✅ 完成 | `libs/domain/src/render.ts`：`artifactReceiptV1Schema` / `renderManifestV1Schema`，含 sha256、时长、尺寸、fps、rendererVersion、compositionId |
+| S1-6 | ✅ 完成 | `studio-store.ts`：`STUDIO_PERSIST_VERSION = 2` + `migratePersistedStudioState`；3 个迁移测试（补齐字段、幂等、畸形输入不崩溃） |
+| S1-7 | ✅ 完成 | `workers/render-worker/fixtures/golden-30s.json`（6 场景 / 900 帧 / 30 秒）+ `pnpm render:fixture` + `pnpm verify:render` |
+
+**Exit Gate 核对**
+
+| Gate | 状态 | 证据 |
+|---|---|---|
+| 固定输入 → 可播放 MP4 | ✅ | `dist/render-worker/golden-30s/golden-30s.mp4`，5.09 MiB，可完整解码 |
+| ffprobe 编码 / 时长 / 分辨率 / fps 一致 | ✅ | h264 · 1920×1080 · 30fps · 30000ms · 900 帧 |
+| SHA256 记录进 manifest | ✅ | `b1451bfb…26ccd8a`；`pnpm verify:render` 独立复核一致 |
+| 非法 Schema 被测试拒绝 | ✅ | `libs/domain/src/render.test.ts` 13 个用例 + `studio-store.test.ts` 迁移用例 |
+| CI 跑通 render-fixture | ⚠️ 已配置，未在真实远端验证 | `.github/workflows/ci.yml` 的 `render` job；仍受 S0-1（无 `origin`）阻塞 |
+
+完整验收记录、复现步骤与边界见 [docs/11](11-RENDER-SLICE.md)。
 
 ---
 
