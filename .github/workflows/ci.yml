@@ -70,9 +70,12 @@ jobs:
 
           echo "Affected base=$BASE head=$HEAD"
 
-          # `nx show projects --affected` prints a JSON array (e.g.
-          # ["web-studio","state"]), not one name per line. Normalise it to a
-          # comma-separated list so the checks below are plain string matches.
+          # `nx show projects --affected` may print a JSON array (e.g.
+          # ["web-studio","state"]) or one project name per line, depending on
+          # the Nx output mode. Normalise either shape to a comma-separated
+          # list: deleting the newlines instead of turning them into commas
+          # would glue adjacent names together ("web-studiodomain...") and
+          # silently skip every gate below.
           #
           # A failing Nx must FAIL the job, not read as "nothing affected":
           # swallowing the error would skip every gate on a broken checkout.
@@ -82,7 +85,11 @@ jobs:
           fi
           echo "Affected projects: ${RAW:-(none)}"
 
-          LIST=$(printf '%s' "$RAW" | tr -d '[]" \t\n')
+          LIST=$(printf '%s\n' "$RAW" \
+            | tr -d '[]" \t' \
+            | tr '\n' ',' \
+            | tr -s ',' \
+            | sed 's/^,//; s/,$//')
           # Comma-wrap so a name can be matched from both ends without the
           # first or last element being missed.
           WRAPPED=",$LIST,"
