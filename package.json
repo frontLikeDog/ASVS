@@ -12,10 +12,12 @@
     "build": "nx build web-studio",
     "budget": "node scripts/check-bundle-budget.mjs",
     "lint": "nx run-many -t lint",
+    "lint:boundary-check": "node scripts/check-boundary-guard.mjs",
     "typecheck": "nx run-many -t typecheck",
     "test": "nx run-many -t test",
     "test:e2e": "nx e2e web-studio",
     "validate": "nx run-many -t lint typecheck test",
+    "validate:full": "node scripts/check-boundary-guard.mjs && nx run-many -t lint typecheck test",
     "graph": "nx graph"
   },
   "dependencies": {

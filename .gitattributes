@@ -1,0 +1,27 @@
+# `core.autocrlf=true` is set on this Windows machine, so files are checked out
+# as CRLF. These rules only pin the file types where that actually breaks CI;
+# a blanket `* text=auto` would renormalise all 150 tracked files in one commit.
+#
+# Shell / workflow scripts are executed by bash on Linux runners: a CRLF shebang
+# there fails with the infamous "$'\r': command not found".
+*.sh text eol=lf
+*.bash text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Windows-only tooling that expects CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets must never be converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.mp4 binary
+*.webm binary
+*.zip binary

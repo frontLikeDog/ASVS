@@ -17,6 +17,12 @@ export interface Toast {
 export interface UiState {
   theme: ThemeMode;
   sidebarCollapsed: boolean;
+  /**
+   * Set once the user presses the sidebar toggle. Tablet widths (768–1179px)
+   * start collapsed, and without this flag the forced collapse would swallow
+   * every toggle, leaving the topbar button visibly dead at those widths.
+   */
+  sidebarUserPref: boolean;
   lastProjectId?: string;
   demoNoticeDismissed: boolean;
   commandOpen: boolean;
@@ -38,6 +44,7 @@ export const useUiStore = create<UiState>()(
     (set) => ({
       theme: 'dark',
       sidebarCollapsed: false,
+      sidebarUserPref: false,
       lastProjectId: undefined,
       demoNoticeDismissed: false,
       commandOpen: false,
@@ -45,7 +52,8 @@ export const useUiStore = create<UiState>()(
       toasts: [],
       setTheme: (theme) => set({ theme }),
       toggleTheme: () => set((state) => ({ theme: state.theme === 'dark' ? 'light' : 'dark' })),
-      setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
+      setSidebarCollapsed: (sidebarCollapsed) =>
+        set({ sidebarCollapsed, sidebarUserPref: true }),
       setLastProjectId: (lastProjectId) => set({ lastProjectId }),
       dismissDemoNotice: () => set({ demoNoticeDismissed: true }),
       setCommandOpen: (commandOpen) => set({ commandOpen }),

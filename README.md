@@ -169,10 +169,14 @@ libs/features/production-suite  生产监控、审核导出
 
 ## 7. 测试结果（2026-11-19）
 
+> 以下数字均为 **`--skip-nx-cache` 真实重跑**得到，不是 Nx 缓存命中。CI 中同样禁用缓存。
+> 本地实测耗时（Windows 11，Node 26）：`pnpm test` 冷缓存 **约 12 秒**，
+> `pnpm test:e2e` 三个项目共 **约 2 分 0 秒**，`pnpm validate` 缓存命中约 4 秒。
+
 ### 单元测试（Vitest）
 
 ```bash
-pnpm test
+pnpm test --skip-nx-cache
 ```
 
 - **7 个测试文件，57 个测试全部通过**
@@ -185,7 +189,7 @@ pnpm test
 pnpm test:e2e
 ```
 
-- **29 个测试全部通过（约 60 秒），桌面 1440×900 + 移动端 390×844**
+- **32 个测试全部通过（约 2 分钟），桌面 1440×900 + 平板 768×1024 + 移动端 390×844**
 - 覆盖：
   - 工作台加载、无运行时 console error
   - 六步入门完成初始化并落地知识中心
@@ -196,9 +200,13 @@ pnpm test:e2e
   - 项目改名、来源同步、重置演示数据闭环
   - 视频库阶段 / 关键词筛选
   - 命令面板跳转、404 页面、主题持久化、Demo 边界弹窗
-  - 移动端抽屉导航、移动端命令面板、9 个关键页面无横向溢出
+  - 移动端抽屉导航、移动端命令面板、关键页面无横向溢出
+  - 平板 768×1024：常驻侧栏而非抽屉、10 个关键页面无横向溢出、折叠侧栏可手动展开
   - axe（WCAG 2.1 A/AA）扫描 11 个页面状态 + 浅色主题关键页面，0 违规
   - `prefers-reduced-motion: reduce` 下动画 / 过渡被压缩，交互仍可用
+
+> 平板测试在首次运行时发现并修复了一个真实缺陷：768–1179px 下 `isTablet` 强制折叠侧栏，
+> 顶栏「展开侧栏」按钮因此完全无效。现在用户主动切换后会覆盖平板的默认折叠。
 
 ### 静态检查与构建
 
@@ -209,6 +217,9 @@ pnpm build
 
 - `lint`：9 个项目通过，0 error / 0 warning
 - `typecheck`：9 个项目通过
+- `lint:boundary-check`：故意写入 3 条跨层非法 import（`domain→state`、`ui→state`、`feature→mock-services`），
+  要求 ESLint 的 `@nx/enforce-module-boundaries` **必须报错**；规则被删除或标签漂移时该脚本转为红灯
+  （普通 `lint` 在这种情况下仍然全绿，所以需要这条反向验证）
 - `build`：路由级懒加载 + `vendor-react` 拆包，构建后自动执行 bundle budget 检查
   - 初始 JS（entry + 静态依赖）：`722.6 kB` raw / `214.8 kB` gzip
   - Editor：额外 `68.9 kB` raw / `23.5 kB` gzip
@@ -218,7 +229,6 @@ pnpm build
 
 ### 已知未自动化覆盖
 
-- 平板 768 布局仍为人工浏览器抽查（移动端 390×844 已进入 Playwright 项目）。
 - 生产构建未单独跑 E2E（E2E 使用 Vite dev server）。
 - 无视觉回归 / 截图对比测试。
 - axe 扫描覆盖主要路由与命令面板；未逐一扫描每个弹窗 / Tab 的深层状态。
@@ -236,7 +246,7 @@ pnpm build
 7. **生产运行只在页面打开时推进**：这是刻意设计，用于避免后台伪造进度；刷新后运行状态按已持久化快照恢复，不会在后台继续。
 8. **模拟预览没有音频**：只有字幕与时间轴，没有真实配音；这是当前边界，不应被误解为成片。
 9. **建议弹窗文案不够精确**：部分“接受建议会升级 Claim 状态”的说明可能高估实际状态变化，需要按建议类型细化。
-10. **无 CI 配置**：质量门禁目前依赖本地命令，尚未接入 GitHub Actions 或其他流水线。
+10. **CI 只验证到本地命令等价物**：`.github/workflows/ci.yml` 已配置（`frozen-lockfile` → `nx affected` 的 lint/typecheck/test → boundary guard → build + budget → E2E），但**尚未在任何 GitHub 远端上真实跑过**——仓库当前没有 `origin`。首次推送后需要确认：`nx affected` 的 base SHA 可得、Playwright 在 Linux 上可用、文档类 PR 确实不启动 E2E。
 
 ---
 
@@ -244,7 +254,7 @@ pnpm build
 
 1. **性能**：路由懒加载、`manualChunks` 与 bundle budget 已落地；下一步是把 mock-services / 种子数据从初始状态中按需加载，并对图表等重组件继续下沉。
 2. **无障碍**：`Field` 已自动关联直接表单控件，axe 扫描已加入 E2E；下一步为移动端抽屉补 `inert` 与焦点回收，并补齐 `aria-describedby`。
-3. **测试**：移动端项目（390×844）、`prefers-reduced-motion` 与 axe 用例已加入；下一步是关键页面视觉快照，并在 CI 中跑 `validate + build + e2e`。
+3. **测试**：移动端（390×844）与平板（768×1024）项目、`prefers-reduced-motion` 与 axe 用例已加入；下一步是关键页面视觉快照。
 4. **品牌传播**：品牌变更时提供“同步更新片尾 CTA”的可选操作，并在审核中显示差异，而不是只让审核失效。
 5. **数据边界**：为 localStorage 快照增加显式 schema 迁移；提供整个工作区的导入 / 导出，而不仅是单条视频工程 JSON。
 6. **服务抽象**：把 `mock-services` 收敛到接口后接真实适配器：GitHub App、知识索引、Agent 运行时、渲染队列；在真实文件存在前，导出状态不得宣称完成。
@@ -263,6 +273,7 @@ pnpm build
 - [录屏、渲染与编辑器](docs/07-VIDEO-CAPTURE-RENDER-AND-EDITOR.md)
 - [安全、证据与 ATVG2](docs/08-SECURITY-EVIDENCE-AND-ATVG2-INTEGRATION.md)
 - [实施路线与验收](docs/09-IMPLEMENTATION-ROADMAP-AND-ACCEPTANCE.md)
+- [下一阶段排期与迭代建议](docs/10-NEXT-PHASE-PLAN.md)
 - UX 文档：
   - [前端体验计划](docs/ux/FRONTEND-EXPERIENCE-PLAN.md)
   - [信息架构](docs/ux/INFORMATION-ARCHITECTURE.md)
