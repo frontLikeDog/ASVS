@@ -32,6 +32,7 @@ function scene(id: string, order: number, durationSec: number, extra: Partial<Sc
     brightness: 1,
     vignette: false,
     ...extra,
+    revision: extra.revision ?? 1,
   };
 }
 
@@ -45,6 +46,7 @@ function video(
     title: '测试视频',
     mode: 'release_video',
     stage: 'storyboard_ready',
+    fps: 30,
     brief: {
       objective: '测试',
       audience: '测试团队',

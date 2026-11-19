@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { orderedScenes, totalDuration } from '@asvs/domain';
-import { useStudioStore } from './studio-store';
+import type { Scene, VideoProject } from '@asvs/domain';
+import { orderedScenes, studioSnapshotSchema, totalDuration } from '@asvs/domain';
+import {
+  STUDIO_PERSIST_VERSION,
+  migratePersistedStudioState,
+  useStudioStore,
+} from './studio-store';
 
 const RELEASE_VIDEO = 'vid_lumen_release';
 const TUTORIAL_VIDEO = 'vid_lumen_tutorial';
@@ -24,6 +29,82 @@ describe('工作区种子与持久化数据', () => {
     const persisted = JSON.parse(localStorage.getItem('asvs.studio.v1') ?? '{}');
     expect(persisted.state.videos).toBeDefined();
     expect(persisted.state.history).toBeUndefined();
+  });
+});
+
+describe('本地工作区迁移链', () => {
+  function stripV2Fields(
+    videos: VideoProject[],
+  ): Array<Omit<VideoProject, 'fps'> & { fps?: number }> {
+    return videos.map((video) => {
+      const clone = structuredClone(video) as unknown as Omit<VideoProject, 'fps'> & {
+        fps?: number;
+      };
+      delete clone.fps;
+      clone.scenes.forEach((scene) => {
+        const legacy = scene as unknown as Omit<
+          Scene,
+          'revision' | 'durationFrames' | 'visual'
+        > & {
+          revision?: number;
+          durationFrames?: number;
+          visual?: Scene['visual'];
+        };
+        delete legacy.revision;
+        delete legacy.durationFrames;
+        delete legacy.visual;
+      });
+      return clone;
+    });
+  }
+
+  it('v1 快照迁移到 v2 后补齐 fps、revision、durationFrames 与 visual', () => {
+    const state = store();
+    const persisted = {
+      projects: state.projects,
+      features: state.features,
+      claims: state.claims,
+      evidence: state.evidence,
+      pullRequests: state.pullRequests,
+      releases: state.releases,
+      suggestions: state.suggestions,
+      assets: state.assets,
+      templates: state.templates,
+      videos: stripV2Fields(state.videos),
+      runs: state.runs,
+      exports: state.exports,
+      activity: state.activity,
+    };
+
+    const migrated = migratePersistedStudioState(persisted, 1) as typeof persisted;
+    const parsed = studioSnapshotSchema.parse(migrated);
+
+    expect(parsed.videos.length).toBe(persisted.videos.length);
+    for (const video of parsed.videos) {
+      expect(video.fps).toBe(30);
+      for (const scene of video.scenes) {
+        expect(scene.revision).toBe(1);
+        expect(scene.durationFrames).toBe(Math.max(1, Math.round(scene.durationSec * video.fps)));
+        expect(scene.visual).toBeDefined();
+        expect(scene.visual?.type).toBe(
+          scene.visualType === 'motion'
+            ? 'motion_graphics'
+            : scene.visualType === 'generated'
+              ? 'generated_visual'
+              : scene.visualType,
+        );
+      }
+    }
+  });
+
+  it('已经是 v2 的快照不会被二次迁移', () => {
+    const persisted = { videos: store().videos };
+    expect(migratePersistedStudioState(persisted, STUDIO_PERSIST_VERSION)).toBe(persisted);
+  });
+
+  it('形状损坏的快照不抛错，留给 merge 回退到种子', () => {
+    expect(() => migratePersistedStudioState({ videos: 'broken' }, 1)).not.toThrow();
+    expect(migratePersistedStudioState(null, 1)).toBeNull();
   });
 });
 

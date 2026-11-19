@@ -284,6 +284,38 @@ export const SCENE_VISUAL_TYPES = ['real_demo', 'motion', 'generated', 'title', 
 export const sceneVisualTypeSchema = z.enum(SCENE_VISUAL_TYPES);
 export type SceneVisualType = z.infer<typeof sceneVisualTypeSchema>;
 
+/**
+ * Render IR visual discriminator (docs/05 §4, extended with the editor's
+ * `title` / `cta` scenes). `real_demo` deliberately allows a missing
+ * `demoPlanId` until Step 2 wires real capture; the renderer must show a
+ * non-passable placeholder in that case.
+ */
+export const sceneVisualSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('title') }).strict(),
+  z.object({ type: z.literal('cta') }).strict(),
+  z
+    .object({
+      type: z.literal('real_demo'),
+      demoPlanId: idSchema.optional(),
+      assetId: idSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('motion_graphics'),
+      templateId: idSchema,
+      props: z.record(z.unknown()).default({}),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('generated_visual'),
+      assetId: idSchema.optional(),
+    })
+    .strict(),
+]);
+export type SceneVisual = z.infer<typeof sceneVisualSchema>;
+
 export const SCENE_STATUSES = ['draft', 'approved', 'review'] as const;
 export const sceneStatusSchema = z.enum(SCENE_STATUSES);
 export type SceneStatus = z.infer<typeof sceneStatusSchema>;
@@ -313,12 +345,18 @@ export type VideoBrief = z.infer<typeof videoBriefSchema>;
 export const sceneSchema = z.object({
   id: idSchema,
   order: z.number().int().min(0),
+  /** Monotonic revision for invalidation; bumped whenever the scene changes. */
+  revision: z.number().int().min(1).default(1),
   title: z.string(),
   intent: z.string(),
   narration: z.string(),
   caption: z.string(),
   durationSec: z.number().min(2).max(120),
+  /** Optional frame cache. `buildStoryboardV1` re-derives it from durationSec. */
+  durationFrames: z.number().int().min(1).optional(),
   visualType: sceneVisualTypeSchema,
+  /** Structured render IR. Absent on data persisted before the v2 migration. */
+  visual: sceneVisualSchema.optional(),
   templateId: idSchema,
   featureId: idSchema.optional(),
   claimIds: z.array(idSchema),
@@ -355,12 +393,16 @@ export const reviewStateSchema = z.object({
 });
 export type ReviewState = z.infer<typeof reviewStateSchema>;
 
+export const DEFAULT_VIDEO_FPS = 30;
+
 export const videoProjectSchema = z.object({
   id: idSchema,
   projectId: idSchema,
   title: z.string().min(1),
   mode: videoModeSchema,
   stage: videoStageSchema,
+  /** Timeline frame rate. Frozen when a storyboard is built. */
+  fps: z.number().int().min(1).max(60).default(DEFAULT_VIDEO_FPS),
   brief: videoBriefSchema,
   scenes: z.array(sceneSchema),
   directorMessages: z.array(directorMessageSchema),

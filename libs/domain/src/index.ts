@@ -1,4 +1,5 @@
 export * from './schemas';
+export * from './render';
 export * from './timeline';
 export * from './format';
 export * from './production';

@@ -160,6 +160,7 @@ function buildFeatureScene({
   return {
     id: newId('scene'),
     order,
+    revision: 1,
     title,
     intent: `展示功能：${feature.name}`,
     narration,
@@ -284,6 +285,7 @@ export function createVideoPlan(input: CreateVideoPlanInput): VideoProject {
   scenes.push({
     id: newId('scene'),
     order: 0,
+    revision: 1,
     title: titleCopy.title,
     intent: '建立注意力并提出本期视频的核心问题',
     narration: titleCopy.narration,
@@ -339,6 +341,7 @@ export function createVideoPlan(input: CreateVideoPlanInput): VideoProject {
   scenes.push({
     id: newId('scene'),
     order: scenes.length,
+    revision: 1,
     title: ctaCopy.title,
     intent: '收束叙事并给出行动号召',
     narration: ctaCopy.narration,
@@ -365,6 +368,7 @@ export function createVideoPlan(input: CreateVideoPlanInput): VideoProject {
     title: input.videoTitle.trim() || `${project.productName} · ${VIDEO_MODE_INFO[mode].shortLabel}`,
     mode,
     stage: 'script_review',
+    fps: 30,
     brief: { ...brief, durationSec: actualDuration },
     scenes: timedScenes,
     directorMessages: [

@@ -27,6 +27,7 @@ function scene(id: string, order: number, durationSec: number, extra: Partial<Sc
     brightness: 1,
     vignette: false,
     ...extra,
+    revision: extra.revision ?? 1,
   };
 }
 
@@ -107,6 +108,7 @@ function makeVideo(extra: Partial<VideoProject> = {}): VideoProject {
     title: '待审核视频',
     mode: 'release_video',
     stage: 'review',
+    fps: 30,
     brief: {
       objective: '测试',
       audience: '团队',

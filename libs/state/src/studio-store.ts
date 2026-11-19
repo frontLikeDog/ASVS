@@ -28,8 +28,11 @@ import type {
 } from '@asvs/domain';
 import type { SyncKnowledgeResult } from '@asvs/mock-services';
 import {
+  DEFAULT_VIDEO_FPS,
+  deriveSceneVisual,
   normalizeSceneOrder,
   orderedScenes,
+  sceneDurationFrames,
   studioSnapshotSchema,
   syncBriefDuration,
   totalDuration,
@@ -99,6 +102,50 @@ export interface ExportStartResult {
 export interface ReviewDecisionResult {
   ok: boolean;
   message: string;
+}
+
+/**
+ * Persisted snapshot version. Bump this whenever `studioSnapshotSchema` gains
+ * required fields and add a step to `migratePersistedStudioState`.
+ */
+export const STUDIO_PERSIST_VERSION = 2;
+
+/**
+ * Explicit v1 → v2 migration. v1 scenes only had the flat `visualType`; v2
+ * adds the render IR (`visual`), `revision` and a frame cache, and videos get
+ * an explicit `fps`. Never drop data here: unknown shapes are left untouched
+ * so the `merge` validator can fall back to the seed instead of crashing.
+ */
+export function migratePersistedStudioState(persisted: unknown, fromVersion: number): unknown {
+  if (!persisted || typeof persisted !== 'object') return persisted;
+  if (fromVersion >= STUDIO_PERSIST_VERSION) return persisted;
+
+  const candidate = persisted as Partial<StudioData> & Record<string, unknown>;
+  if (!Array.isArray(candidate.videos)) return persisted;
+
+  const videos = candidate.videos.map((video) => {
+    const legacy = video as VideoProject & { fps?: number };
+    const fps = legacy.fps ?? DEFAULT_VIDEO_FPS;
+    return {
+      ...legacy,
+      fps,
+      scenes: legacy.scenes.map((scene) => {
+        const legacyScene = scene as Scene & {
+          revision?: number;
+          durationFrames?: number;
+          visual?: Scene['visual'];
+        };
+        return {
+          ...legacyScene,
+          revision: legacyScene.revision ?? 1,
+          durationFrames: legacyScene.durationFrames ?? sceneDurationFrames(legacyScene, fps),
+          visual: legacyScene.visual ?? deriveSceneVisual(legacyScene),
+        };
+      }),
+    };
+  });
+
+  return { ...candidate, videos };
 }
 
 export interface StudioState extends StudioData {
@@ -567,6 +614,7 @@ export const useStudioStore = create<StudioState>()(
         const scene: Scene = {
           id: newId('scene'),
           order: targetIndex + 1,
+          revision: 1,
           title: '新镜头',
           intent: '补充一个可验证的产品瞬间',
           narration: '在这里补充旁白。',
@@ -1038,7 +1086,8 @@ export const useStudioStore = create<StudioState>()(
     }),
     {
       name: 'asvs.studio.v1',
-      version: 1,
+      version: STUDIO_PERSIST_VERSION,
+      migrate: (persisted, version) => migratePersistedStudioState(persisted, version),
       partialize: (state) => {
         const { history: _history, ...rest } = state;
         return rest;

@@ -25,6 +25,7 @@ function scene(id: string, order: number, durationSec: number, extra: Partial<Sc
     brightness: 1,
     vignette: false,
     ...extra,
+    revision: extra.revision ?? 1,
   };
 }
 
@@ -105,6 +106,7 @@ function makeVideo(scenes: Scene[]): VideoProject {
     title: 'Atlas 自动化更新',
     mode: 'release_video',
     stage: 'review',
+    fps: 30,
     brief: {
       objective: '介绍自动化规则',
       audience: '运营团队',

@@ -182,6 +182,7 @@ function BrandSettings({ project }: { project: Project }) {
       return {
         id: 'brand-preview',
         order: 8,
+        revision: 1,
         title: draft.outro || '现在开始使用',
         intent: '',
         narration: '',
@@ -201,6 +202,7 @@ function BrandSettings({ project }: { project: Project }) {
       return {
         id: 'brand-preview',
         order: 3,
+        revision: 1,
         title: firstFeature?.name ?? '把反馈变成产品决策',
         intent: firstFeature?.summary ?? '从证据到成片，保持每句话都可追溯。',
         narration: '',
@@ -219,6 +221,7 @@ function BrandSettings({ project }: { project: Project }) {
     return {
       id: 'brand-preview',
       order: 0,
+      revision: 1,
       title: draft.intro || project.productName,
       intent: project.description || '产品价值，从事实开始。',
       narration: '',

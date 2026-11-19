@@ -10,6 +10,7 @@ import {
 const scene: Scene = {
   id: 'a',
   order: 0,
+  revision: 1,
   title: '镜头',
   intent: '',
   narration: '旁白',
@@ -30,6 +31,7 @@ const video: VideoProject = {
   title: '导出测试',
   mode: 'release_video',
   stage: 'approved',
+  fps: 30,
   brief: {
     objective: '',
     audience: '',

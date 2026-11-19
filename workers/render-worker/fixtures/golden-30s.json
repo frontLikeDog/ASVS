@@ -1,0 +1,589 @@
+{
+  "schemaVersion": "1",
+  "kind": "asvs.render-fixture",
+  "note": "固定 30 秒黄金输入。分镜时长在 build-golden.ts 中钉死，避免种子文案变化影响基线。",
+  "generatedFrom": "libs/mock-data/src/lumen.ts · vid_lumen_release",
+  "video": {
+    "id": "vid_lumen_release",
+    "projectId": "proj_lumen",
+    "title": "Lumen 2.8 · 让问题更快被看见",
+    "mode": "release_video",
+    "stage": "review",
+    "fps": 30,
+    "brief": {
+      "objective": "介绍 2.8 版本中协作看板与权限化分享的用户价值，并克制地提及异常提示能力。",
+      "audience": "产品与数据团队负责人",
+      "featureIds": [
+        "feat_lumen_collab",
+        "feat_lumen_anomaly",
+        "feat_lumen_share"
+      ],
+      "releaseId": "rel_lumen_280",
+      "durationSec": 30,
+      "aspect": "16:9",
+      "language": "zh-CN",
+      "tone": "confident",
+      "style": "editorial",
+      "templateId": "tpl_signal",
+      "useRealCapture": true,
+      "useGeneratedVisuals": false,
+      "cta": "在 Lumen 中开始一次共同复盘",
+      "bannedPhrases": [
+        "行业最强",
+        "100% 准确",
+        "完全自动"
+      ]
+    },
+    "scenes": [
+      {
+        "id": "scene_a1",
+        "order": 0,
+        "revision": 1,
+        "title": "数据变快了，协作没有",
+        "intent": "提出问题：分析速度提升，但团队判断仍散落在不同窗口",
+        "narration": "数据越来越快，团队的判断却还散落在不同的窗口里。",
+        "caption": "数据变快了，协作没有。",
+        "durationSec": 5,
+        "durationFrames": 150,
+        "visualType": "motion",
+        "visual": {
+          "type": "motion_graphics",
+          "templateId": "tpl_signal",
+          "props": {}
+        },
+        "templateId": "tpl_signal",
+        "claimIds": [],
+        "assetId": "asset_motion_data",
+        "status": "approved",
+        "look": "cinematic",
+        "brightness": 1,
+        "vignette": true
+      },
+      {
+        "id": "scene_a2",
+        "order": 1,
+        "revision": 1,
+        "title": "两个人，同一块看板",
+        "intent": "展示多人同时编辑同一看板",
+        "narration": "在 Lumen 2.8 里，团队成员可以同时打开同一块看板。",
+        "caption": "同一块看板，两个人一起改。",
+        "durationSec": 6.5,
+        "durationFrames": 195,
+        "visualType": "real_demo",
+        "visual": {
+          "type": "real_demo",
+          "assetId": "asset_cap_collab"
+        },
+        "templateId": "tpl_signal",
+        "featureId": "feat_lumen_collab",
+        "claimIds": [
+          "claim_lumen_collab"
+        ],
+        "assetId": "asset_cap_collab",
+        "status": "approved",
+        "look": "warm",
+        "brightness": 1.04,
+        "vignette": true
+      },
+      {
+        "id": "scene_a3",
+        "order": 2,
+        "revision": 1,
+        "title": "实时看见彼此",
+        "intent": "强调光标与改动实时可见，建立协作价值",
+        "narration": "谁的判断停在哪个指标上，彼此都能实时看见。",
+        "caption": "光标与改动，实时可见。",
+        "durationSec": 6,
+        "durationFrames": 180,
+        "visualType": "real_demo",
+        "visual": {
+          "type": "real_demo",
+          "assetId": "asset_cap_collab"
+        },
+        "templateId": "tpl_signal",
+        "featureId": "feat_lumen_collab",
+        "claimIds": [
+          "claim_lumen_collab"
+        ],
+        "assetId": "asset_cap_collab",
+        "status": "approved",
+        "look": "warm",
+        "brightness": 1.04,
+        "vignette": true
+      },
+      {
+        "id": "scene_a4",
+        "order": 3,
+        "revision": 1,
+        "title": "异常先于你被发现",
+        "intent": "介绍 AI 异常检测，并明确它只是辅助建议",
+        "narration": "异常出现时，Lumen 会先一步提示可能的原因。它只是助手，最终判断仍在你手上。",
+        "caption": "AI 提示异常，但判断仍由你确认。",
+        "durationSec": 5,
+        "durationFrames": 150,
+        "visualType": "motion",
+        "visual": {
+          "type": "motion_graphics",
+          "templateId": "tpl_grid",
+          "props": {}
+        },
+        "templateId": "tpl_grid",
+        "featureId": "feat_lumen_anomaly",
+        "claimIds": [
+          "claim_lumen_anomaly"
+        ],
+        "assetId": "asset_generated_aurora",
+        "status": "review",
+        "look": "clean",
+        "brightness": 0.98,
+        "vignette": true,
+        "notes": "Claim 为 supported：字幕需保留“提示 / 辅助”的限定。"
+      },
+      {
+        "id": "scene_a5",
+        "order": 4,
+        "revision": 1,
+        "title": "一键分享，权限可控",
+        "intent": "展示分享报告的权限控制",
+        "narration": "需要同步给同事时，生成一个带权限的分享链接，只读或可编辑，由你决定。",
+        "caption": "一键分享，权限由你决定。",
+        "durationSec": 5,
+        "durationFrames": 150,
+        "visualType": "real_demo",
+        "visual": {
+          "type": "real_demo",
+          "assetId": "asset_cap_share"
+        },
+        "templateId": "tpl_signal",
+        "featureId": "feat_lumen_share",
+        "claimIds": [
+          "claim_lumen_share"
+        ],
+        "assetId": "asset_cap_share",
+        "status": "approved",
+        "look": "warm",
+        "brightness": 1.02,
+        "vignette": true
+      },
+      {
+        "id": "scene_a6",
+        "order": 5,
+        "revision": 1,
+        "title": "把下一次复盘，变成一次共同看见",
+        "intent": "品牌收束与行动号召",
+        "narration": "把下一次复盘，变成一次共同看见。在 Lumen 中开始协作。",
+        "caption": "把下一次复盘，变成一次共同看见。",
+        "durationSec": 2.5,
+        "durationFrames": 75,
+        "visualType": "cta",
+        "visual": {
+          "type": "cta"
+        },
+        "templateId": "tpl_signal",
+        "claimIds": [],
+        "status": "draft",
+        "look": "clean",
+        "brightness": 1,
+        "vignette": true
+      }
+    ],
+    "directorMessages": [
+      {
+        "id": "dm_a1",
+        "role": "assistant",
+        "text": "我已经基于 v2.8.0 的功能证据整理了一版 32 秒的更新视频。协作看板是已核验的主卖点；AI 异常检测目前只有代码与评估证据，我在文案里加了“提示 / 由你确认”的限定。你可以让我缩短时长、换语气，或调整镜头顺序。",
+        "at": "2026-11-13T06:32:00.000Z"
+      },
+      {
+        "id": "dm_a2",
+        "role": "user",
+        "text": "把 AI 异常检测的表述再克制一点",
+        "at": "2026-11-13T06:40:00.000Z"
+      },
+      {
+        "id": "dm_a3",
+        "role": "assistant",
+        "text": "已把镜头 4 收敛为辅助性表述，避免暗示全自动决策。镜头时长与总时长保持不变。",
+        "at": "2026-11-13T06:40:20.000Z",
+        "changes": [
+          {
+            "field": "scene.scene_a4.caption",
+            "label": "镜头 4 字幕",
+            "from": "AI 自动发现问题。",
+            "to": "AI 提示异常，但判断仍由你确认。"
+          }
+        ]
+      }
+    ],
+    "scriptVersion": 3,
+    "createdAt": "2026-11-13T06:30:00.000Z",
+    "updatedAt": "2026-11-14T11:10:00.000Z",
+    "producedAt": "2026-11-14T11:16:00.000Z",
+    "review": {
+      "status": "pending"
+    },
+    "demo": true
+  },
+  "project": {
+    "id": "proj_lumen",
+    "name": "Lumen Analytics",
+    "productName": "Lumen Analytics",
+    "description": "面向 SaaS 团队的产品数据协作平台，把指标、看板与洞察放在同一个工作空间，让团队一起看见问题。",
+    "website": "https://lumen.demo.invalid",
+    "stage": "active",
+    "brand": {
+      "logoText": "LUMEN",
+      "logoMark": "orbit",
+      "primary": "#FF7A59",
+      "secondary": "#FFD5B8",
+      "fontPair": "grotesk",
+      "style": "editorial",
+      "intro": "让每个团队看见产品的真实脉搏",
+      "outro": "lumen.demo.invalid · 预约一次产品演示"
+    },
+    "sources": [
+      {
+        "id": "src_lumen_github",
+        "kind": "github",
+        "name": "lumen-analytics/app",
+        "detail": "只读 · main 分支 · Demo 仓库",
+        "status": "connected",
+        "scope": "repo:read, pull_requests:read",
+        "lastSyncedAt": "2026-11-14T09:12:00.000Z",
+        "demo": true
+      },
+      {
+        "id": "src_lumen_docs",
+        "kind": "docs",
+        "name": "Lumen 产品文档",
+        "detail": "12 页 · 已导入（模拟）",
+        "status": "connected",
+        "scope": "read",
+        "lastSyncedAt": "2026-11-14T09:10:00.000Z",
+        "demo": true
+      },
+      {
+        "id": "src_lumen_staging",
+        "kind": "website",
+        "name": "staging.lumen.demo.invalid",
+        "detail": "演示环境 · 只读 · fixture 重置",
+        "status": "connected",
+        "scope": "allowlist: staging.lumen.demo.invalid",
+        "lastSyncedAt": "2026-11-14T09:11:00.000Z",
+        "demo": true
+      }
+    ],
+    "defaultAspect": "16:9",
+    "defaultLanguage": "zh-CN",
+    "templateId": "tpl_signal",
+    "analysisCount": 3,
+    "createdAt": "2026-10-02T03:20:00.000Z",
+    "updatedAt": "2026-11-14T10:30:00.000Z",
+    "demo": true
+  },
+  "features": [
+    {
+      "id": "feat_lumen_collab",
+      "projectId": "proj_lumen",
+      "name": "实时协作看板",
+      "summary": "多名团队成员可以同时编辑同一块看板，并实时看到彼此的光标与修改，适合复盘、联合作战与跨职能评审。",
+      "category": "实时协作",
+      "status": "deployed",
+      "confidence": 94,
+      "userConfirmed": true,
+      "sourceRefs": [
+        {
+          "kind": "pr",
+          "label": "PR #482 · 多人光标与在线状态",
+          "detail": "已合并到 main · 2026-11-08"
+        },
+        {
+          "kind": "file",
+          "label": "apps/web/src/board/presence.ts",
+          "detail": "在线状态与光标同步实现"
+        },
+        {
+          "kind": "runtime",
+          "label": "预发布环境 · 双人协作验证",
+          "detail": "断言通过 · 2026-11-12"
+        },
+        {
+          "kind": "doc",
+          "label": "协作看板使用指南",
+          "detail": "docs/collaboration.md"
+        }
+      ],
+      "claimIds": [
+        "claim_lumen_collab"
+      ],
+      "prIds": [
+        "pr_lumen_482"
+      ],
+      "demoRoute": "/demo/boards/atlas",
+      "updatedAt": "2026-11-14T09:12:00.000Z",
+      "tags": [
+        "协作",
+        "看板",
+        "实时"
+      ],
+      "demo": true
+    },
+    {
+      "id": "feat_lumen_anomaly",
+      "projectId": "proj_lumen",
+      "name": "AI 异常检测",
+      "summary": "在看板中自动标记指标异常波动，并给出可能原因。当前为预发布能力，结论需要用户确认，不替代人工判断。",
+      "category": "智能洞察",
+      "status": "implemented",
+      "confidence": 78,
+      "userConfirmed": false,
+      "sourceRefs": [
+        {
+          "kind": "pr",
+          "label": "PR #498 · 看板异常提示",
+          "detail": "已合并 · 尚未部署到公开环境"
+        },
+        {
+          "kind": "doc",
+          "label": "异常检测模型评估摘要 v0.3",
+          "detail": "离线评估，不构成公开可用性证据"
+        }
+      ],
+      "claimIds": [
+        "claim_lumen_anomaly"
+      ],
+      "prIds": [
+        "pr_lumen_498"
+      ],
+      "demoRoute": "/demo/insights/anomaly",
+      "updatedAt": "2026-11-14T09:12:00.000Z",
+      "tags": [
+        "AI",
+        "异常检测",
+        "预发布"
+      ],
+      "demo": true
+    },
+    {
+      "id": "feat_lumen_share",
+      "projectId": "proj_lumen",
+      "name": "一键分享报告",
+      "summary": "把任意看板或报告生成带权限控制的分享链接，支持只读 / 可编辑，并可在需要时撤销访问。",
+      "category": "协作",
+      "status": "deployed",
+      "confidence": 96,
+      "userConfirmed": true,
+      "sourceRefs": [
+        {
+          "kind": "pr",
+          "label": "PR #475 · 带权限的分享链接",
+          "detail": "已合并并部署到 staging"
+        },
+        {
+          "kind": "runtime",
+          "label": "分享流程运行时证据",
+          "detail": "权限切换与撤销通过断言"
+        }
+      ],
+      "claimIds": [
+        "claim_lumen_share"
+      ],
+      "prIds": [
+        "pr_lumen_475"
+      ],
+      "demoRoute": "/demo/reports/share",
+      "updatedAt": "2026-11-14T09:12:00.000Z",
+      "tags": [
+        "分享",
+        "权限",
+        "报告"
+      ],
+      "demo": true
+    },
+    {
+      "id": "feat_lumen_funnel",
+      "projectId": "proj_lumen",
+      "name": "自定义漏斗分析",
+      "summary": "通过拖拽创建多步漏斗，实时对比各步骤转化率，无需编写 SQL。",
+      "category": "分析",
+      "status": "verified",
+      "confidence": 89,
+      "userConfirmed": true,
+      "sourceRefs": [
+        {
+          "kind": "doc",
+          "label": "漏斗分析产品说明",
+          "detail": "docs/funnel.md · 2026-09 更新"
+        },
+        {
+          "kind": "runtime",
+          "label": "漏斗构建 E2E",
+          "detail": "4/4 assertions passed"
+        }
+      ],
+      "claimIds": [
+        "claim_lumen_funnel"
+      ],
+      "prIds": [
+        "pr_lumen_455"
+      ],
+      "demoRoute": "/demo/funnels/new",
+      "updatedAt": "2026-10-20T07:30:00.000Z",
+      "tags": [
+        "漏斗",
+        "分析",
+        "无代码"
+      ],
+      "demo": true
+    },
+    {
+      "id": "feat_lumen_connectors",
+      "projectId": "proj_lumen",
+      "name": "数据源连接器",
+      "summary": "支持 Snowflake、BigQuery 等常见数据源的连接与同步，具体可用范围取决于部署环境。",
+      "category": "数据接入",
+      "status": "implemented",
+      "confidence": 71,
+      "userConfirmed": false,
+      "sourceRefs": [
+        {
+          "kind": "doc",
+          "label": "数据源连接器文档",
+          "detail": "12 种数据源的配置说明"
+        },
+        {
+          "kind": "file",
+          "label": "packages/connectors/registry.ts",
+          "detail": "连接器注册表"
+        }
+      ],
+      "claimIds": [
+        "claim_lumen_connectors"
+      ],
+      "prIds": [],
+      "demoRoute": "/demo/settings/connections",
+      "updatedAt": "2026-10-18T04:20:00.000Z",
+      "tags": [
+        "数据源",
+        "集成"
+      ],
+      "demo": true
+    },
+    {
+      "id": "feat_lumen_dark",
+      "projectId": "proj_lumen",
+      "name": "移动端深色模式",
+      "summary": "移动 Web 支持跟随系统的深色模式。当前证据已过期，需要重新验证后才能用于对外宣传。",
+      "category": "移动体验",
+      "status": "stale",
+      "confidence": 62,
+      "userConfirmed": false,
+      "sourceRefs": [
+        {
+          "kind": "pr",
+          "label": "PR #441 · 深色模式跟随系统",
+          "detail": "Beta 环境 · 2026-08-30"
+        },
+        {
+          "kind": "runtime",
+          "label": "移动端运行时证据",
+          "detail": "已过期 · 超过 30 天有效期"
+        }
+      ],
+      "claimIds": [
+        "claim_lumen_dark"
+      ],
+      "prIds": [
+        "pr_lumen_441"
+      ],
+      "demoRoute": "/demo/mobile/preview",
+      "updatedAt": "2026-09-02T03:00:00.000Z",
+      "tags": [
+        "移动端",
+        "深色模式",
+        "Beta"
+      ],
+      "demo": true
+    }
+  ],
+  "assets": [
+    {
+      "id": "asset_cap_collab",
+      "projectId": "proj_lumen",
+      "name": "双人协作录屏",
+      "kind": "capture",
+      "durationSec": 16,
+      "description": "两位成员同时编辑 Atlas 看板，光标、在线成员与冲突合并可见。",
+      "palette": [
+        "#FF7A59",
+        "#F5C9A8"
+      ],
+      "mock": true
+    },
+    {
+      "id": "asset_cap_share",
+      "projectId": "proj_lumen",
+      "name": "分享权限录屏",
+      "kind": "capture",
+      "durationSec": 11,
+      "description": "从看板生成分享链接，并切换只读 / 可编辑权限。",
+      "palette": [
+        "#FFB15C",
+        "#FF7A59"
+      ],
+      "mock": true
+    },
+    {
+      "id": "asset_cap_funnel",
+      "projectId": "proj_lumen",
+      "name": "漏斗搭建录屏",
+      "kind": "capture",
+      "durationSec": 12,
+      "description": "拖拽三个步骤组成漏斗，右侧实时显示转化率。",
+      "palette": [
+        "#FFD08A",
+        "#E96A45"
+      ],
+      "mock": true
+    },
+    {
+      "id": "asset_motion_data",
+      "projectId": "proj_lumen",
+      "name": "数据流问题动效",
+      "kind": "b-roll",
+      "durationSec": 8,
+      "description": "散落的数据卡片与断开的连线，用于提出问题。",
+      "palette": [
+        "#392C28",
+        "#FF7A59"
+      ],
+      "mock": true
+    },
+    {
+      "id": "asset_generated_aurora",
+      "projectId": "proj_lumen",
+      "name": "抽象光晕素材",
+      "kind": "b-roll",
+      "durationSec": 9,
+      "description": "生成式抽象背景（模拟），仅用于氛围，不证明任何产品能力。",
+      "palette": [
+        "#6A3CD1",
+        "#FF9A76"
+      ],
+      "mock": true
+    },
+    {
+      "id": "asset_audio_brand",
+      "projectId": "proj_lumen",
+      "name": "品牌背景音乐",
+      "kind": "audio",
+      "durationSec": 40,
+      "description": "120 BPM · 模拟授权音乐，仅作时间轴占位。",
+      "palette": [
+        "#241E1A",
+        "#FF7A59"
+      ],
+      "mock": true
+    }
+  ]
+}

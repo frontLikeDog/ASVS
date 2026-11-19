@@ -923,6 +923,7 @@ function previewScene(
   return {
     id: 'wizard-preview',
     order: 0,
+    revision: 1,
     title: title || '产品影像',
     intent: objective,
     narration: '',
