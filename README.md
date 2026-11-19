@@ -64,7 +64,7 @@ pnpm build
 pnpm validate
 ```
 
-生产构建产物输出到 `dist/apps/web-studio`。
+生产构建产物输出到 `dist/apps/web-studio`。`pnpm build` 会在构建后执行 `bundle-budget.json` 中的体积预算，超限即失败。
 
 ---
 
@@ -167,12 +167,16 @@ libs/features/production-suite  生产监控、审核导出
 
 ---
 
-## 7. 测试结果（2026-11-15）
+## 7. 测试结果（2026-11-19）
+
+> 以下数字均为 **`--skip-nx-cache` 真实重跑**得到，不是 Nx 缓存命中。CI 中同样禁用缓存。
+> 本地实测耗时（Windows 11，Node 26）：`pnpm test` 冷缓存 **约 12 秒**，
+> `pnpm test:e2e` 三个项目共 **约 2 分 0 秒**，`pnpm validate` 缓存命中约 4 秒。
 
 ### 单元测试（Vitest）
 
 ```bash
-pnpm test
+pnpm test --skip-nx-cache
 ```
 
 - **7 个测试文件，57 个测试全部通过**
@@ -185,7 +189,7 @@ pnpm test
 pnpm test:e2e
 ```
 
-- **11 个测试全部通过（约 28 秒，桌面 1440×900）**
+- **32 个测试全部通过（约 2 分钟），桌面 1440×900 + 平板 768×1024 + 移动端 390×844**
 - 覆盖：
   - 工作台加载、无运行时 console error
   - 六步入门完成初始化并落地知识中心
@@ -196,6 +200,13 @@ pnpm test:e2e
   - 项目改名、来源同步、重置演示数据闭环
   - 视频库阶段 / 关键词筛选
   - 命令面板跳转、404 页面、主题持久化、Demo 边界弹窗
+  - 移动端抽屉导航、移动端命令面板、关键页面无横向溢出
+  - 平板 768×1024：常驻侧栏而非抽屉、10 个关键页面无横向溢出、折叠侧栏可手动展开
+  - axe（WCAG 2.1 A/AA）扫描 11 个页面状态 + 浅色主题关键页面，0 违规
+  - `prefers-reduced-motion: reduce` 下动画 / 过渡被压缩，交互仍可用
+
+> 平板测试在首次运行时发现并修复了一个真实缺陷：768–1179px 下 `isTablet` 强制折叠侧栏，
+> 顶栏「展开侧栏」按钮因此完全无效。现在用户主动切换后会覆盖平板的默认折叠。
 
 ### 静态检查与构建
 
@@ -206,37 +217,44 @@ pnpm build
 
 - `lint`：9 个项目通过，0 error / 0 warning
 - `typecheck`：9 个项目通过
-- `build`：2280 modules，构建成功；主 JS `983.36 kB`（gzip `285.16 kB`），Vite 提示超过 500 kB
+- `lint:boundary-check`：故意写入 3 条跨层非法 import（`domain→state`、`ui→state`、`feature→mock-services`），
+  要求 ESLint 的 `@nx/enforce-module-boundaries` **必须报错**；规则被删除或标签漂移时该脚本转为红灯
+  （普通 `lint` 在这种情况下仍然全绿，所以需要这条反向验证）
+- `build`：路由级懒加载 + `vendor-react` 拆包，构建后自动执行 bundle budget 检查
+  - 初始 JS（entry + 静态依赖）：`722.6 kB` raw / `214.8 kB` gzip
+  - Editor：额外 `68.9 kB` raw / `23.5 kB` gzip
+  - Production：额外 `32.7 kB` raw / `13.4 kB` gzip
+  - Review：额外 `28.9 kB` raw / `10.6 kB` gzip
+  - 预算配置见 `bundle-budget.json`；任一预算超限会使 `pnpm build` 失败
 
 ### 已知未自动化覆盖
 
-- 移动端 390 / 平板 768 布局为人工浏览器抽查，尚无 Playwright 移动项目。
-- 减少动效偏好（`prefers-reduced-motion`）未做自动化验证。
 - 生产构建未单独跑 E2E（E2E 使用 Vite dev server）。
 - 无视觉回归 / 截图对比测试。
+- axe 扫描覆盖主要路由与命令面板；未逐一扫描每个弹窗 / Tab 的深层状态。
 
 ---
 
 ## 8. 已知 UX 缺口
 
-1. **单包体积偏大**：尚未做路由级懒加载或 vendor 拆包，构建有 500 kB 警告；首屏在慢网下会偏慢。
+1. **初始包仍偏大**：路由已拆分，但初始 chunk 仍包含整个 Zustand 工作区、种子数据与 mock-services（约 `214.8 kB` gzip）；进一步下沉需要在 action 内按需导入服务。
 2. **品牌 CTA 不会重写既有片尾镜头**：更新品牌片尾 CTA 会更新项目品牌并使审核失效，但已有视频的 CTA 镜头文本不会自动改写，需要在 Editor 中手动调整。
-3. **部分表单标签未程序化关联**：知识编辑等功能使用视觉标签，但 `label` 与 `input` 没有统一 `htmlFor`，屏幕阅读器体验不完整；E2E 因此使用了位置选择器。
+3. **动态表单标签仍需逐项检查**：`Field` 已为直接子级的 `Input` / `Textarea` / `Select` 自动生成 `id` 与 `htmlFor`，主要页面 axe 扫描通过；包裹容器或自定义控件仍需在新增时手动关联。
 4. **移动端侧栏无障碍不完整**：抽屉打开时未统一设置 `aria-hidden` / `inert`，焦点可能逸出到背景内容。
 5. **面包屑使用视频 ID**：分镜 / 编辑器等页面的面包屑会显示 `vid_...`，而不是视频标题。
 6. **预览依赖前台标签页**：`requestAnimationFrame` 在后台标签页会被节流，播放进度不会按真实时间推进；这是浏览器行为，未做 Web Worker 时钟兜底。
 7. **生产运行只在页面打开时推进**：这是刻意设计，用于避免后台伪造进度；刷新后运行状态按已持久化快照恢复，不会在后台继续。
 8. **模拟预览没有音频**：只有字幕与时间轴，没有真实配音；这是当前边界，不应被误解为成片。
 9. **建议弹窗文案不够精确**：部分“接受建议会升级 Claim 状态”的说明可能高估实际状态变化，需要按建议类型细化。
-10. **无 CI 配置**：质量门禁目前依赖本地命令，尚未接入 GitHub Actions 或其他流水线。
+10. **CI 只验证到本地命令等价物**：`.github/workflows/ci.yml` 已配置（`frozen-lockfile` → `nx affected` 的 lint/typecheck/test → boundary guard → build + budget → E2E），但**尚未在任何 GitHub 远端上真实跑过**——仓库当前没有 `origin`。首次推送后需要确认：`nx affected` 的 base SHA 可得、Playwright 在 Linux 上可用、文档类 PR 确实不启动 E2E。
 
 ---
 
 ## 9. 后续建议
 
-1. **性能**：按路由 `lazy()` 拆分 Editor / Production / Review，配置 `manualChunks`，设置 bundle budget；对 ScenePreview 与图表做按需加载。
-2. **无障碍**：统一 `Field` 组件的 `id` / `htmlFor` / `aria-describedby`；为移动端抽屉补 `inert` 与焦点回收；增加 axe 扫描。
-3. **测试**：增加 Playwright 移动项目（390×844）、`prefers-reduced-motion` 用例、关键页面视觉快照；在 CI 中跑 `validate + build + e2e`。
+1. **性能**：路由懒加载、`manualChunks` 与 bundle budget 已落地；下一步是把 mock-services / 种子数据从初始状态中按需加载，并对图表等重组件继续下沉。
+2. **无障碍**：`Field` 已自动关联直接表单控件，axe 扫描已加入 E2E；下一步为移动端抽屉补 `inert` 与焦点回收，并补齐 `aria-describedby`。
+3. **测试**：移动端（390×844）与平板（768×1024）项目、`prefers-reduced-motion` 与 axe 用例已加入；下一步是关键页面视觉快照。
 4. **品牌传播**：品牌变更时提供“同步更新片尾 CTA”的可选操作，并在审核中显示差异，而不是只让审核失效。
 5. **数据边界**：为 localStorage 快照增加显式 schema 迁移；提供整个工作区的导入 / 导出，而不仅是单条视频工程 JSON。
 6. **服务抽象**：把 `mock-services` 收敛到接口后接真实适配器：GitHub App、知识索引、Agent 运行时、渲染队列；在真实文件存在前，导出状态不得宣称完成。
@@ -255,6 +273,7 @@ pnpm build
 - [录屏、渲染与编辑器](docs/07-VIDEO-CAPTURE-RENDER-AND-EDITOR.md)
 - [安全、证据与 ATVG2](docs/08-SECURITY-EVIDENCE-AND-ATVG2-INTEGRATION.md)
 - [实施路线与验收](docs/09-IMPLEMENTATION-ROADMAP-AND-ACCEPTANCE.md)
+- [下一阶段排期与迭代建议](docs/10-NEXT-PHASE-PLAN.md)
 - UX 文档：
   - [前端体验计划](docs/ux/FRONTEND-EXPERIENCE-PLAN.md)
   - [信息架构](docs/ux/INFORMATION-ARCHITECTURE.md)
@@ -270,7 +289,7 @@ pnpm build
 ```text
 apps/web-studio/
   src/               应用壳、路由、侧栏、顶栏、命令面板、Demo 弹窗
-  e2e/               Playwright 配置、11 个端到端用例
+  e2e/               Playwright 配置、29 个桌面 / 移动端 / 无障碍 / 动效用例
 libs/
   domain/            时间线、Schema、生产蓝图、序列化
   mock-data/         固定演示数据

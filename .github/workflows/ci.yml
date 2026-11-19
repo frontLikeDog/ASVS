@@ -1,0 +1,252 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same PR/branch instead of paying for both.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Nx and pnpm should not phone home or run interactively in CI.
+  CI: 'true'
+  NX_DAEMON: 'false'
+  NX_CLOUD_ACCESS_TOKEN: ''
+
+jobs:
+  # Decides which work is worth running. A README-only PR must not start
+  # Playwright, so every expensive job hangs off this output.
+  affected:
+    name: Determine affected projects
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.scope.outputs.code }}
+      e2e: ${{ steps.scope.outputs.e2e }}
+      # Downstream jobs reuse the exact range the affected job resolved,
+      # instead of re-deriving it (which breaks on `push`, where base_ref is empty).
+      base: ${{ steps.scope.outputs.base }}
+      head: ${{ steps.scope.outputs.head }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Nx needs the merge base to compute `affected`; a shallow clone
+          # silently widens or breaks that range.
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - id: scope
+        name: Compute affected range
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="origin/${{ github.base_ref }}"
+            HEAD="HEAD"
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+            # A brand-new branch or a force-push can report an all-zero "before".
+            if [[ -z "$BASE" || "$BASE" =~ ^0+$ ]]; then
+              BASE="HEAD~1"
+            fi
+          fi
+
+          echo "Affected base=$BASE head=$HEAD"
+
+          # `nx show projects --affected` may print a JSON array (e.g.
+          # ["web-studio","state"]) or one project name per line, depending on
+          # the Nx output mode. Normalise either shape to a comma-separated
+          # list: deleting the newlines instead of turning them into commas
+          # would glue adjacent names together ("web-studiodomain...") and
+          # silently skip every gate below.
+          #
+          # A failing Nx must FAIL the job, not read as "nothing affected":
+          # swallowing the error would skip every gate on a broken checkout.
+          if ! RAW=$(pnpm nx show projects --affected --base="$BASE" --head="$HEAD"); then
+            echo "::error::nx could not compute the affected range (base=$BASE head=$HEAD)"
+            exit 1
+          fi
+          echo "Affected projects: ${RAW:-(none)}"
+
+          LIST=$(printf '%s\n' "$RAW" \
+            | tr -d '[]" \t' \
+            | tr '\n' ',' \
+            | tr -s ',' \
+            | sed 's/^,//; s/,$//')
+          # Comma-wrap so a name can be matched from both ends without the
+          # first or last element being missed.
+          WRAPPED=",$LIST,"
+
+          E2E_PROJECTS="web-studio|state|ui|domain|mock-services|mock-data|project-hub|video-studio|production-suite"
+
+          if printf '%s' "$WRAPPED" | grep -qE ",($E2E_PROJECTS),"; then
+            E2E=true
+          else
+            E2E=false
+          fi
+
+          # An empty array means nothing changed in a way Nx tracks.
+          if [ -z "$LIST" ]; then
+            CODE=false
+          else
+            CODE=true
+          fi
+
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "e2e=$E2E" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
+
+  # Lint, typecheck and unit tests. Runs on every PR that touches code.
+  validate:
+    name: Validate (lint, typecheck, test)
+    needs: affected
+    if: needs.affected.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint, typecheck and unit tests (affected only)
+        run: >-
+          pnpm nx affected -t lint typecheck test
+          --base="${{ needs.affected.outputs.base }}"
+          --head="${{ needs.affected.outputs.head }}"
+
+      # Proves the layer constraints still reject illegal imports. A normal
+      # `lint` stays green if the boundary rule is deleted, so it is checked
+      # explicitly by inverting the expected failure.
+      - name: Module boundary guard
+        run: node scripts/check-boundary-guard.mjs
+
+  build:
+    name: Build and bundle budget
+    needs: affected
+    if: needs.affected.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The budget check runs inside the target; building affected-only would
+      # skip the budget on unrelated PRs, so this one is deliberately full.
+      - name: Build web-studio (enforces bundle-budget.json)
+        run: pnpm nx build web-studio
+
+  e2e:
+    name: E2E (Playwright, desktop + tablet + mobile)
+    needs: affected
+    if: needs.affected.outputs.e2e == 'true'
+    runs-on: ubuntu-latest
+    # E2E is the slowest job; cap it so a hung browser cannot burn the budget.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run Playwright
+        run: pnpm test:e2e
+
+      # Verified by forcing a failure: Playwright puts screenshots and traces in
+      # apps/web-studio/test-results (the config's parent dir), not next to the
+      # config. There is no HTML report — the reporter is `list` only.
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: apps/web-studio/test-results
+          retention-days: 7
+          if-no-files-found: warn
+
+  # Single required status check. Without this, skipping `e2e` on a docs-only
+  # PR would leave branch protection waiting forever on a check that never ran.
+  ci:
+    name: CI
+    if: always()
+    needs: [affected, validate, build, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs
+        shell: bash
+        run: |
+          echo "affected=${{ needs.affected.result }}"
+          echo "validate=${{ needs.validate.result }}"
+          echo "build=${{ needs.build.result }}"
+          echo "e2e=${{ needs.e2e.result }}"
+
+          if [ "${{ needs.affected.result }}" != "success" ]; then
+            echo "::error::affected job did not succeed"
+            exit 1
+          fi
+
+          # `skipped` is a valid outcome only when the affected job decided the
+          # work was unnecessary. Anything else is a failure. Each result is
+          # referenced explicitly: `needs[expr]` is not valid Actions syntax.
+          check() {
+            if [ "$2" != "success" ] && [ "$2" != "skipped" ]; then
+              echo "::error::$1 finished as $2"
+              exit 1
+            fi
+          }
+          check validate "${{ needs.validate.result }}"
+          check build "${{ needs.build.result }}"
+          check e2e "${{ needs.e2e.result }}"
+
+          echo "All required jobs passed or were intentionally skipped."

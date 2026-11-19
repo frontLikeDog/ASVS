@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { useStudioStore, useUiStore } from '@asvs/state';
 import { TooltipProvider } from '@asvs/ui';
@@ -7,6 +7,7 @@ import { Topbar } from './topbar';
 import { CommandPalette } from './command-palette';
 import { DemoDialog } from './demo-dialog';
 import { Toaster } from './toaster';
+import { RouteLoading } from '../route-loading';
 import { useMediaQuery } from '../lib/use-media-query';
 
 export function AppShell() {
@@ -15,6 +16,7 @@ export function AppShell() {
   const videos = useStudioStore((state) => state.videos);
   const theme = useUiStore((state) => state.theme);
   const sidebarCollapsed = useUiStore((state) => state.sidebarCollapsed);
+  const sidebarUserPref = useUiStore((state) => state.sidebarUserPref);
   const setSidebarCollapsed = useUiStore((state) => state.setSidebarCollapsed);
   const lastProjectId = useUiStore((state) => state.lastProjectId);
   const setLastProjectId = useUiStore((state) => state.setLastProjectId);
@@ -71,7 +73,9 @@ export function AppShell() {
     return () => window.removeEventListener('keydown', handler);
   }, [setCommandOpen]);
 
-  const collapsed = !isMobile && (sidebarCollapsed || isTablet);
+  // Tablet starts collapsed to protect content width, but the user's explicit
+  // toggle must win — otherwise the topbar toggle is a dead control at 768–1179px.
+  const collapsed = !isMobile && (sidebarCollapsed || (isTablet && !sidebarUserPref));
 
   return (
     <TooltipProvider>
@@ -99,10 +103,12 @@ export function AppShell() {
             onOpenMobile={() => setMobileOpen(true)}
             onOpenDemo={() => setDemoOpen(true)}
             onOpenCommand={() => setCommandOpen(true)}
-            onToggleCollapsed={() => setSidebarCollapsed(!sidebarCollapsed)}
+            onToggleCollapsed={() => setSidebarCollapsed(!collapsed)}
           />
           <main id="main-content" className="app-toplight min-h-0 flex-1 overflow-y-auto">
-            <Outlet />
+            <Suspense fallback={<RouteLoading />}>
+              <Outlet />
+            </Suspense>
           </main>
         </div>
         <CommandPalette />

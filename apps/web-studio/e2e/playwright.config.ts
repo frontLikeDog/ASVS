@@ -24,7 +24,33 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
+      // Viewport-specific suites get their own project below.
+      testIgnore: [/mobile\.spec\.ts/, /tablet\.spec\.ts/],
       use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } },
+    },
+    {
+      name: 'mobile-chromium',
+      testMatch: /mobile\.spec\.ts/,
+      use: {
+        browserName: 'chromium',
+        viewport: { width: 390, height: 844 },
+        deviceScaleFactor: 3,
+        isMobile: true,
+        hasTouch: true,
+      },
+    },
+    {
+      // 768 is the shell breakpoint between the mobile drawer and the
+      // persistent sidebar; it had no automated coverage before.
+      name: 'tablet-chromium',
+      testMatch: /tablet\.spec\.ts/,
+      use: {
+        browserName: 'chromium',
+        viewport: { width: 768, height: 1024 },
+        deviceScaleFactor: 2,
+        isMobile: true,
+        hasTouch: true,
+      },
     },
   ],
   webServer: {

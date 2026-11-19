@@ -1,6 +1,10 @@
 import {
+  cloneElement,
   forwardRef,
+  isValidElement,
+  useId,
   type InputHTMLAttributes,
+  type ReactElement,
   type ReactNode,
   type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
@@ -34,11 +38,25 @@ export function Field({
   className,
   labelClassName,
 }: FieldProps) {
+  // Associate the visible label with a direct input/textarea/select child when
+  // no explicit htmlFor is given. This keeps screen readers attached without
+  // every call site remembering to wire id + htmlFor by hand.
+  const generatedId = useId();
+  const child = isValidElement(children)
+    ? (children as ReactElement<{ id?: string }>)
+    : undefined;
+  const labelable = child
+    ? ([Input, Textarea, Select, 'input', 'textarea', 'select'] as unknown[]).includes(child.type)
+    : false;
+  const controlId = htmlFor ?? (labelable ? (child?.props.id ?? generatedId) : undefined);
+  const control =
+    labelable && !child?.props.id ? cloneElement(child!, { id: generatedId }) : children;
+
   return (
     <div className={cn('space-y-1.5', className)}>
       {label ? (
         <label
-          htmlFor={htmlFor}
+          htmlFor={controlId}
           className={cn('flex items-baseline gap-1.5 text-[12.5px] font-medium text-fg', labelClassName)}
         >
           {label}
@@ -46,7 +64,7 @@ export function Field({
           {optional ? <span className="text-[11px] font-normal text-faint">可选</span> : null}
         </label>
       ) : null}
-      {children}
+      {control}
       {error ? (
         <p role="alert" className="flex items-start gap-1.5 text-[12px] leading-4 text-danger">
           <span className="mt-[5px] size-1 shrink-0 rounded-full bg-danger" aria-hidden />
@@ -217,7 +235,11 @@ export function Slider({
         <SliderPrimitive.Track className="relative h-[3px] w-full grow overflow-hidden rounded-full bg-line-strong">
           <SliderPrimitive.Range className="absolute h-full bg-accent" />
         </SliderPrimitive.Track>
-        <SliderPrimitive.Thumb className="block size-3.5 rounded-full border-2 border-ink bg-accent shadow-[0_0_0_1px_var(--accent)] transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" />
+        <SliderPrimitive.Thumb
+          aria-label={label}
+          aria-valuetext={formatValue ? formatValue(value) : String(value)}
+          className="block size-3.5 rounded-full border-2 border-ink bg-accent shadow-[0_0_0_1px_var(--accent)] transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        />
       </SliderPrimitive.Root>
     </div>
   );
