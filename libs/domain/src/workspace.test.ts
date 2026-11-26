@@ -138,6 +138,12 @@ describe('工作区信封与迁移', () => {
   it('拒绝结构损坏的 JSON 与工作区', () => {
     expect(() => parseWorkspaceExport('{')).toThrow('文件不是有效的 JSON。');
     expect(() => normalizeWorkspacePayload({ videos: 'broken' })).toThrow(WorkspaceImportError);
+    expect(() =>
+      normalizeWorkspacePayload({
+        ...EMPTY_SNAPSHOT,
+        videos: [null, { id: 'vid_bad', scenes: 'not-an-array' }],
+      }),
+    ).toThrow(WorkspaceImportError);
   });
 
   it('信封带固定版本与可选导出时间', () => {

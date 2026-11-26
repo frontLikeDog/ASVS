@@ -61,14 +61,16 @@ export function migrateStudioSnapshot(persisted: unknown, fromVersion: number): 
   const candidate = persisted as Record<string, unknown> & { videos?: unknown };
   if (!Array.isArray(candidate.videos)) return persisted;
 
-  const videos = (candidate.videos as VideoProject[]).map((video) => {
-    const legacy = video as VideoProject & { fps?: number };
+  const videos = candidate.videos.map((video) => {
+    if (!isRecord(video) || !Array.isArray(video.scenes)) return video;
+    const legacy = video as unknown as VideoProject & { fps?: number };
     const fps = legacy.fps ?? DEFAULT_VIDEO_FPS;
     return {
       ...legacy,
       fps,
       scenes: legacy.scenes.map((scene) => {
-        const legacyScene = scene as Scene & {
+        if (!isRecord(scene)) return scene;
+        const legacyScene = scene as unknown as Scene & {
           revision?: number;
           durationFrames?: number;
           visual?: Scene['visual'];

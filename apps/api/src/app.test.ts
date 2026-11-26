@@ -161,6 +161,18 @@ describe('ASVS API · 工作区', () => {
     });
     expect(invalid.statusCode).toBe(400);
 
+    const malformedV1 = await app!.inject({
+      method: 'PUT',
+      url: '/v1/workspaces/ws_invalid',
+      payload: {
+        schemaVersion: 1,
+        baseRevision: 0,
+        workspace: { ...EMPTY_WORKSPACE, videos: [{ id: 'vid_bad', scenes: null }] },
+      },
+    });
+    expect(malformedV1.statusCode).toBe(400);
+    expect(malformedV1.json().error.code).toBe('invalid_workspace');
+
     const missing = await app!.inject({ method: 'GET', url: '/v1/workspaces/ws_invalid' });
     expect(missing.statusCode).toBe(404);
   });

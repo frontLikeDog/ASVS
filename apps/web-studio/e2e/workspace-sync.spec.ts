@@ -66,6 +66,13 @@ test('两个独立浏览器上下文通过 SQLite API 看到同一工作区', as
     await expect(pageB.locator('main input').first()).toHaveValue('Lumen Sync E2E', {
       timeout: 15_000,
     });
+
+    // Reconnecting without local edits must stay synced instead of triggering a
+    // false conflict from the local restore activity entry.
+    await pageB.getByRole('tab', { name: '演示数据' }).click();
+    await pageB.getByRole('button', { name: '重新连接' }).click();
+    await expect(pageB.getByText('已同步', { exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(pageB.getByText('版本冲突', { exact: true })).toHaveCount(0);
   } finally {
     await contextA.close();
     await contextB.close();

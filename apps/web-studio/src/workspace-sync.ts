@@ -63,7 +63,9 @@ function applyRemote(record: WorkspaceRecord, note: string, quiet = false): void
   useStudioStore.getState().replaceWorkspace(record.workspace, note);
   applyingRemote = false;
   remote = record;
-  lastSyncedJson = JSON.stringify(record.workspace);
+  // Snapshot after `replaceWorkspace` so the synthetic local restore activity
+  // does not make the store look dirty immediately and block polling/reconnect.
+  lastSyncedJson = snapshotJson();
   setStatus({
     phase: 'synced',
     remoteRevision: record.revision,
@@ -175,7 +177,9 @@ async function push(): Promise<void> {
 async function saveNow(): Promise<void> {
   if (!config().enabled) return;
   const currentPhase = useWorkspaceSyncStore.getState().phase;
-  if (currentPhase === 'conflict' || currentPhase === 'connecting') return;
+  if (currentPhase === 'conflict' || currentPhase === 'connecting' || currentPhase === 'saving') {
+    return;
+  }
 
   const workspace = snapshot();
   const json = JSON.stringify(workspace);
