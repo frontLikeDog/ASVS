@@ -148,9 +148,10 @@ libs/features/project-hub       工作台、项目、知识、视频库、设置
 libs/features/video-studio      向导、导演、分镜、编辑器
 libs/features/production-suite  生产监控、审核导出
 workers/render-worker           CLI：fixture → bundle → renderMedia → ffprobe → 回执 / 清单
+workers/browser-worker          CLI：DemoPlan → Playwright 录屏 / 断言 / allowlist → 回执 / 渲染输入
 ```
 
-依赖方向：`app → features/ui/state/domain`；`feature → ui/state/domain`；`state → domain/mock-services/mock-data`；`render → domain`；`render-worker → domain/render/mock-data`。ESLint 模块边界规则约束跨层引用。
+依赖方向：`app → features/ui/state/domain`；`feature → ui/state/domain`；`state → domain/mock-services/mock-data`；`render → domain`；`render-worker / browser-worker → domain/render/mock-data`。ESLint 模块边界规则约束跨层引用。
 
 数据流的核心原则：
 
@@ -214,7 +215,7 @@ workers/render-worker           CLI：fixture → bundle → renderMedia → ffp
 pnpm test --skip-nx-cache
 ```
 
-- **15 个测试文件，117 个测试全部通过**（2026-11-26 重跑）
+- **17 个测试文件，126 个测试全部通过**（2026-11-27 `--skip-nx-cache` 重跑）
 - 覆盖：时间线与分镜重排、Zod Schema 校验、SRT / 工程 JSON 序列化、生产引擎（成功 / 失败重试 / 审批 / 取消 / 暂停 / 速度）、AI 导演有限意图与未知指令、审核规则与版本失效、导出模拟与真实文件、Zustand 撤销 / 重做 / 持久化 / 品牌失效。
 - 新增覆盖（Step 1）：渲染 IR 判别联合的接受 / 拒绝、Storyboard 帧数与素材过滤、非 16:9 拒绝、回执 / 清单 Schema、Remotion composition 元数据、ffprobe 帧率与容差校验、v1→v2 持久化迁移。
 - 新增覆盖（Step 2）：DemoPlan schema（未知 action、零断言、危险 selector、approval digest）、精确 origin allowlist、断言优先判定、回执不变量、素材媒体 schema、片段起点 / 时长规划。
@@ -283,17 +284,17 @@ pnpm validate
 pnpm build
 ```
 
-- `lint`：11 个项目通过，0 error / 0 warning
-- `typecheck`：11 个项目通过
+- `lint`：12 个项目通过，0 error（另有 8 条既有未用变量 warning）
+- `typecheck`：12 个项目通过
 - `lint:boundary-check`：故意写入 3 条跨层非法 import（`domain→state`、`ui→state`、`feature→mock-services`），
   要求 ESLint 的 `@nx/enforce-module-boundaries` **必须报错**；规则被删除或标签漂移时该脚本转为红灯
   （普通 `lint` 在这种情况下仍然全绿，所以需要这条反向验证）
 - `build`：路由级懒加载 + `vendor-react` 拆包，构建后自动执行 bundle budget 检查
-  - 初始 JS（entry + 静态依赖）：`728.1 kB` raw / `216.2 kB` gzip
+  - 初始 JS（entry + 静态依赖）：`739.6 kB` raw / `219.9 kB` gzip
   - Editor：额外 `68.9 kB` raw / `23.5 kB` gzip
   - Production：额外 `32.7 kB` raw / `13.4 kB` gzip
   - Review：额外 `28.9 kB` raw / `10.6 kB` gzip
-  - 最大单 chunk：`376.6 kB` raw / `115.1 kB` gzip
+  - 最大单 chunk：`388.0 kB` raw / `118.7 kB` gzip
   - 预算配置见 `bundle-budget.json`；任一预算超限会使 `pnpm build` 失败
 
 ### 已知未自动化覆盖
@@ -315,7 +316,7 @@ pnpm build
 7. **生产运行只在页面打开时推进**：这是刻意设计，用于避免后台伪造进度；刷新后运行状态按已持久化快照恢复，不会在后台继续。
 8. **模拟预览没有音频**：只有字幕与时间轴，没有真实配音；这是当前边界，不应被误解为成片。
 9. **建议弹窗文案不够精确**：部分“接受建议会升级 Claim 状态”的说明可能高估实际状态变化，需要按建议类型细化。
-10. **CI 只验证到本地命令等价物**：`.github/workflows/ci.yml` 已配置（`frozen-lockfile` → `nx affected` 的 lint/typecheck/test → boundary guard → build + budget → E2E → `render:fixture` + `verify:render`），但**尚未在任何 GitHub 远端上真实跑过**——仓库当前没有 `origin`。首次推送后需要确认：`nx affected` 的 base SHA 可得、Playwright 在 Linux 上可用、ffmpeg / CJK 字体 / Remotion Chrome 缓存可用、文档类 PR 确实不启动 E2E 与 render。
+10. **Step 2 `capture` CI 门禁待 PR 实跑验证**：`.github/workflows/ci.yml` 的 `validate` / `build` / `e2e` / `render` 已随 PR #1、PR #2 在 GitHub Actions 跑通；Step 2 新增的 `capture` job（Playwright 录屏 + `capture:repeat` + `render:captured`）待 `feat/capture-slice` PR 合并前在 Linux runner 上验证。
 11. **渲染切片尚未接入 Web UI**：CLI 能产出真实 MP4，但浏览器内的导出仍是模拟状态；在队列、对象存储与任务状态打通前，不应让 UI 宣称已生成文件。
 12. **渲染只支持 16:9、无音频、字体未打包**：竖屏需要单独布局；没有 TTS / 配乐；依赖系统 CJK 字体，跨机器字形可能不同。
 13. **Remotion 许可**：个人或 ≤3 员工公司可免费使用；更大组织商用前需要公司许可。
@@ -376,6 +377,7 @@ libs/
   features/          三条产品线页面
 workers/
   render-worker/     CLI 渲染 worker、黄金 fixture 与 ffprobe 校验
+  browser-worker/    CLI 录屏 worker、DemoPlan 执行器、安全探针与回执校验
 scripts/             bundle budget、边界反向验证、渲染产物复核
 docs/                产品、架构与 UX 文档
 ```

@@ -1,6 +1,6 @@
 # 12 · 真实录屏切片（Step 2 验收记录）
 
-> 状态：**已执行**｜日期：2026-11-26｜分支：`feat/capture-slice`（工作区改动，尚未提交）
+> 状态：**已执行**｜日期：2026-11-26｜分支：`feat/capture-slice`（待 PR 合并）
 > 对应计划：[docs/10 §6](10-NEXT-PHASE-PLAN.md)（S2-1 ~ S2-6）
 > 结论先说：`workers/browser-worker` 用已批准的 DemoPlan 驱动 Playwright 录制 web-studio 自身，20 步（11 条 UI 断言 + 9 条交互）全部通过后才写 `CaptureReceipt`；同一计划重复 3 次通过率 100%；录屏 MP4 已进入 Step 1 渲染管线，产出 30 秒成片，且 `manifest` 同时记录素材与录屏文件的 SHA256。**Web UI 内的生产与导出仍然是模拟**，本切片是独立 CLI worker。
 
@@ -195,7 +195,7 @@ pnpm capture:plan-digest
 | 录屏产物能进入 Step 1 渲染管线并产出成片 | ✅ | `pnpm render:captured` → 30,000ms / 900 帧 MP4；`verify:render:captured` 通过 |
 | 访问非白名单域名被阻断（docs/08 §9 用例 2） | ✅ | `pnpm capture:safety`：PASS，越界请求 0 |
 | 计划是数据，未识别 action / 危险 selector 被拒绝 | ✅ | `capture.test.ts`、`selector.test.ts`、`plan.test.ts` |
-| CI 跑通 capture gate | ⚠️ 已配置，未在真实远端验证 | `.github/workflows/ci.yml` 的 `capture` job；仍受 S0-1（无 `origin`）阻塞 |
+| CI 跑通 capture gate | ⏳ 待 PR #3 CI 验证 | `.github/workflows/ci.yml` 的 `capture` job 已配置，待 `feat/capture-slice` PR 在 GitHub Actions 跑通 |
 
 ---
 
@@ -210,4 +210,4 @@ pnpm capture:plan-digest
 | 隐私 QA 未实现 | docs/07 §9 的敏感信息检查还没接入 | 接外部环境前必须补 |
 | 产物只落本地 | `storageRef` 是工作区相对路径，无对象存储 / 队列 | Step 3 |
 | 片段固定 16:9 | 与 Step 1 渲染一致；竖屏需要独立布局 | 后续 |
-| CI 未远端验证 | 与 render gate 相同，仓库没有 `origin` | 首次推送后 |
+| CI 远端验证 | `capture` job 尚未在 GitHub Actions Linux runner 上实跑 | PR #3 合并前跑通 |

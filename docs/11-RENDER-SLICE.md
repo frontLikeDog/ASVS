@@ -122,7 +122,7 @@ CI：`.github/workflows/ci.yml` 的 `render` job 在受影响项目中包含 `re
 | 渲染耗时未记录基线 | 本机单次全片渲染约数分钟，尚未写入指标 | 接入 CI 后采集 |
 | 单机、本地路径 | 无队列、对象存储、并发调度；`storageRef` 是本地相对路径 | Step 3 |
 | Remotion 许可 | 个人 / ≤3 员工公司免费；更大组织需要公司许可 | 商用前确认 |
-| CI 未在真实远端验证 | 仓库仍无 `origin`，S0-1 阻塞 | 首次推送后 |
+| CI 远端验证 | 已随 PR #2（`993334b` / `2324d55`）在 GitHub Actions 跑通 `render` job | 已完成 |
 
 ---
 

@@ -14,7 +14,7 @@
 | # | 假设 | 当前状态 | 失败后果 |
 |---|---|---|---|
 | H1 | `StoryboardV1` 能被确定性渲染成可播放的 MP4 | **已有证据**（2026-11-20）：`libs/render` + `workers/render-worker` 产出 30 秒 MP4，见 [docs/11](11-RENDER-SLICE.md)。基线提交时为零实现 | 产品核心价值不成立，需重新选型 |
-| H2 | Playwright 能在真实 UI 上稳定录屏，且「断言通过」比「脚本退出码 0」更可信 | **零实现**：生产步骤 `capture` 为确定性模拟（`libs/mock-services/src/production-engine.ts`） | 演示素材只能靠手工，产品退化为普通编辑器 |
+| H2 | Playwright 能在真实 UI 上稳定录屏，且「断言通过」比「脚本退出码 0」更可信 | **已有证据**（2026-11-26）：`workers/browser-worker` 按已批准 DemoPlan 录制 `web-studio`（11/11 断言、3/3 重复通过率 100%）并接入渲染成片，见 [docs/12](12-CAPTURE-SLICE.md) | 演示素材只能靠手工，产品退化为普通编辑器 |
 | H3 | 前端状态可迁移到真实后端而不大规模返工 | **零实现**：无 `apps/api`，无接口抽象，`mock-services` 被 Store 直接调用 | 后期返工成本超过重写 |
 
 本阶段的排期原则：**先降低最大不确定性，再补工程护栏，最后才扩展功能**。前端不再作为主要投入方向。
@@ -134,6 +134,8 @@ Step 4 依赖 Step 3 的后端。
 **Exit Gate 距离**：代码侧全部就绪，唯一缺口是 S0-1 需要远端仓库。
 在真实 PR 上跑通 CI（G0-2 的「在 PR 上跑通」）之前，不能宣称 Step 0 完成。
 
+> 更新（2026-11-26）：远端仓库 `origin`（`frontLikeDog/ASVS`）已配置；PR #1（`b7f75a1`）与 PR #2（`2324d55`）已在 GitHub Actions 跑通并合并到 `main`，Step 0 Exit Gate 已闭环。
+
 ---
 
 ## 5. Step 1 · 真实渲染切片（2 周，P0 核心）
@@ -198,7 +200,7 @@ SHA256 已记录进 manifest
 | ffprobe 编码 / 时长 / 分辨率 / fps 一致 | ✅ | h264 · 1920×1080 · 30fps · 30000ms · 900 帧 |
 | SHA256 记录进 manifest | ✅ | `b1451bfb…26ccd8a`；`pnpm verify:render` 独立复核一致 |
 | 非法 Schema 被测试拒绝 | ✅ | `libs/domain/src/render.test.ts` 13 个用例 + `studio-store.test.ts` 迁移用例 |
-| CI 跑通 render-fixture | ⚠️ 已配置，未在真实远端验证 | `.github/workflows/ci.yml` 的 `render` job；仍受 S0-1（无 `origin`）阻塞 |
+| CI 跑通 render-fixture | ✅ | `.github/workflows/ci.yml` 的 `render` job 已随 PR #2（`993334b` / `2324d55`）在 GitHub Actions 跑通并合并 |
 
 完整验收记录、复现步骤与边界见 [docs/11](11-RENDER-SLICE.md)。
 
@@ -260,7 +262,7 @@ SHA256 已记录进 manifest
 | 每次失败都有 screenshot + trace | ✅ | 失败路径写 `failure-report.json` + `*-FAILED.png` + `trace.zip`；开发中两次真实失败已验证 |
 | 断言失败 → 判失败（有专门测试） | ✅ | `outcome.test.ts` + `capture.test.ts` 的回执不变量 |
 | 录屏产物能进入 Step 1 的渲染管线并产出成片 | ✅ | `dist/render-worker/captured-30s/captured-30s.mp4`，30,000ms / 900 帧，manifest 记录 `mediaSha256` |
-| CI 跑通 capture gate | ⚠️ 已配置，未在真实远端验证 | `.github/workflows/ci.yml` 的 `capture` job；仍受 S0-1（无 `origin`）阻塞 |
+| CI 跑通 capture gate | ⏳ 待 PR #3 CI 验证 | `.github/workflows/ci.yml` 的 `capture` job 已配置，待 `feat/capture-slice` PR 在 GitHub Actions 跑通 |
 
 完整验收记录、复现步骤与边界见 [docs/12](12-CAPTURE-SLICE.md)。
 
