@@ -1,0 +1,140 @@
+# Step 2 · web-studio 自身真实录屏计划
+#
+# 这是数据，不是代码：执行器只认识 navigate/click/fill/press/wait_for/assert/capture，
+# 任何未识别的 action 或 CSS/XPath selector 都会在打开浏览器前被拒绝。
+#
+# 修改任何步骤、origin、viewport 或 fixture 后，旧的 approval 摘要立即失效；
+# 用 `pnpm nx run browser-worker:plan-digest` 生成新摘要并重新审阅。
+schemaVersion: '1'
+id: plan_web_studio_tour
+projectId: proj_asvs_studio
+name: web-studio 真实界面巡览
+environmentId: local_web_studio
+baseUrl: http://localhost:4200
+allowedOrigins:
+  - http://localhost:4200
+resetStrategy: fixture
+# 固定 Date 只影响相对时间文案，不冻结动画计时器。
+clockTime: '2026-11-20T12:00:00.000Z'
+viewport:
+  width: 1920
+  height: 1080
+  deviceScaleFactor: 1
+locale: zh-CN
+timezoneId: Asia/Shanghai
+colorScheme: dark
+reducedMotion: no-preference
+fixtures:
+  searchTerm: 快速上手
+capture:
+  width: 1920
+  height: 1080
+  fps: 30
+  clipDurationMs: 18000
+asset:
+  id: asset_capture_web_studio_tour
+  name: web-studio 真实界面巡览
+  description: Playwright 在本地 web-studio 上执行已批准 DemoPlan 的真实录屏；每一步都通过 UI 断言，未通过则不写回执。
+  palette: ['#E8A44C', '#23262D']
+approval:
+  approvalId: appr_web_studio_tour_001
+  approvedPlanDigest: '104ce0164a41bedce12dc7c4ccbbfb7858fe7ca86e6ea0f144e996b3af4d2142'
+  approvedAt: '2026-11-20T00:00:00.000Z'
+# 录制时全部使用应用内导航（点击侧边栏 / 工作区标签），避免整页重载在成片里
+# 变成黑屏与 loading 闪烁；只有 resetStrategy=fixture 会真正加载一次文档。
+steps:
+  - id: dashboard-ready
+    action: assert
+    target: heading=把可信的产品事实，变成可审阅的视频。
+    assertion:
+      kind: visible
+    dwellMs: 1600
+  - id: featured-video
+    action: assert
+    target: text=继续上次工作
+    assertion:
+      kind: visible
+    dwellMs: 600
+  - id: open-library
+    action: click
+    target: 'role=link,name="视频工程"'
+  - id: library-ready
+    action: assert
+    target: heading=视频工程
+    assertion:
+      kind: visible
+    dwellMs: 1200
+  - id: filter-review
+    action: click
+    target: role=button,name=待审核
+  - id: review-filter-applied
+    action: assert
+    target: text=1 条结果
+    assertion:
+      kind: visible
+    dwellMs: 1000
+  - id: filter-all
+    action: click
+    target: role=button,name=全部
+  - id: all-filter-applied
+    action: assert
+    target: text=2 条结果
+    assertion:
+      kind: visible
+    dwellMs: 600
+  - id: search-library
+    action: fill
+    target: label=搜索视频
+    valueRef: searchTerm
+  - id: search-applied
+    action: assert
+    target: text=1 条结果
+    assertion:
+      kind: visible
+    dwellMs: 900
+  - id: clear-search
+    action: fill
+    target: label=搜索视频
+    value: ''
+  - id: search-cleared
+    action: assert
+    target: text=2 条结果
+    assertion:
+      kind: visible
+    dwellMs: 600
+  - id: open-video
+    action: click
+    target: 'role=link,name="Lumen 2.8 · 让问题更快被看见"'
+  - id: review-landing
+    action: assert
+    target: heading=审核与导出
+    assertion:
+      kind: visible
+    dwellMs: 1000
+  - id: open-storyboard
+    action: click
+    target: 'role=link,name="分镜剧本"'
+  - id: storyboard-ready
+    action: assert
+    target: heading=镜头序列
+    assertion:
+      kind: visible
+    dwellMs: 1800
+  - id: open-production
+    action: click
+    target: 'role=link,name="生产监控 模拟 DAG"'
+  - id: production-ready
+    action: assert
+    target: heading=生产监控
+    assertion:
+      kind: visible
+    dwellMs: 1800
+  - id: open-review
+    action: click
+    target: 'role=link,name="审核导出"'
+  - id: review-evidence
+    action: assert
+    target: heading=声明与证据
+    assertion:
+      kind: visible
+    dwellMs: 1400

@@ -235,6 +235,30 @@ export const releaseSchema = z.object({
 export type Release = z.infer<typeof releaseSchema>;
 
 export const ASSET_KINDS = ['capture', 'b-roll', 'image', 'audio'] as const;
+export const ASSET_MEDIA_MIME_TYPES = ['video/mp4', 'video/webm'] as const;
+
+/**
+ * Real media attached to an Asset (Step 2). The fields are optional so the
+ * v2 persisted workspace and the Step 1 mock fixtures remain valid; a
+ * `mock: false` capture must carry all of them, which the capture receipt and
+ * the render worker enforce.
+ */
+export const assetMediaSchema = z.object({
+  /** Logical path under the Remotion public dir, e.g. `captures/asset_x.mp4`. */
+  src: z.string().min(1),
+  mimeType: z.enum(ASSET_MEDIA_MIME_TYPES),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  durationMs: z.number().int().positive(),
+  /** SHA256 of the exact file served from `src`. */
+  sha256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/, '需要 64 位小写十六进制 SHA256')
+    .optional(),
+  capturePlanId: idSchema.optional(),
+  captureReceiptRef: z.string().min(1).optional(),
+});
+
 export const assetSchema = z.object({
   id: idSchema,
   projectId: idSchema,
@@ -244,8 +268,10 @@ export const assetSchema = z.object({
   description: z.string(),
   palette: z.tuple([z.string(), z.string()]),
   mock: z.boolean(),
+  media: assetMediaSchema.optional(),
 });
 export type Asset = z.infer<typeof assetSchema>;
+export type AssetMedia = z.infer<typeof assetMediaSchema>;
 
 export const TEMPLATE_SURFACES = ['paper', 'ink', 'tint', 'brand'] as const;
 export const TEMPLATE_LAYOUTS = ['editorial', 'product', 'soft', 'kinetic'] as const;

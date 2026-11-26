@@ -5,7 +5,10 @@ import {
   artifactReceiptV1Schema,
   buildRenderInput,
   buildStoryboardV1,
+  findRealCaptureAsset,
+  isRealCaptureAsset,
   renderFixtureV1Schema,
+  renderMediaAssetV1Schema,
   sceneDurationFrames,
   stableStringify,
   storyboardDurationMs,
@@ -273,6 +276,94 @@ describe('renderFixtureV1Schema', () => {
         assets: [asset],
       }).success,
     ).toBe(false);
+  });
+});
+
+describe('real capture assets (Step 2)', () => {
+  const sha = 'a'.repeat(64);
+  const realAsset: Asset = {
+    ...asset,
+    mock: false,
+    media: {
+      src: 'captures/asset_cap_collab.mp4',
+      mimeType: 'video/mp4',
+      width: 1920,
+      height: 1080,
+      durationMs: 14_000,
+      sha256: sha,
+      capturePlanId: 'plan_web_studio_tour',
+      captureReceiptRef: 'dist/browser-worker/web-studio-tour/capture-receipt.json',
+    },
+  };
+
+  it('只有 mock:false 且带 media 的 Asset 才算真实素材', () => {
+    expect(isRealCaptureAsset(realAsset)).toBe(true);
+    expect(isRealCaptureAsset(asset)).toBe(false);
+    expect(isRealCaptureAsset({ ...realAsset, mock: true })).toBe(false);
+    expect(isRealCaptureAsset({ ...realAsset, media: undefined })).toBe(false);
+    expect(findRealCaptureAsset({ assetIds: [realAsset.id] }, [realAsset])?.id).toBe(
+      realAsset.id,
+    );
+    expect(findRealCaptureAsset({ assetIds: [asset.id] }, [asset])).toBeUndefined();
+    // A mock entry with the same id wins first in the list and must not be
+    // silently upgraded to a real capture.
+    expect(findRealCaptureAsset({ assetIds: [realAsset.id] }, [asset, realAsset])).toBeUndefined();
+  });
+
+  it('media 条目必须带哈希、尺寸与时长', () => {
+    const media = {
+      assetId: 'asset_cap_collab',
+      sourceFile: 'dist/browser-worker/web-studio-tour/capture.mp4',
+      sha256: sha,
+      mimeType: 'video/mp4',
+      width: 1920,
+      height: 1080,
+      durationMs: 14_000,
+    };
+    expect(renderMediaAssetV1Schema.safeParse(media).success).toBe(true);
+    expect(renderMediaAssetV1Schema.safeParse({ ...media, sha256: 'nope' }).success).toBe(false);
+    expect(renderMediaAssetV1Schema.safeParse({ ...media, durationMs: 0 }).success).toBe(false);
+  });
+
+  it('render fixture 默认没有 media，也可携带真实素材', () => {
+    const base = {
+      schemaVersion: '1',
+      kind: 'asvs.render-fixture',
+      video: video(),
+      project,
+      features: [feature],
+      assets: [realAsset],
+    };
+    const withoutMedia = renderFixtureV1Schema.parse(base);
+    expect(withoutMedia.media).toEqual([]);
+
+    const withMedia = renderFixtureV1Schema.parse({
+      ...base,
+      media: [
+        {
+          assetId: realAsset.id,
+          sourceFile: 'dist/browser-worker/web-studio-tour/capture.mp4',
+          sha256: sha,
+          mimeType: 'video/mp4',
+          width: 1920,
+          height: 1080,
+          durationMs: 14_000,
+        },
+      ],
+    });
+    expect(withMedia.media).toHaveLength(1);
+    expect(withMedia.assets[0]?.media?.src).toBe('captures/asset_cap_collab.mp4');
+  });
+
+  it('buildRenderInput 保留真实素材的 media 元数据', () => {
+    const input = buildRenderInput({
+      video: video(),
+      project,
+      features: [feature],
+      assets: [realAsset],
+    });
+    expect(input.assets[0]?.mock).toBe(false);
+    expect(input.assets[0]?.media?.sha256).toBe(sha);
   });
 });
 

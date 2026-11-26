@@ -218,18 +218,21 @@ export function MockBadge({
   detail,
   u,
   tone = 'amber',
+  top,
 }: {
   label: string;
   detail?: string;
   u: Unit;
-  tone?: 'amber' | 'red';
+  tone?: 'amber' | 'red' | 'green';
+  /** Override the default inset, e.g. to clear a browser address bar. */
+  top?: number;
 }) {
-  const color = tone === 'red' ? '#FF8A7A' : '#F0B860';
+  const color = tone === 'red' ? '#FF8A7A' : tone === 'green' ? '#6FD3A0' : '#F0B860';
   return (
     <div
       style={{
         position: 'absolute',
-        top: u(8.6),
+        top: top ?? u(8.6),
         left: '50%',
         transform: 'translateX(-50%)',
         zIndex: 25,
