@@ -1,0 +1,35 @@
+{
+  "name": "api",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/api/src",
+  "projectType": "application",
+  "tags": ["type:app", "type:api", "scope:api", "runtime:node"],
+  "implicitDependencies": ["domain", "ports"],
+  "targets": {
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": { "command": "eslint apps/api/src", "cwd": "{workspaceRoot}" }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": { "command": "tsc -p apps/api/tsconfig.json --noEmit", "cwd": "{workspaceRoot}" }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vitest run --config vitest.config.ts --passWithNoTests apps/api",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "serve": {
+      "executor": "nx:run-commands",
+      "continuous": true,
+      "options": { "command": "tsx watch src/main.ts", "cwd": "apps/api" }
+    },
+    "start": {
+      "executor": "nx:run-commands",
+      "options": { "command": "tsx src/main.ts", "cwd": "apps/api" },
+      "cache": false
+    }
+  }
+}

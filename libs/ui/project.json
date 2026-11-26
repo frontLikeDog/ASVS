@@ -4,6 +4,7 @@
   "sourceRoot": "libs/ui/src",
   "projectType": "library",
   "tags": ["type:ui", "scope:shared", "runtime:browser"],
+  "implicitDependencies": ["domain"],
   "targets": {
     "lint": {
       "executor": "nx:run-commands",

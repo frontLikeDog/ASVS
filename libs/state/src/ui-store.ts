@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { newId } from '@asvs/mock-services';
+import { getStudioServices } from './services';
 
 export type ThemeMode = 'dark' | 'light';
 export type ToastTone = 'info' | 'success' | 'warning' | 'danger';
@@ -59,7 +59,7 @@ export const useUiStore = create<UiState>()(
       setCommandOpen: (commandOpen) => set({ commandOpen }),
       setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
       pushToast: (toast) => {
-        const id = newId('toast');
+        const id = getStudioServices().clock.newId('toast');
         set((state) => ({ toasts: [...state.toasts, { ...toast, id }].slice(-4) }));
         return id;
       },

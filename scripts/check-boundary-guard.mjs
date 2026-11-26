@@ -42,6 +42,12 @@ const CASES = [
     source: "import { useStudioStore } from '@asvs/state';\nexport const probe = useStudioStore;\n",
   },
   {
+    id: 'api->state',
+    probe: 'apps/api/src/__boundary_probe__.ts',
+    reason: 'type:api may only depend on domain, ports and adapters',
+    source: "import { useStudioStore } from '@asvs/state';\nexport const probe = useStudioStore;\n",
+  },
+  {
     id: 'feature->mock-services',
     probe: 'libs/features/project-hub/src/__boundary_probe__.ts',
     reason: 'type:feature may not reach the service layer',

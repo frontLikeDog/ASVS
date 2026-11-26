@@ -5,13 +5,14 @@ import type {
   KnowledgeSuggestion,
   Project,
 } from '@asvs/domain';
+import type {
+  ClaimReverification,
+  KnowledgeSuggestionResolution,
+  KnowledgeSyncResult,
+} from '@asvs/ports';
 import { newId, nowIso } from './id';
 
-export interface ReverifyResult {
-  claim: Claim;
-  feature: Feature;
-  evidence: Evidence;
-}
+export type ReverifyResult = ClaimReverification;
 
 export function reverifyClaim(claim: Claim, feature: Feature): ReverifyResult {
   const timestamp = nowIso();
@@ -60,13 +61,7 @@ export function reverifyClaim(claim: Claim, feature: Feature): ReverifyResult {
   return { claim: updatedClaim, feature: updatedFeature, evidence };
 }
 
-export interface SuggestionResolution {
-  suggestion: KnowledgeSuggestion;
-  feature?: Feature;
-  claim?: Claim;
-  evidence?: Evidence;
-  message: string;
-}
+export type SuggestionResolution = KnowledgeSuggestionResolution;
 
 export function acceptSuggestion(
   suggestion: KnowledgeSuggestion,
@@ -181,11 +176,7 @@ export function rejectSuggestion(suggestion: KnowledgeSuggestion): KnowledgeSugg
   return { ...suggestion, status: 'rejected' };
 }
 
-export interface SyncKnowledgeResult {
-  project: Project;
-  suggestion?: KnowledgeSuggestion;
-  message: string;
-}
+export type SyncKnowledgeResult = KnowledgeSyncResult;
 
 /**
  * Deterministic "re-analysis": refreshes timestamps and proposes one new thing

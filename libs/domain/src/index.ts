@@ -1,4 +1,5 @@
 export * from './schemas';
+export * from './workspace';
 export * from './render';
 export * from './capture';
 export * from './timeline';

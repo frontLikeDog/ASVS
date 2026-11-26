@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import type {
   AspectRatio,
@@ -8,6 +8,7 @@ import type {
   LogoMark,
   Project,
   Scene,
+  StudioSnapshot,
   VisualStyle,
 } from '@asvs/domain';
 import {
@@ -15,12 +16,18 @@ import {
   LANGUAGES,
   LOGO_MARKS,
   VISUAL_STYLES,
+  buildWorkspaceExport,
   formatRelativeTime,
+  parseWorkspaceExport,
+  workspaceExportFileName,
 } from '@asvs/domain';
 import {
   AlertTriangle,
   Check,
+  Cloud,
+  CloudOff,
   Database,
+  Download,
   ExternalLink,
   Globe2,
   GitPullRequest,
@@ -33,6 +40,7 @@ import {
   Sparkles,
   Trash2,
   Type,
+  Upload,
   UserRound,
 } from 'lucide-react';
 import {
@@ -59,7 +67,13 @@ import {
   buttonStyles,
   cn,
 } from '@asvs/ui';
-import { useStudioStore, useUiStore } from '@asvs/state';
+import {
+  selectStudioSnapshot,
+  useStudioStore,
+  useUiStore,
+  useWorkspaceSyncStore,
+} from '@asvs/state';
+import type { WorkspaceSyncPhase } from '@asvs/state';
 import { useShallow } from 'zustand/react/shallow';
 import { NotFoundInline } from './not-found-inline';
 
@@ -880,6 +894,297 @@ function SourceCheck({ label, ok, optional }: { label: string; ok: boolean; opti
   );
 }
 
+const SYNC_PHASE_INFO: Record<
+  WorkspaceSyncPhase,
+  { label: string; tone: 'outline' | 'neutral' | 'success' | 'warn' | 'danger' }
+> = {
+  disabled: { label: '未启用', tone: 'outline' },
+  connecting: { label: '连接中', tone: 'warn' },
+  synced: { label: '已同步', tone: 'success' },
+  dirty: { label: '待上传', tone: 'warn' },
+  saving: { label: '上传中', tone: 'warn' },
+  conflict: { label: '版本冲突', tone: 'danger' },
+  error: { label: '同步错误', tone: 'danger' },
+};
+
+function WorkspaceSyncPanel() {
+  const config = useWorkspaceSyncStore((state) => state.config);
+  const phase = useWorkspaceSyncStore((state) => state.phase);
+  const lastSyncedAt = useWorkspaceSyncStore((state) => state.lastSyncedAt);
+  const remoteRevision = useWorkspaceSyncStore((state) => state.remoteRevision);
+  const lastError = useWorkspaceSyncStore((state) => state.lastError);
+  const updateConfig = useWorkspaceSyncStore((state) => state.updateConfig);
+  const requestCommand = useWorkspaceSyncStore((state) => state.requestCommand);
+  const [baseUrl, setBaseUrl] = useState(config.baseUrl);
+  const [workspaceId, setWorkspaceId] = useState(config.workspaceId);
+
+  const info = SYNC_PHASE_INFO[phase];
+  const enabled = config.enabled;
+
+  const enable = (kind: 'connect' | 'push') => {
+    updateConfig({
+      enabled: true,
+      baseUrl: baseUrl.trim() || '/api',
+      workspaceId: workspaceId.trim() || 'default',
+    });
+    requestCommand(kind);
+  };
+
+  return (
+    <Panel>
+      <PanelHeader
+        title="工作区同步（SQLite API）"
+        description="可选：把完整工作区写入本机 Fastify + SQLite 服务，供另一台设备或另一个浏览器恢复。"
+        actions={<Badge tone={info.tone}>{info.label}</Badge>}
+      />
+      <div className="space-y-4 border-t border-line p-4">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="API 地址" hint="开发环境默认经 Vite 代理到 127.0.0.1:4300">
+            <Input
+              value={baseUrl}
+              onChange={(event) => setBaseUrl(event.target.value)}
+              disabled={enabled}
+              placeholder="/api"
+            />
+          </Field>
+          <Field label="工作区 ID" hint="字母、数字、下划线与短横线">
+            <Input
+              value={workspaceId}
+              onChange={(event) => setWorkspaceId(event.target.value)}
+              disabled={enabled}
+              placeholder="default"
+            />
+          </Field>
+        </div>
+
+        {enabled ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<RefreshCw size={12} />}
+              onClick={() => requestCommand('connect')}
+            >
+              重新连接
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<Download size={12} />}
+              onClick={() => requestCommand('pull')}
+            >
+              拉取服务器
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<Upload size={12} />}
+              onClick={() => requestCommand('push')}
+            >
+              上传本机
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<CloudOff size={12} />}
+              onClick={() => updateConfig({ enabled: false })}
+            >
+              断开
+            </Button>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="primary"
+              size="sm"
+              icon={<Cloud size={13} />}
+              onClick={() => enable('connect')}
+            >
+              启用并同步
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<Upload size={12} />}
+              onClick={() => enable('push')}
+            >
+              上传本机并启用
+            </Button>
+          </div>
+        )}
+
+        {enabled ? (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-faint">
+            <span>目标 <code className="font-mono text-muted">{config.baseUrl}</code></span>
+            <span>工作区 <code className="font-mono text-muted">{config.workspaceId}</code></span>
+            {remoteRevision ? <span>服务器版本 r{remoteRevision}</span> : null}
+            {lastSyncedAt ? <span>最近同步 {formatRelativeTime(lastSyncedAt)}</span> : null}
+          </div>
+        ) : null}
+
+        {lastError ? (
+          <Callout tone={phase === 'conflict' ? 'warning' : 'danger'} size="sm" title="同步状态">
+            {lastError}
+          </Callout>
+        ) : null}
+
+        {phase === 'conflict' ? (
+          <div className="flex flex-wrap items-center gap-2 rounded-sm border border-warn/25 bg-warn-soft/30 px-3 py-2">
+            <AlertTriangle size={13} className="text-warn" />
+            <span className="min-w-0 flex-1 text-[10.5px] leading-4 text-muted">
+              服务器上已有更新版本。选择拉取服务器内容，或以本机覆盖。
+            </span>
+            <Button variant="secondary" size="sm" onClick={() => requestCommand('pull')}>
+              拉取服务器
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => requestCommand('push')}>
+              以本机覆盖
+            </Button>
+          </div>
+        ) : null}
+
+        <p className="text-[10px] leading-4 text-faint">
+          同步写入的是本机 Fastify 服务的 SQLite 文件，不经过第三方云。生产运行动画仍由当前页面推进；服务器保存运行状态，供其他设备查看。
+        </p>
+      </div>
+    </Panel>
+  );
+}
+
+function WorkspaceTransferPanel() {
+  const replaceWorkspace = useStudioStore((state) => state.replaceWorkspace);
+  const syncEnabled = useWorkspaceSyncStore((state) => state.config.enabled);
+  const pushToast = useUiStore((state) => state.pushToast);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [preview, setPreview] = useState<StudioSnapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const exportWorkspace = () => {
+    const json = buildWorkspaceExport(selectStudioSnapshot(useStudioStore.getState()));
+    const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = workspaceExportFileName();
+    anchor.click();
+    URL.revokeObjectURL(url);
+    pushToast({
+      tone: 'success',
+      title: '工作区已导出',
+      description: '文件包含全部项目、知识、视频工程与生产记录。',
+    });
+  };
+
+  const readFile = async (file: File | undefined) => {
+    if (!file) return;
+    try {
+      const parsed = parseWorkspaceExport(await file.text());
+      setError(null);
+      setPreview(parsed.workspace);
+    } catch (readError) {
+      setPreview(null);
+      setError(readError instanceof Error ? readError.message : '无法读取该文件。');
+    }
+  };
+
+  const confirmImport = () => {
+    if (!preview) return;
+    replaceWorkspace(preview, '从备份文件导入');
+    setPreview(null);
+    pushToast({
+      tone: 'success',
+      title: '工作区已导入',
+      description: syncEnabled
+        ? '已替换本机数据；同步开启时会自动上传到服务器。'
+        : '已替换本机数据；如需跨设备恢复，请开启上方同步。',
+    });
+  };
+
+  return (
+    <Panel>
+      <PanelHeader
+        title="工作区备份（导入 / 导出）"
+        description="导出完整工作区 JSON；在全新浏览器中导入即可恢复，不依赖服务器。"
+      />
+      <div className="space-y-3 border-t border-line p-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<Download size={12} />}
+            onClick={exportWorkspace}
+          >
+            导出工作区 JSON
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            icon={<Upload size={12} />}
+            onClick={() => inputRef.current?.click()}
+          >
+            导入工作区 JSON
+          </Button>
+          <input
+            ref={inputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              void readFile(file);
+              event.target.value = '';
+            }}
+          />
+        </div>
+        {error ? (
+          <Callout tone="danger" size="sm" title="导入失败">
+            {error}
+          </Callout>
+        ) : null}
+        <p className="text-[10px] leading-4 text-faint">
+          备份不包含 MP4 媒体文件与主题等浏览器偏好；导入会替换当前工作区并清空撤销历史。
+        </p>
+      </div>
+
+      <Dialog open={Boolean(preview)} onOpenChange={(open) => !open && setPreview(null)}>
+        <DialogContent
+          title="导入并替换当前工作区？"
+          description="当前未导出的修改会被覆盖。"
+          size="sm"
+          footer={
+            <>
+              <Button variant="ghost" onClick={() => setPreview(null)}>
+                取消
+              </Button>
+              <Button variant="primary" onClick={confirmImport}>
+                确认导入
+              </Button>
+            </>
+          }
+        >
+          {preview ? (
+            <div className="grid grid-cols-2 gap-px overflow-hidden rounded-sm border border-line bg-line sm:grid-cols-4">
+              {[
+                ['项目', preview.projects.length],
+                ['功能', preview.features.length],
+                ['视频', preview.videos.length],
+                ['运行', preview.runs.length],
+              ].map(([label, value]) => (
+                <div key={String(label)} className="bg-surface px-3 py-2.5 text-center">
+                  <div className="font-display text-[16px] text-fg">{value}</div>
+                  <div className="text-[9px] text-faint">{label}</div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <p className="mt-3 text-[10.5px] leading-4 text-faint">
+            数据会先经过版本迁移与 Schema 校验；结构不完整时不会写入。
+          </p>
+        </DialogContent>
+      </Dialog>
+    </Panel>
+  );
+}
+
 function DataSettings({ project }: { project: Project }) {
   const resetDemoData = useStudioStore((state) => state.resetDemoData);
   const featureCount = useStudioStore(
@@ -898,13 +1203,24 @@ function DataSettings({ project }: { project: Project }) {
   const navigate = useNavigate();
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  const localKeys = ['asvs.studio.v1', 'asvs.ui.v1', 'asvs.onboarding.v1'];
+  const localKeys = [
+    'asvs.studio.v1',
+    'asvs.ui.v1',
+    'asvs.onboarding.v1',
+    'asvs.workspace-sync.v1',
+  ];
 
   return (
     <div className="grid grid-cols-[minmax(0,1fr)] gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
       <div className="space-y-4">
+        <WorkspaceSyncPanel />
+        <WorkspaceTransferPanel />
+
         <Panel>
-          <PanelHeader title="本地演示数据" description="所有工程数据保存在浏览器 localStorage，不上传服务器。" />
+          <PanelHeader
+            title="本地演示数据"
+            description="默认保存在浏览器 localStorage；启用工作区同步后，完整快照会写入本机 SQLite API。"
+          />
           <div className="space-y-3 border-t border-line p-4">
             {localKeys.map((key) => (
               <div key={key} className="flex items-center justify-between gap-3 rounded-sm border border-line bg-raised/30 px-3 py-2">
@@ -914,7 +1230,7 @@ function DataSettings({ project }: { project: Project }) {
             ))}
             <div className="flex items-start gap-2 text-[10.5px] leading-4 text-faint">
               <ShieldCheck size={13} className="mt-0.5 shrink-0 text-success" />
-              刷新页面不会丢失数据。导出 MP4/WebM 只会产生模拟状态，不会写媒体文件；项目 JSON 与 SRT 会真实下载。
+              刷新页面不会丢失数据。同步只写入本机 Fastify 服务的 SQLite 文件，不经过第三方云。导出 MP4/WebM 只会产生模拟状态，不会写媒体文件；项目 JSON、SRT 与工作区备份会真实下载。
             </div>
           </div>
         </Panel>

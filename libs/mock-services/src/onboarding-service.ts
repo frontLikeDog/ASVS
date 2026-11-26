@@ -18,7 +18,10 @@ import {
   ONBOARDING_TEMPLATES,
   VIDEO_TEMPLATES,
 } from '@asvs/mock-data';
+import type { OnboardingResult } from '@asvs/ports';
 import { newId, nowIso } from './id';
+
+export type { OnboardingResult };
 
 const SOURCE_LABELS: Record<SourceKind, string> = {
   github: 'GitHub 仓库',
@@ -207,10 +210,6 @@ function featureFromTemplate(
   return { feature, claim, evidence };
 }
 
-export interface OnboardingResult {
-  project: Project;
-  knowledge: GeneratedKnowledge;
-}
 
 export function generateProjectKnowledge(draft: OnboardingDraft): OnboardingResult {
   const timestamp = nowIso();

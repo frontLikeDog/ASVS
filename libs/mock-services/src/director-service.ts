@@ -27,7 +27,10 @@ import {
   videoProjectSchema,
   withTargetDuration,
 } from '@asvs/domain';
+import type { CreateVideoPlanInput, InterpretDirectorInput } from '@asvs/ports';
 import { newId, nowIso } from './id';
+
+export type { CreateVideoPlanInput, InterpretDirectorInput };
 
 const TONE_LABEL: Record<Tone, string> = {
   confident: TONE_INFO.confident.label,
@@ -251,16 +254,6 @@ function ctaSceneCopy(
   };
 }
 
-export interface CreateVideoPlanInput {
-  project: Project;
-  videoTitle: string;
-  brief: VideoBrief;
-  mode: VideoMode;
-  features: Feature[];
-  claims: Claim[];
-  assets: Asset[];
-  release?: Release;
-}
 
 /**
  * Compiles a brief into a deterministic, editable storyboard. Every scene keeps
@@ -614,12 +607,6 @@ function unknownResult(video: VideoProject, command: string): DirectorResult {
   };
 }
 
-export interface InterpretDirectorInput {
-  command: string;
-  video: VideoProject;
-  context: DirectorContext;
-  focusSceneId?: string;
-}
 
 /**
  * Deterministic intent resolution. Every recognized command mutates real project

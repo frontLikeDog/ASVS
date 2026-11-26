@@ -18,6 +18,8 @@
     "types": ["node", "vite/client"],
     "paths": {
       "@asvs/domain": ["libs/domain/src/index.ts"],
+      "@asvs/ports": ["libs/ports/src/index.ts"],
+      "@asvs/adapters-http": ["libs/adapters-http/src/index.ts"],
       "@asvs/render": ["libs/render/src/index.ts"],
       "@asvs/mock-data": ["libs/mock-data/src/index.ts"],
       "@asvs/mock-services": ["libs/mock-services/src/index.ts"],

@@ -115,6 +115,6 @@ POST /v1/video-projects/:id/exports
 
 ## 11. 架构 ADR 待办
 
-ADR-001 API 框架选择；ADR-002 队列（可考虑 pg-boss，但需评估运维与故障恢复）；ADR-003 对象存储；ADR-004 TTS/LLM 抽象；ADR-005 Rust 索引引入阈值；ADR-006 多租户数据隔离；ADR-007 视频编辑器预览策略。
+ADR-001 API 框架选择（已决定：Fastify，见 [ADR-001](adr/ADR-001-api-framework-fastify.md)）；ADR-002 队列（可考虑 pg-boss，但需评估运维与故障恢复）；ADR-003 对象存储；ADR-004 TTS/LLM 抽象；ADR-005 Rust 索引引入阈值；ADR-006 多租户数据隔离；ADR-007 视频编辑器预览策略；ADR-008 Step 3 工作区存储（已决定：SQLite，但仅用于工作区元数据，见 [ADR-008](adr/ADR-008-sqlite-workspace-storage.md)）。
 
 **关联文档**：04 Nx、05 Data、06 Workflow、07 Media、08 Security。

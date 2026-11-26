@@ -23,6 +23,11 @@ const alias = [
     replacement: path.join(workspaceRoot, 'libs/features/production-suite/src/$1'),
   },
   { find: '@asvs/domain', replacement: path.join(workspaceRoot, 'libs/domain/src/index.ts') },
+  { find: '@asvs/ports', replacement: path.join(workspaceRoot, 'libs/ports/src/index.ts') },
+  {
+    find: '@asvs/adapters-http',
+    replacement: path.join(workspaceRoot, 'libs/adapters-http/src/index.ts'),
+  },
   { find: '@asvs/mock-data', replacement: path.join(workspaceRoot, 'libs/mock-data/src/index.ts') },
   {
     find: '@asvs/mock-services',
@@ -44,6 +49,16 @@ const alias = [
   },
 ];
 
+// Keep browser calls same-origin: the outer capture allowlist only trusts
+// http://localhost:4200, and this avoids a CORS precondition in dev.
+const apiProxy = {
+  '/api': {
+    target: 'http://127.0.0.1:4300',
+    changeOrigin: true,
+    rewrite: (requestPath: string) => requestPath.replace(/^\/api/, ''),
+  },
+};
+
 export default defineConfig({
   root: appRoot,
   plugins: [react(), tailwindcss()],
@@ -52,11 +67,13 @@ export default defineConfig({
     host: 'localhost',
     port: 4200,
     strictPort: true,
+    proxy: apiProxy,
   },
   preview: {
     host: 'localhost',
     port: 4200,
     strictPort: true,
+    proxy: apiProxy,
   },
   build: {
     outDir: path.join(workspaceRoot, 'dist/apps/web-studio'),

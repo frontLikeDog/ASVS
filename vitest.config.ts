@@ -9,6 +9,8 @@ export default defineConfig({
   resolve: {
     alias: {
       '@asvs/domain': path.join(root, 'libs/domain/src/index.ts'),
+      '@asvs/ports': path.join(root, 'libs/ports/src/index.ts'),
+      '@asvs/adapters-http': path.join(root, 'libs/adapters-http/src/index.ts'),
       '@asvs/render': path.join(root, 'libs/render/src/index.ts'),
       '@asvs/mock-data': path.join(root, 'libs/mock-data/src/index.ts'),
       '@asvs/mock-services': path.join(root, 'libs/mock-services/src/index.ts'),
@@ -21,7 +23,12 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
-    include: ['libs/**/*.test.ts', 'libs/**/*.test.tsx', 'workers/**/*.test.ts'],
+    include: [
+      'libs/**/*.test.ts',
+      'libs/**/*.test.tsx',
+      'workers/**/*.test.ts',
+      'apps/api/**/*.test.ts',
+    ],
     setupFiles: ['vitest.setup.ts'],
     css: false,
     testTimeout: 15000,

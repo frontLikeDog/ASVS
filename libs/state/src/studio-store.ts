@@ -26,44 +26,37 @@ import type {
   VideoStage,
   VideoTemplate,
 } from '@asvs/domain';
-import type { SyncKnowledgeResult } from '@asvs/mock-services';
+import type {
+  ConnectionResult,
+  ExportConfig,
+  KnowledgeSyncResult,
+  StudioServices,
+} from '@asvs/ports';
 import {
-  DEFAULT_VIDEO_FPS,
-  deriveSceneVisual,
+  STUDIO_SNAPSHOT_VERSION,
+  migrateStudioSnapshot,
   normalizeSceneOrder,
   orderedScenes,
-  sceneDurationFrames,
   studioSnapshotSchema,
   syncBriefDuration,
   totalDuration,
   withTargetDuration,
 } from '@asvs/domain';
 import { createSeedSnapshot } from '@asvs/mock-data';
-import {
-  acceptSuggestion,
-  approveProductionRun,
-  buildReviewBundle,
-  cancelProductionRun,
-  createExportRecord,
-  createProductionRun,
-  createVideoPlan,
-  delay,
-  generateProjectKnowledge,
-  interpretDirectorCommand,
-  newId,
-  nowIso,
-  pauseProductionRun,
-  rejectSuggestion,
-  resumeProductionRun,
-  retryProductionRun,
-  reverifyClaim,
-  setProductionSpeed,
-  simulateConnection,
-  syncKnowledge,
-  tickExportRecord,
-  tickProductionRun,
-  type ExportConfig,
-} from '@asvs/mock-services';
+import { getStudioServices } from './services';
+
+/** Late-bound so app composition / tests can replace the implementation. */
+function services(): StudioServices {
+  return getStudioServices();
+}
+
+function nowIso(): string {
+  return services().clock.nowIso();
+}
+
+function newId(prefix: string): string {
+  return services().clock.newId(prefix);
+}
 
 export interface VideoHistory {
   past: VideoProject[];
@@ -105,48 +98,12 @@ export interface ReviewDecisionResult {
 }
 
 /**
- * Persisted snapshot version. Bump this whenever `studioSnapshotSchema` gains
- * required fields and add a step to `migratePersistedStudioState`.
+ * Persisted snapshot version. The migration chain lives in `libs/domain` so the
+ * HTTP API and workspace import/export apply exactly the same rules as the
+ * browser persist middleware.
  */
-export const STUDIO_PERSIST_VERSION = 2;
-
-/**
- * Explicit v1 → v2 migration. v1 scenes only had the flat `visualType`; v2
- * adds the render IR (`visual`), `revision` and a frame cache, and videos get
- * an explicit `fps`. Never drop data here: unknown shapes are left untouched
- * so the `merge` validator can fall back to the seed instead of crashing.
- */
-export function migratePersistedStudioState(persisted: unknown, fromVersion: number): unknown {
-  if (!persisted || typeof persisted !== 'object') return persisted;
-  if (fromVersion >= STUDIO_PERSIST_VERSION) return persisted;
-
-  const candidate = persisted as Partial<StudioData> & Record<string, unknown>;
-  if (!Array.isArray(candidate.videos)) return persisted;
-
-  const videos = candidate.videos.map((video) => {
-    const legacy = video as VideoProject & { fps?: number };
-    const fps = legacy.fps ?? DEFAULT_VIDEO_FPS;
-    return {
-      ...legacy,
-      fps,
-      scenes: legacy.scenes.map((scene) => {
-        const legacyScene = scene as Scene & {
-          revision?: number;
-          durationFrames?: number;
-          visual?: Scene['visual'];
-        };
-        return {
-          ...legacyScene,
-          revision: legacyScene.revision ?? 1,
-          durationFrames: legacyScene.durationFrames ?? sceneDurationFrames(legacyScene, fps),
-          visual: legacyScene.visual ?? deriveSceneVisual(legacyScene),
-        };
-      }),
-    };
-  });
-
-  return { ...candidate, videos };
-}
+export const STUDIO_PERSIST_VERSION = STUDIO_SNAPSHOT_VERSION;
+export const migratePersistedStudioState = migrateStudioSnapshot;
 
 export interface StudioState extends StudioData {
   history: Record<string, VideoHistory>;
@@ -154,8 +111,8 @@ export interface StudioState extends StudioData {
   createProjectFromDraft: (draft: OnboardingDraft) => string;
   updateProject: (projectId: string, patch: Partial<Pick<Project, 'name' | 'productName' | 'description' | 'website' | 'defaultAspect' | 'defaultLanguage' | 'templateId'>>) => void;
   updateBrand: (projectId: string, brand: BrandKit) => void;
-  testConnection: (input: { kind: 'github' | 'docs' | 'website'; value: string; branch?: string }) => Promise<ReturnType<typeof simulateConnection>>;
-  syncProjectKnowledge: (projectId: string) => Promise<SyncKnowledgeResult | null>;
+  testConnection: (input: { kind: 'github' | 'docs' | 'website'; value: string; branch?: string }) => Promise<ConnectionResult>;
+  syncProjectKnowledge: (projectId: string) => Promise<KnowledgeSyncResult | null>;
   acceptKnowledgeSuggestion: (suggestionId: string) => boolean;
   rejectKnowledgeSuggestion: (suggestionId: string) => void;
   reverifyClaim: (claimId: string) => boolean;
@@ -188,6 +145,8 @@ export interface StudioState extends StudioData {
 
   startExport: (videoId: string, config: ExportConfig) => ExportStartResult;
   tickExports: (deltaMs: number) => void;
+  /** Replace the whole workspace from cloud sync or an imported backup. */
+  replaceWorkspace: (snapshot: StudioSnapshot, note?: string) => void;
   resetDemoData: () => void;
 }
 
@@ -265,7 +224,7 @@ function buildBundle(state: StudioState, videoId: string): ReviewBundle | null {
   if (!video) return null;
   const project = state.projects.find((item) => item.id === video.projectId);
   if (!project) return null;
-  return buildReviewBundle({
+  return services().evidence.buildReviewBundle({
     video,
     project,
     features: state.features.filter((feature) => feature.projectId === project.id),
@@ -300,6 +259,24 @@ export function selectProjectFeatures(state: StudioState, projectId: string): Fe
   return state.features.filter((feature) => feature.projectId === projectId);
 }
 
+export function selectStudioSnapshot(state: StudioState): StudioSnapshot {
+  return {
+    projects: state.projects,
+    features: state.features,
+    claims: state.claims,
+    evidence: state.evidence,
+    pullRequests: state.pullRequests,
+    releases: state.releases,
+    suggestions: state.suggestions,
+    assets: state.assets,
+    templates: state.templates,
+    videos: state.videos,
+    runs: state.runs,
+    exports: state.exports,
+    activity: state.activity,
+  };
+}
+
 export function selectProjectVideos(state: StudioState, projectId: string): VideoProject[] {
   return state.videos
     .filter((video) => video.projectId === projectId)
@@ -321,7 +298,7 @@ export const useStudioStore = create<StudioState>()(
       history: {},
 
       createProjectFromDraft: (draft) => {
-        const { project, knowledge } = generateProjectKnowledge(draft);
+        const { project, knowledge } = services().onboarding.generateProjectKnowledge(draft);
         set((state) => ({
           projects: [project, ...state.projects],
           features: [...knowledge.features, ...state.features],
@@ -381,16 +358,16 @@ export const useStudioStore = create<StudioState>()(
       },
 
       testConnection: async (input) => {
-        await delay(850);
-        return simulateConnection(input);
+        await services().clock.delay(850);
+        return services().onboarding.simulateConnection(input);
       },
 
       syncProjectKnowledge: async (projectId) => {
-        await delay(1100);
+        await services().clock.delay(1100);
         const state = get();
         const project = state.projects.find((item) => item.id === projectId);
         if (!project) return null;
-        const result = syncKnowledge({
+        const result = services().knowledge.syncKnowledge({
           project,
           features: state.features.filter((feature) => feature.projectId === projectId),
           claims: state.claims.filter((claim) => claim.projectId === projectId),
@@ -417,7 +394,7 @@ export const useStudioStore = create<StudioState>()(
         const state = get();
         const suggestion = state.suggestions.find((item) => item.id === suggestionId);
         if (!suggestion || suggestion.status !== 'pending') return false;
-        const resolution = acceptSuggestion(
+        const resolution = services().knowledge.acceptSuggestion(
           suggestion,
           state.features.filter((feature) => feature.projectId === suggestion.projectId),
           state.claims.filter((claim) => claim.projectId === suggestion.projectId),
@@ -453,7 +430,7 @@ export const useStudioStore = create<StudioState>()(
           if (!suggestion) return state;
           return {
             suggestions: state.suggestions.map((item) =>
-              item.id === suggestionId ? rejectSuggestion(item) : item,
+              item.id === suggestionId ? services().knowledge.rejectSuggestion(item) : item,
             ),
             activity: activity(state, {
               projectId: suggestion.projectId,
@@ -471,7 +448,7 @@ export const useStudioStore = create<StudioState>()(
         if (!claim) return false;
         const feature = state.features.find((item) => item.id === claim.featureId);
         if (!feature) return false;
-        const result = reverifyClaim(claim, feature);
+        const result = services().knowledge.reverifyClaim(claim, feature);
         set((current) => ({
           claims: current.claims.map((item) => (item.id === claimId ? result.claim : item)),
           features: current.features.map((item) =>
@@ -513,7 +490,7 @@ export const useStudioStore = create<StudioState>()(
         const release = state.releases
           .filter((item) => item.projectId === project.id)
           .sort((a, b) => new Date(b.releasedAt).getTime() - new Date(a.releasedAt).getTime())[0];
-        const video = createVideoPlan({
+        const video = services().director.createVideoPlan({
           project,
           videoTitle: input.title,
           brief: input.brief,
@@ -723,12 +700,12 @@ export const useStudioStore = create<StudioState>()(
           ),
         }));
 
-        await delay(650);
+        await services().clock.delay(650);
 
         const freshState = get();
         const freshVideo = findVideo(freshState.videos, videoId);
         if (!freshVideo) return null;
-        const result = interpretDirectorCommand({
+        const result = services().director.interpretDirectorCommand({
           command: text,
           video: freshVideo,
           context: selectDirectorContext(freshState, project.id),
@@ -832,7 +809,7 @@ export const useStudioStore = create<StudioState>()(
             ['queued', 'running', 'paused', 'awaiting_approval'].includes(run.status),
         );
         if (active) return active.id;
-        const run = createProductionRun({ video, scenario });
+        const run = services().demo.createProductionRun({ video, scenario });
         set((current) => ({
           runs: [run, ...current.runs],
           videos: replaceVideo(current.videos, { ...video, stage: 'producing' }),
@@ -851,7 +828,7 @@ export const useStudioStore = create<StudioState>()(
         set((state) => {
           const run = state.runs.find((item) => item.id === runId);
           if (!run) return state;
-          const nextRun = tickProductionRun(run, deltaMs);
+          const nextRun = services().demo.tickProductionRun(run, deltaMs);
           if (nextRun === run) return state;
           let videos = state.videos;
           let nextActivity = state.activity;
@@ -892,13 +869,17 @@ export const useStudioStore = create<StudioState>()(
 
       pauseRun: (runId) => {
         set((state) => ({
-          runs: state.runs.map((run) => (run.id === runId ? pauseProductionRun(run) : run)),
+          runs: state.runs.map((run) =>
+            run.id === runId ? services().demo.pauseProductionRun(run) : run,
+          ),
         }));
       },
 
       resumeRun: (runId) => {
         set((state) => ({
-          runs: state.runs.map((run) => (run.id === runId ? resumeProductionRun(run) : run)),
+          runs: state.runs.map((run) =>
+            run.id === runId ? services().demo.resumeProductionRun(run) : run,
+          ),
         }));
       },
 
@@ -906,7 +887,7 @@ export const useStudioStore = create<StudioState>()(
         set((state) => {
           const run = state.runs.find((item) => item.id === runId);
           if (!run) return state;
-          const nextRun = cancelProductionRun(run);
+          const nextRun = services().demo.cancelProductionRun(run);
           let videos = state.videos;
           const video = findVideo(videos, run.videoId);
           if (video && ['running', 'paused', 'awaiting_approval'].includes(run.status)) {
@@ -930,7 +911,7 @@ export const useStudioStore = create<StudioState>()(
         set((state) => {
           const run = state.runs.find((item) => item.id === runId);
           if (!run) return state;
-          const nextRun = retryProductionRun(run);
+          const nextRun = services().demo.retryProductionRun(run);
           if (nextRun === run) return state;
           return {
             runs: state.runs.map((item) => (item.id === runId ? nextRun : item)),
@@ -949,7 +930,7 @@ export const useStudioStore = create<StudioState>()(
         set((state) => {
           const run = state.runs.find((item) => item.id === runId);
           if (!run) return state;
-          const nextRun = approveProductionRun(run);
+          const nextRun = services().demo.approveProductionRun(run);
           if (nextRun === run) return state;
           return {
             runs: state.runs.map((item) => (item.id === runId ? nextRun : item)),
@@ -967,7 +948,7 @@ export const useStudioStore = create<StudioState>()(
       changeRunSpeed: (runId, speed) => {
         set((state) => ({
           runs: state.runs.map((run) =>
-            run.id === runId ? setProductionSpeed(run, speed) : run,
+            run.id === runId ? services().demo.setProductionSpeed(run, speed) : run,
           ),
         }));
       },
@@ -1031,7 +1012,7 @@ export const useStudioStore = create<StudioState>()(
         if (video.stage !== 'approved' && video.stage !== 'exported') {
           return { ok: false, message: '只有已通过审核的视频才能导出。' };
         }
-        const record = createExportRecord({ video, config });
+        const record = services().export.createExportRecord({ video, config });
         set((current) => ({
           exports: [record, ...current.exports],
           videos:
@@ -1055,7 +1036,7 @@ export const useStudioStore = create<StudioState>()(
           let changed = false;
           const completed: ExportRecord[] = [];
           const exports = state.exports.map((record) => {
-            const next = tickExportRecord(record, deltaMs);
+            const next = services().export.tickExportRecord(record, deltaMs);
             if (next !== record) changed = true;
             if (next.status === 'completed' && record.status !== 'completed') completed.push(next);
             return next;
@@ -1077,6 +1058,20 @@ export const useStudioStore = create<StudioState>()(
             }
           });
           return { exports, videos, activity: nextActivity };
+        });
+      },
+
+      replaceWorkspace: (snapshot, note) => {
+        const parsed = studioSnapshotSchema.parse(snapshot);
+        set({
+          ...parsed,
+          history: {},
+          activity: note
+            ? activity(
+                { activity: parsed.activity },
+                { kind: 'system', title: '工作区已恢复', detail: note },
+              )
+            : parsed.activity,
         });
       },
 

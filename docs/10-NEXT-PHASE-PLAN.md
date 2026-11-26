@@ -287,7 +287,7 @@ docs/03 设计的是模块化单体 + 队列 + 对象存储 + Postgres。一次�
 |---|---|---|
 | S3-1 | 按 docs/08 §8 的 port 定义接口（`ProductKnowledgePort` / `DemoExecutionPort` / `EvidenceVerificationPort`） | `mock-services` 成为其中一个实现，Store 只依赖接口 |
 | S3-2 | `apps/api` 最小实现：只有 `GET/PUT /v1/workspaces/:id` + 生产运行状态 | 两个浏览器实例看到同一工作区 |
-| S3-3 | 存储选型：**先 SQLite 或单表 JSONB**，不上对象存储 | 有 ADR-003 决议记录 |
+| S3-3 | 存储选型：**先 SQLite 或单表 JSONB**，不上对象存储 | 有 ADR 决议记录（实际为 [ADR-008](adr/ADR-008-sqlite-workspace-storage.md)；ADR-003 保留给对象存储） |
 | S3-4 | 迁移链落地（与 S1-6 合并） | 真实迁移用例：v1 → v2 不丢数据 |
 | S3-5 | 工作区整体导入 / 导出（不只单条视频工程 JSON） | 导出后可导入到全新浏览器 |
 
@@ -305,6 +305,41 @@ schema 变更一次，已有数据仍在
 |---|---|---|
 | 过早抽象 | 接口数量膨胀，实现只有 mock 一个 | 只抽已经确定要换的（知识、录屏、渲染）；AI / TTS 等延后 |
 | 后端拖慢前端 | Step 1/2 被阻塞 | S3 与 S2 并行，且 S3-1 的接口改动**不**触碰页面 |
+
+### 执行状态（2026-11-27）
+
+| ID | 状态 | 证据 |
+|---|---|---|
+| S3-1 | ✅ 完成 | 新增 `libs/ports`：`ProductKnowledgePort` / `DemoExecutionPort` / `EvidenceVerificationPort`，并把现有服务层拆成 `OnboardingPort` / `DirectorPort` / `MediaExportPort` / `StudioClock` / `WorkspaceRepository` / `ProductionRunRepository`。`mock-services` 通过 `mockStudioServices` 实现 `StudioServices`；`studio-store` 与 `ui-store` 只经 `getStudioServices()` 访问，不再直接调用具体 mock 函数。端口范围比 docs/08 §8 的三个更大，是因为 Store 实际调用了知识、录屏、导演、导出、时钟等多类能力；不抽象这些就无法满足 Exit Gate。 |
+| S3-2 | ✅ 完成 | `apps/api`（Fastify 5）：`GET/PUT /v1/workspaces/:id`、`GET /v1/workspaces/:id/export`、`GET /v1/workspaces/:id/production-runs` 与 `/:runId`。Web 端 `workspace-sync` 控制器动态加载，设置页可选启用；Playwright `workspace-sync.spec.ts` 用两个独立 browser context 验证同一工作区：A 改名 → 服务器落库 → B 打开即读到。⚠️ 生产运行仍由页面推进，API 只保存/返回状态；本轮没有把运行调度搬到服务端。 |
+| S3-3 | ✅ 完成 | [ADR-001](adr/ADR-001-api-framework-fastify.md)（Fastify）与 [ADR-008](adr/ADR-008-sqlite-workspace-storage.md)（SQLite）。docs/10 原文的「ADR-003」与 docs/03 已预留给对象存储的编号冲突，因此 SQLite 记为 ADR-008。 |
+| S3-4 | ✅ 完成 | `libs/domain/src/workspace.ts` 统一 `STUDIO_SNAPSHOT_VERSION = 2` 与 `migrateStudioSnapshot`，浏览器持久化、API 读取、导入导出共用同一条链；SQLite 用 `PRAGMA user_version` 执行 v1→v2 迁移。测试：v1 裸快照 / Zustand `{state,version}` 备份补齐 `fps/revision/durationFrames/visual`，未来版本拒绝，损坏 JSON 拒绝；`apps/api/src/db/database.test.ts` 证明 v1 运行记录迁移后仍在。 |
+| S3-5 | ✅ 完成 | 设置页「工作区备份」导出完整 `asvs.workspace` 信封（13 个数组，不含媒体与 UI 偏好），并可导入到全新浏览器；Playwright `workspace-sync.spec.ts` 的真实下载 + 新 context 导入验证恢复。同步开启时导入后会作为本地修改自动上传。 |
+
+**Exit Gate 核对**
+
+| Gate | 状态 | 证据 |
+|---|---|---|
+| Store 里不再直接调用 mock-services 具体函数 | ✅ | `libs/state/src/studio-store.ts`、`ui-store.ts` 经 `services()` / `StudioClock`；`services.ts` 是唯一的默认 mock 注入点 |
+| schema 变更一次，已有数据仍在 | ✅ | `workspace.test.ts`（v1→v2、Zustand 备份、损坏拒绝）+ `database.test.ts`（v1→v2 数据库迁移）+ `app.test.ts`（读取时升级并写回） |
+| 工作区可导出、可导入、可跨设备恢复 | ✅ | 设置页导出 / 导入；E2E 在新 context 导入后刷新仍保留；API 双 context 同步 |
+| 两个浏览器实例看到同一工作区 | ✅ | `apps/web-studio/e2e/workspace-sync.spec.ts`：两个独立 browser context，A 改名后 B 读取到同一名称 |
+
+**验证记录**
+
+- `pnpm exec nx run-many -t lint typecheck test --skip-nx-cache`：15 个项目通过。
+- `pnpm exec vitest run`：21 个测试文件 / 151 个测试通过（含 API 12 + 数据库迁移 1）。
+- `pnpm test:e2e`：34 个测试通过（新增 2 个工作区同步 / 备份用例）。
+- `pnpm build`：初始 221.5 kB gzip（预算 230 kB），工作区同步控制器单独成 chunk（6.68 kB raw）。
+- 未验证：CI 仍未在真实远端跑过；`node:sqlite` 在 CI Node 22 的实际运行只由本地 Node 26 与文档版本推断。
+
+**Step 3 边界**
+
+- 没有登录、鉴权或多租户隔离；API 默认只监听 `127.0.0.1`，CORS 只允许本地 4200。
+- 单写入者 SQLite；多实例部署前必须换 PostgreSQL 或增加串行化层。
+- 媒体二进制不进入工作区备份；跨设备恢复后 `Asset.media` 路径可能失效，UI 已明确提示。
+- 服务端不校验生产运行状态迁移，也不推进运行；`docs/05` §27 的「状态迁移只能由应用服务修改」尚未在 API 落地。
+- Zod 默认剥离未知字段；未来客户端新增字段若未升级 schema，保存时会被丢弃。
 
 ---
 
@@ -401,7 +436,7 @@ docs/01 §7 的北极星指标需要真实后端才能度量；本阶段先建�
 
 1. **第一条样片选题**：docs/09 §8 建议选「已部署到可重置 staging、可通过 UI 复现」的功能。是继续用 `web-studio` 自身作为 fixture，还是接一个真实 staging？
 2. **S4-5 用户验证的时机**：是在 Step 1 完成后立刻做（用视频效果去访谈），还是等 Step 2 有真实录屏后再做？
-3. **Step 3 的存储选型**：SQLite（本地优先）vs 单表 Postgres JSONB（云优先）。影响后续 Step 4 的部署形态。
+3. ~~**Step 3 的存储选型**：SQLite（本地优先）vs 单表 Postgres JSONB（云优先）。~~ 已决定 SQLite（[ADR-008](adr/ADR-008-sqlite-workspace-storage.md)）；API 框架已决定 Fastify（[ADR-001](adr/ADR-001-api-framework-fastify.md)）。
 4. **IR 破坏性变更策略**：`sceneSchema` 改为判别联合时，是否接受「清空已有演示数据」？（当前 `persist` 行为就是清空；若要保留，S1-6 必须先于 S1-1 完成。）
 5. **是否接受 AI Director 仍是确定性规则**：Step 1–4 都不包含真实 LLM 接入。若产品演示需要真实 AI，需单独排期。
 

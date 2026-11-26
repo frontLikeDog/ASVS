@@ -4,6 +4,7 @@
   "sourceRoot": "apps/web-studio/src",
   "projectType": "application",
   "tags": ["type:app", "scope:studio"],
+  "implicitDependencies": ["domain", "ports", "adapters-http", "state", "ui", "project-hub", "video-studio", "production-suite"],
   "targets": {
     "serve": {
       "executor": "nx:run-commands",

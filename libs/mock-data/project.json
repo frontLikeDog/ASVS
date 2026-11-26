@@ -4,6 +4,7 @@
   "sourceRoot": "libs/mock-data/src",
   "projectType": "library",
   "tags": ["type:mock-data", "scope:shared", "runtime:universal"],
+  "implicitDependencies": ["domain"],
   "targets": {
     "lint": {
       "executor": "nx:run-commands",
