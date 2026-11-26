@@ -229,6 +229,69 @@ describe('demoPlanV1Schema', () => {
     }
   });
 
+  it('拒绝裸 XPath / 裸 CSS（白名单前缀之前就拦截）', () => {
+    for (const target of [
+      '//button[1]',
+      '.btn',
+      '#submit',
+      'button[type=submit]',
+      'div > button',
+      'button',
+      'xpath=//button[1]',
+      'css=.btn',
+    ]) {
+      const plan = basePlan();
+      plan.steps = [
+        {
+          id: 'click',
+          action: 'click',
+          target,
+        },
+        ...(plan.steps as Record<string, unknown>[]),
+      ];
+      expect(failedPaths(plan), target).toContain('steps.0.target');
+    }
+  });
+
+  it('接受全部受支持的前缀与合法 role', () => {
+    for (const target of [
+      'role=button,name=待审核',
+      'role=link,name="视频工程"',
+      'role=heading,level=2',
+      'heading=视频库',
+      'label=搜索视频',
+      'placeholder=搜索…',
+      'testid=task-status-running',
+      'text=1 条结果',
+      'alt=产品截图',
+    ]) {
+      const plan = basePlan();
+      plan.steps = [
+        ...(plan.steps as Record<string, unknown>[]),
+        { id: 'click', action: 'click', target },
+      ];
+      expect(() => parse(plan), target).not.toThrow();
+    }
+  });
+
+  it('拒绝非法 role / level 与额外参数', () => {
+    for (const target of [
+      'role=script,name=x',
+      'role=button,level=2',
+      'role=button,name=x,foo=y',
+      'role=heading,level=7',
+      'role=button,name="未闭合',
+      'role=',
+    ]) {
+      const plan = basePlan();
+      plan.steps = [
+        ...(plan.steps as Record<string, unknown>[]),
+        { id: 'click', action: 'click', target },
+      ];
+      expect(failedPaths(plan), target).toContain('steps.1.target');
+    }
+  });
+
   it('拒绝非 16:9 的 viewport', () => {
     const plan = basePlan();
     plan.viewport = { width: 1080, height: 1920, deviceScaleFactor: 1 };

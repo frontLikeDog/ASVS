@@ -32,6 +32,137 @@ export const DEMO_ASSERTION_KINDS = [
 ] as const;
 export type DemoAssertionKind = (typeof DEMO_ASSERTION_KINDS)[number];
 
+/**
+ * The only selector prefixes a DemoPlan may use. This list is the single
+ * source of truth: the schema rejects anything else *before* a browser is
+ * launched, and `workers/browser-worker/src/selector.ts` resolves exactly the
+ * same DSL at runtime.
+ *
+ *   role=button,name=Start · heading=视频库 · label=搜索视频 · placeholder=…
+ *   testid=task-status-running · text=1 条结果 · alt=产品截图
+ */
+export const CAPTURE_SELECTOR_PREFIXES = [
+  'role',
+  'heading',
+  'label',
+  'placeholder',
+  'testid',
+  'text',
+  'alt',
+] as const;
+export type CaptureSelectorPrefix = (typeof CAPTURE_SELECTOR_PREFIXES)[number];
+
+/** ARIA roles the DSL allows. Anything else is rejected in schema and runtime. */
+export const SAFE_ARIA_ROLES = [
+  'alert',
+  'article',
+  'banner',
+  'button',
+  'cell',
+  'checkbox',
+  'columnheader',
+  'combobox',
+  'complementary',
+  'dialog',
+  'figure',
+  'form',
+  'group',
+  'heading',
+  'img',
+  'link',
+  'list',
+  'listitem',
+  'main',
+  'menu',
+  'menuitem',
+  'navigation',
+  'note',
+  'option',
+  'progressbar',
+  'radio',
+  'region',
+  'row',
+  'rowheader',
+  'search',
+  'separator',
+  'slider',
+  'spinbutton',
+  'status',
+  'switch',
+  'tab',
+  'table',
+  'tablist',
+  'textbox',
+  'toolbar',
+  'tooltip',
+] as const;
+
+const SAFE_ARIA_ROLE_SET = new Set<string>(SAFE_ARIA_ROLES);
+
+function roleSelectorProblem(body: string): string | null {
+  const comma = body.indexOf(',');
+  const role = (comma === -1 ? body : body.slice(0, comma)).trim();
+  if (!role) return 'role selector 缺少角色，例如 role=button,name=Start';
+  if (!SAFE_ARIA_ROLE_SET.has(role)) {
+    return `不允许的 ARIA role "${role}"。允许的 role：${[...SAFE_ARIA_ROLES].sort().join(', ')}`;
+  }
+  if (comma === -1) return null;
+
+  const rest = body.slice(comma + 1).trim();
+  if (rest.startsWith('name=')) {
+    let name = rest.slice('name='.length);
+    if (/,[a-z-]+=/i.test(name)) {
+      return 'role selector 只支持 name= 或 level=，不接受额外参数';
+    }
+    if (name.startsWith('"') || name.endsWith('"')) {
+      if (!(name.length >= 2 && name.startsWith('"') && name.endsWith('"'))) {
+        return `role 的 name 引号不成对，收到 "${name}"`;
+      }
+      name = name.slice(1, -1);
+    }
+    if (!name) return 'role selector 的 name 不能为空';
+    return null;
+  }
+  if (rest.startsWith('level=')) {
+    const level = Number(rest.slice('level='.length));
+    if (!Number.isInteger(level) || level < 1 || level > 6) {
+      return `role 的 level 必须是 1–6 的整数，收到 "${rest}"`;
+    }
+    if (role !== 'heading') return 'level= 只能与 role=heading 一起使用';
+    return null;
+  }
+  return `role selector 只支持 name= 或 level=，收到 "${rest}"`;
+}
+
+/**
+ * Returns why a selector is invalid, or `null` when the DSL accepts it.
+ * Bare CSS (`.btn`), bare XPath (`//button[1]`) and any unknown prefix fail
+ * here, which is what makes the pre-browser gate airtight.
+ */
+export function describeSelectorProblem(raw: string): string | null {
+  const selector = raw.trim();
+  const equals = selector.indexOf('=');
+  if (equals <= 0) {
+    return `selector 必须以受支持的前缀开头（${CAPTURE_SELECTOR_PREFIXES.join(' / ')}），收到 "${raw}"`;
+  }
+  const prefix = selector.slice(0, equals);
+  const body = selector.slice(equals + 1);
+
+  switch (prefix) {
+    case 'role':
+      return roleSelectorProblem(body);
+    case 'heading':
+    case 'label':
+    case 'placeholder':
+    case 'testid':
+    case 'text':
+    case 'alt':
+      return body.trim() ? null : `${prefix}= selector 缺少内容`;
+    default:
+      return `不支持的 selector 前缀 "${prefix}"。DemoPlan 只能使用 ${CAPTURE_SELECTOR_PREFIXES.join(' / ')}；禁止 CSS、XPath、nth-child 与任意脚本。`;
+  }
+}
+
 export const demoAssertionSchema = z
   .object({
     kind: z.enum(DEMO_ASSERTION_KINDS),
@@ -156,6 +287,18 @@ export const demoStepSchema = z
         }
         break;
     }
+
+    // Whitelist gate: every target that will be resolved as a selector must
+    // use the semantic DSL. Bare CSS/XPath is rejected here, before any
+    // browser is launched (navigate paths and url assertions are exempt).
+    const usesSelector =
+      step.target !== undefined &&
+      step.action !== 'navigate' &&
+      !(step.action === 'assert' && step.assertion?.kind === 'url');
+    if (usesSelector) {
+      const problem = describeSelectorProblem(step.target!);
+      if (problem) fail(`target 不合法：${problem}`, ['target']);
+    }
   });
 export type DemoStep = z.infer<typeof demoStepSchema>;
 
@@ -279,18 +422,6 @@ export const demoPlanV1Schema = z
           'steps',
           index,
           'valueRef',
-        ]);
-      }
-      if (
-        step.target &&
-        /(^|>>)\s*(css|xpath|nth)=|:has\(|:has-text\(|nth-child|nth-of-type|document\.|window\./i.test(
-          step.target,
-        )
-      ) {
-        fail('target 只能使用 role/label/testid/text/heading 等安全 selector，禁止 CSS/nth-child', [
-          'steps',
-          index,
-          'target',
         ]);
       }
     }

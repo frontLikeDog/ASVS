@@ -40,6 +40,26 @@ describe('DemoPlan approval', () => {
     expect(() => loadApprovedDemoPlan(file)).toThrow(/审批摘要不匹配/);
   });
 
+  it('裸 CSS / 裸 XPath 在解析计划时即被拒绝（不会启动浏览器）', () => {
+    const source = readFileSync(tourPlan, 'utf8');
+    const dir = mkdtempSync(path.join(tmpdir(), 'asvs-plan-selector-'));
+    const cases = [
+      { name: 'bare-xpath', target: '//button[1]' },
+      { name: 'bare-css-class', target: '.btn' },
+      { name: 'bare-css-id', target: '#submit' },
+    ];
+    for (const item of cases) {
+      const file = path.join(dir, `${item.name}.yaml`);
+      writeFileSync(
+        file,
+        source.replace('target: heading=视频工程', `target: '${item.target}'`),
+        'utf8',
+      );
+      expect(() => parseDemoPlanFile(file), item.target).toThrow(DemoPlanError);
+      expect(() => parseDemoPlanFile(file), item.target).toThrow(/target/);
+    }
+  });
+
   it('默认计划路径指向 web-studio-tour', () => {
     expect(defaultPlan).toBe(tourPlan);
   });

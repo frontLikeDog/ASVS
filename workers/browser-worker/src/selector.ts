@@ -1,10 +1,19 @@
 import type { Locator, Page } from '@playwright/test';
+import {
+  CAPTURE_SELECTOR_PREFIXES,
+  SAFE_ARIA_ROLES,
+  describeSelectorProblem,
+} from '@asvs/domain';
 import { DemoPlanError } from './plan';
 
 /**
  * A deliberately small locator DSL. DemoPlans are data, so a plan may never
  * smuggle CSS/XPath/JS into the browser: only the prefixes below are resolved,
  * and they all map to Playwright's semantic locators.
+ *
+ * The prefix/role whitelist lives in `@asvs/domain` (`capture.ts`) so the
+ * schema rejects a bad selector before a browser starts, and this module
+ * resolves exactly the same language. Nothing may diverge here.
  *
  *   role=button,name=Start
  *   role=link,name="视频工程"      ← 带双引号的 name 表示精确匹配
@@ -15,61 +24,11 @@ import { DemoPlanError } from './plan';
  *   text=Lumen 2.8
  *   alt=产品截图
  */
-export const SELECTOR_PREFIXES = [
-  'role',
-  'heading',
-  'label',
-  'placeholder',
-  'testid',
-  'text',
-  'alt',
-] as const;
+export const SELECTOR_PREFIXES = CAPTURE_SELECTOR_PREFIXES;
 export type SelectorPrefix = (typeof SELECTOR_PREFIXES)[number];
 
-/** Roles we allow. This keeps plans away from exotic/unsafe role games. */
-export const SAFE_ROLES = new Set([
-  'alert',
-  'article',
-  'banner',
-  'button',
-  'cell',
-  'checkbox',
-  'columnheader',
-  'combobox',
-  'complementary',
-  'dialog',
-  'figure',
-  'form',
-  'group',
-  'heading',
-  'img',
-  'link',
-  'list',
-  'listitem',
-  'main',
-  'menu',
-  'menuitem',
-  'navigation',
-  'note',
-  'option',
-  'progressbar',
-  'radio',
-  'region',
-  'row',
-  'rowheader',
-  'search',
-  'separator',
-  'slider',
-  'spinbutton',
-  'status',
-  'switch',
-  'tab',
-  'table',
-  'tablist',
-  'textbox',
-  'toolbar',
-  'tooltip',
-]);
+/** Roles we allow. Kept in sync with the schema through `SAFE_ARIA_ROLES`. */
+export const SAFE_ROLES = new Set<string>(SAFE_ARIA_ROLES);
 
 interface ParsedRoleSelector {
   role: string;
@@ -127,13 +86,13 @@ function requireBody(prefix: SelectorPrefix, body: string): string {
 }
 
 export function parseSelector(page: Page, raw: string): Locator {
+  // Same gate as the DemoPlan schema: a bare CSS/XPath selector or an unsafe
+  // role never reaches Playwright's locator APIs.
+  const problem = describeSelectorProblem(raw);
+  if (problem) throw new DemoPlanError(problem);
+
   const selector = raw.trim();
   const equals = selector.indexOf('=');
-  if (equals <= 0) {
-    throw new DemoPlanError(
-      `selector 必须以受支持的前缀开头（${SELECTOR_PREFIXES.join(' / ')}），收到 "${raw}"`,
-    );
-  }
   const prefix = selector.slice(0, equals);
   const body = selector.slice(equals + 1);
 

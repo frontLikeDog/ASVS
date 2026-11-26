@@ -12,7 +12,6 @@ import {
   captureFailureV1Schema,
   captureReceiptV1Schema,
   type CaptureFailureV1,
-  type CaptureReceiptV1,
   type DemoPlanV1,
 } from '@asvs/domain';
 import { ensureWebServer, launchCaptureBrowser, type WebServerMode } from './browser';

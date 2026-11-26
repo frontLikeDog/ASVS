@@ -148,7 +148,7 @@ export interface TranscodeOptions {
   height: number;
 }
 
-/** Converts Playwright's VP8/WebM into a frame-accurate, silent H.264 clip. */
+/** Converts Playwright's VP9/WebM into a frame-accurate, silent H.264 clip. */
 export function transcodeClip({
   input,
   output,

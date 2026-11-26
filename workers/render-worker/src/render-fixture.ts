@@ -94,8 +94,16 @@ async function main(): Promise<void> {
   const expectedDurationMs = storyboardDurationMs(input.storyboard);
   const fileName = `${path.basename(options.fixture, '.json')}.mp4`;
   const outputFile = path.join(options.outDir, fileName);
+  // Artifact identity follows the fixture/output, not one hardcoded job:
+  // golden-30s keeps its historical ids, captured-30s gets its own.
+  const artifactSlug = path
+    .basename(options.fixture, '.json')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .toLowerCase();
+  const jobId = `job_render_${artifactSlug}`;
+  const artifactId = `artifact_${artifactSlug}`;
 
-  console.log('\n渲染黄金样片');
+  console.log(`\n渲染样片 · ${artifactSlug}`);
   console.log('─'.repeat(64));
   console.log(`  输入        ${path.relative(workspaceRoot, options.fixture)}`);
   console.log(`  视频        ${fixture.video.title}`);
@@ -187,8 +195,8 @@ async function main(): Promise<void> {
 
     const createdAt = new Date().toISOString();
     const { receipt, manifest } = buildArtifactRecords({
-      jobId: 'job_render_golden_30s',
-      artifactId: 'artifact_golden_30s',
+      jobId,
+      artifactId,
       input,
       file: outputFile,
       storageRef: storageRefFor(outputFile),

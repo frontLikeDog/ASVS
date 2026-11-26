@@ -13,7 +13,18 @@ import { storageRefFor } from './paths';
 
 const FPS = 30;
 const TOTAL_SECONDS = 30;
-const REAL_DEMO_SECONDS = 12;
+/**
+ * The approved tour runs dashboard → video library → review landing →
+ * storyboard → production monitoring → review/export, and the recorded clip is
+ * ~18s. The real_demo scene must cover the whole clip (otherwise the tail of
+ * the tour is silently cut off); the four surrounding scenes are compressed to
+ * keep the film at 30s.
+ */
+const REAL_DEMO_SECONDS = 18;
+const TITLE_SECONDS = 3;
+const EVIDENCE_SECONDS = 4;
+const DAG_SECONDS = 3;
+const CTA_SECONDS = 2;
 
 const ASVS_PROJECT: Project = {
   id: 'proj_asvs_studio',
@@ -147,10 +158,13 @@ export function captureDurationSeconds(clip: VideoProbe): number {
   return Math.round((clip.durationMs / 1000) * 1000) / 1000;
 }
 
-export function assertClipLongEnough(clip: VideoProbe, minimumMs = 12_500): void {
+export function assertClipLongEnough(
+  clip: VideoProbe,
+  minimumMs = (REAL_DEMO_SECONDS - 1) * 1000,
+): void {
   if (clip.durationMs < minimumMs) {
     throw new Error(
-      `录屏片段过短：${clip.durationMs}ms，真实镜头需要至少 ${minimumMs}ms。请增加 DemoPlan 中的 dwellMs 或 clipDurationMs。`,
+      `录屏片段过短：${clip.durationMs}ms，真实镜头需要约 ${REAL_DEMO_SECONDS}s。请增加 DemoPlan 中的 dwellMs 或 clipDurationMs。`,
     );
   }
 }
@@ -159,15 +173,20 @@ export function buildCaptureRenderFixture(
   input: CaptureFixtureInput & { asset: Asset; mediaSha256: string },
 ): RenderFixtureV1 {
   const duration = captureDurationSeconds(input.clip);
-  if (duration < REAL_DEMO_SECONDS) {
-    throw new Error(`真实镜头需要 ${REAL_DEMO_SECONDS}s，片段只有 ${duration}s`);
+  // Every frame of the clip must fit inside the scene; a clip that overruns
+  // means the tour tail (e.g. review/export) would never reach the film.
+  const clipFrames = Math.ceil((input.clip.durationMs / 1000) * FPS);
+  if (clipFrames > REAL_DEMO_SECONDS * FPS) {
+    throw new Error(
+      `录屏片段 ${duration}s（${clipFrames} 帧）超过 real_demo 镜头的 ${REAL_DEMO_SECONDS}s；请同步调整镜头时长分配。`,
+    );
   }
 
   const scenes: Scene[] = [
     scene({
       id: 'scene_asvs_title',
       order: 0,
-      durationSec: 4,
+      durationSec: TITLE_SECONDS,
       title: '真实界面，真实操作',
       intent: '说明这条样片的画面来自一次真实的浏览器录制，而不是生成式画面。',
       narration: '这一次，画面不是生成的，而是一段真实的产品操作。',
@@ -184,7 +203,7 @@ export function buildCaptureRenderFixture(
         '播放 Step 2 录制的真实画面：工作台、视频库筛选、分镜工作室、生产监控与审核导出。',
       narration:
         'Playwright 按已批准的 DemoPlan 操作 web-studio；每个停靠点都先通过 UI 断言，才被写进回执。',
-      caption: '工作台、视频库、分镜与生产监控，来自同一次 Playwright 录屏。',
+      caption: '工作台、视频库、分镜、生产监控与审核导出，来自同一次 Playwright 录屏。',
       visual: {
         type: 'real_demo',
         demoPlanId: input.planId,
@@ -196,7 +215,7 @@ export function buildCaptureRenderFixture(
     scene({
       id: 'scene_asvs_evidence',
       order: 2,
-      durationSec: 5,
+      durationSec: EVIDENCE_SECONDS,
       title: '每条字幕，都能回到证据',
       intent: '把知识快照、声明与分镜放在同一条可追溯链上。',
       narration: '知识、脚本、分镜与生产运行，共用同一份数据。',
@@ -211,7 +230,7 @@ export function buildCaptureRenderFixture(
     scene({
       id: 'scene_asvs_dag',
       order: 3,
-      durationSec: 5,
+      durationSec: DAG_SECONDS,
       title: '断言通过，才写回执',
       intent: '强调录屏、渲染与回执都是确定性步骤，失败会留下截图与 trace。',
       narration: '录屏、渲染与回执都是确定性步骤；断言失败，就不存在成功回执。',
@@ -226,7 +245,7 @@ export function buildCaptureRenderFixture(
     scene({
       id: 'scene_asvs_cta',
       order: 4,
-      durationSec: 4,
+      durationSec: CTA_SECONDS,
       title: '让真实成为默认',
       intent: '收束到产品主张：真实素材优先，模拟能力必须明确标注。',
       narration: '让真实成为默认，让每一个模拟都无处藏身。',

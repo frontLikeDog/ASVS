@@ -1,8 +1,8 @@
 # 12 · 真实录屏切片（Step 2 验收记录）
 
-> 状态：**已执行**｜日期：2026-11-26｜分支：`main`（工作区改动，尚未提交）
+> 状态：**已执行**｜日期：2026-11-26｜分支：`feat/capture-slice`（工作区改动，尚未提交）
 > 对应计划：[docs/10 §6](10-NEXT-PHASE-PLAN.md)（S2-1 ~ S2-6）
-> 结论先说：`workers/browser-worker` 用已批准的 DemoPlan 驱动 Playwright 录制 web-studio 自身，11 条 UI 断言全部通过后才写 `CaptureReceipt`；同一计划重复 3 次通过率 100%；录屏 MP4 已进入 Step 1 渲染管线，产出 30 秒成片，且 `manifest` 同时记录素材与录屏文件的 SHA256。**Web UI 内的生产与导出仍然是模拟**，本切片是独立 CLI worker。
+> 结论先说：`workers/browser-worker` 用已批准的 DemoPlan 驱动 Playwright 录制 web-studio 自身，20 步（11 条 UI 断言 + 9 条交互）全部通过后才写 `CaptureReceipt`；同一计划重复 3 次通过率 100%；录屏 MP4 已进入 Step 1 渲染管线，产出 30 秒成片，且 `manifest` 同时记录素材与录屏文件的 SHA256。**Web UI 内的生产与导出仍然是模拟**，本切片是独立 CLI worker。
 
 ---
 
@@ -10,25 +10,27 @@
 
 | 项 | 结果 |
 |---|---|
-| DemoPlan | `workers/browser-worker/plans/web-studio-tour.yaml` · `plan_web_studio_tour` |
+| DemoPlan | `workers/browser-worker/plans/web-studio-tour.yaml` · `plan_web_studio_tour` · 20 步（11 条断言 + 9 条交互） |
 | 审批摘要 | `104ce0164a41bedce12dc7c4ccbbfb7858fe7ca86e6ea0f144e996b3af4d2142` |
 | 录制目标 | `http://localhost:4200`（production build，`vite preview`）· 1920×1080 · DPR 1 |
 | 环境 | `zh-CN` · `Asia/Shanghai` · dark · 固定 `2026-11-20T12:00:00.000Z` |
 | UI 断言 | **11/11 通过**；无断言或任一断言失败都不会生成回执 |
-| 原始录屏 | `raw/capture.webm` · 3.94 MiB · VP8 |
+| 原始录屏 | `raw/capture.webm` · 3.76 MiB · VP9 · 19,600ms · 25fps |
 | 成片片段 | `web-studio-tour.mp4` · 1920×1080 · 30fps · 17,967ms · h264 High |
-| 片段 SHA256 | `932b855341094baa72a1ca5caf1b03f789c4a437d86e83d061a762a106ac31ae` |
-| 截图 / trace | 11 张 PNG · `trace.zip`（14,327 KiB） |
+| 片段 SHA256 | `6da634016a56042d5970b1309dd004e25d33cabcba608ac1ad39f7917eff6515` |
+| 截图 / trace | 11 张 PNG · `trace.zip`（14,346 KiB） |
 | 录屏回执 | `dist/browser-worker/web-studio-tour/capture-receipt.json` |
 | 渲染输入 | `dist/browser-worker/web-studio-tour/captured-30s.json` |
+| 镜头时长 | `3s 标题 + 18s real_demo + 4s 证据 + 3s 回执 + 2s CTA = 30s` |
 | 重复执行 | 3/3 通过，通过率 **100%**（门槛 80%） |
 | Allowlist 探针 | PASS：越界导航在发出请求前被拒绝，越界请求 0 条 |
 | 独立复核 | `pnpm verify:capture` 重新计算哈希、核对回执 / 素材 / 渲染 fixture，全部一致 |
-| 成片 | `dist/render-worker/captured-30s/captured-30s.mp4` · 5.12 MiB · 30,000ms · 900 帧 |
-| 成片 SHA256 | `bb0ef02ea023b845ebc17ee63141c0d5ed39e777328589ba551b1e35b355a57f` |
-| 素材哈希（manifest） | `932b8553…6ac31ae`，与录制片段逐字节一致 |
+| 成片 | `dist/render-worker/captured-30s/captured-30s.mp4` · 3.52 MiB · 30,000ms · 900 帧 |
+| 成片 SHA256 | `b88c448d36f7ffcb7148aca09466a6cf3627109c9f61ee8ae69b70d7b2eca0e8` |
+| 渲染标识 | `job_render_captured_30s` / `artifact_captured_30s`（按 fixture 派生，不再复用 golden 标识） |
+| 素材哈希（manifest） | `6da63401…7eff6515`，与录制片段逐字节一致 |
 
-抽帧人工检查（0s / 4s / 8s / 12s / 14s / 17s）确认片段覆盖：工作台、视频库筛选与搜索、审核落地页、分镜工作室、生产监控、审核与导出；渲染成片的 `real_demo` 镜头带 `REAL` 徽标与 `PLAN plan_web_studio_tour` 页脚，画面来自真实录屏而不是占位。
+抽帧人工检查（3.5s / 6s / 9s / 13s / 15s / 17s / 20.5s）确认 `real_demo` 镜头完整覆盖：工作台、视频库筛选与搜索、审核落地页、分镜工作室、生产监控、审核与导出；1920×1080 录屏按严格 16:9 内框完整显示，web-studio 自身顶栏不被裁切；绿色 `真实录屏` 徽标独占一行、不压地址栏；底部字幕位于 `FooterStrip` 之上、不重叠；地址栏文案由 project source / Asset / Plan 元数据派生。
 
 ---
 
@@ -43,7 +45,7 @@ DemoPlan YAML（数据，不是代码）
         reset fixture（清 localStorage、固定时钟、重载）
         安全 selector DSL → Playwright semantic locator
         每一步先断言；失败即停，写 failure-report + screenshot
-  └─ Playwright recordVideo               raw/capture.webm（VP8）
+  └─ Playwright recordVideo               raw/capture.webm（VP9）
   └─ planClip() + transcodeClip()        workers/browser-worker/src/media.ts
         从首个断言之后开始，ffmpeg 裁剪转码 → 1920×1080 / 30fps / h264
   └─ CaptureReceipt + Asset(media)       libs/domain/src/capture.ts
@@ -77,7 +79,7 @@ text=1 条结果
 alt=产品截图
 ```
 
-CSS、XPath、`nth-child`、`:has()`、`document.` / `window.` 一律拒绝；schema 与运行时各有一道检查。`role=` 只接受安全 ARIA role 列表，且只支持 `name=` 或 `level=`，额外参数会被拒绝。
+CSS、XPath、`nth-child`、`:has()`、`document.` / `window.` 一律拒绝；schema 与运行时共用同一份白名单（`CAPTURE_SELECTOR_PREFIXES` / `SAFE_ARIA_ROLES`）。schema 在**打开浏览器前**就校验非 `navigate` 步骤的 `target` 必须是受支持前缀，裸 CSS（`.btn` / `#submit`）与裸 XPath（`//button[1]`）连 `plan-digest` 都算不出来，运行时的 `parseSelector()` 再用同一函数复核一次。`role=` 只接受安全 ARIA role 列表，且只支持 `name=` 或 `level=`，额外参数会被拒绝。
 
 **审批摘要**覆盖除 `approval` 外的整份计划。改任何一步、任何 origin、viewport 或 fixture，摘要都会变化，`loadApprovedDemoPlan()` 会拒绝执行。没有 `--skip-approval`。重新审批的流程是：修改计划 → `pnpm capture:plan-digest` → 人工审阅 → 把新摘要写回 `approval.approvedPlanDigest`。
 

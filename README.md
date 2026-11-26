@@ -179,7 +179,7 @@ workers/render-worker           CLI：fixture → bundle → renderMedia → ffp
 | 审核检查、批准 / 退回、版本失效 | 真实规则与持久化 |
 | 工程 JSON / SRT 下载 | 真实生成文件并通过浏览器下载 |
 | CLI 真实渲染 | Remotion → 30 秒 MP4；ffprobe + 全片解码 + SHA256 回执（`pnpm render:fixture`） |
-| CLI 真实录屏 | Playwright 执行已批准 DemoPlan，UI 断言 11/11 通过后写 `CaptureReceipt`；重复 3 次通过率 100%；真实片段进入渲染管线（`pnpm capture:demo`） |
+| CLI 真实录屏 | Playwright 执行已批准 DemoPlan（20 步：11 条断言 + 9 条交互），断言 11/11 通过后写 `CaptureReceipt`；重复 3 次通过率 100%；真实片段进入渲染管线（`pnpm capture:demo`） |
 | 持久化迁移 | v1 工作区快照迁移到 v2，不丢数据；损坏数据才回退 |
 | 品牌套件与主题 | 真实写入并影响所有预览 |
 | 演示数据重置 | 真实恢复种子快照 |
@@ -245,10 +245,10 @@ pnpm render:captured
 pnpm verify:render:captured
 ```
 
-- 计划：`plan_web_studio_tour`，审批摘要 `104ce016…4d2142`；11/11 条 UI 断言通过。
-- 片段：h264 · 1920×1080 · 30fps · 17,967ms；SHA256 `932b8553…6ac31ae`。
+- 计划：`plan_web_studio_tour`，审批摘要 `104ce016…4d2142`；20 步（11 条 UI 断言 + 9 条交互），11/11 通过。
+- 片段：h264 · 1920×1080 · 30fps · 17,967ms；SHA256 `6da63401…7eff6515`。
 - 重复执行 3/3 通过（100%，门槛 80%）；越界 origin 探针 PASS，越界请求 0。
-- 真实片段进入 Step 1：成片 `captured-30s.mp4`（30,000ms / 900 帧），manifest 记录 `mediaSha256` 与源文件，复核一致。
+- 真实片段进入 Step 1：成片 `captured-30s.mp4`（30,000ms / 900 帧，`real_demo` 镜头 18s 完整播完巡览），manifest 记录 `mediaSha256` 与源文件，复核一致；成片 SHA256 `b88c448d…7b2eca0e8`。
 - 详见 [docs/12](docs/12-CAPTURE-SLICE.md)。
 
 ### E2E（Playwright + Chromium）
