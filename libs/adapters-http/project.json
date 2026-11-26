@@ -1,0 +1,28 @@
+{
+  "name": "adapters-http",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "libs/adapters-http/src",
+  "projectType": "library",
+  "tags": ["type:adapter", "scope:shared", "runtime:browser"],
+  "implicitDependencies": ["domain", "ports"],
+  "targets": {
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": { "command": "eslint libs/adapters-http/src", "cwd": "{workspaceRoot}" }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc -p libs/adapters-http/tsconfig.json --noEmit",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vitest run --config vitest.config.ts --passWithNoTests libs/adapters-http",
+        "cwd": "{workspaceRoot}"
+      }
+    }
+  }
+}

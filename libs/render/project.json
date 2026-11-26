@@ -4,6 +4,7 @@
   "sourceRoot": "libs/render/src",
   "projectType": "library",
   "tags": ["type:render", "scope:shared", "runtime:universal"],
+  "implicitDependencies": ["domain"],
   "targets": {
     "lint": {
       "executor": "nx:run-commands",

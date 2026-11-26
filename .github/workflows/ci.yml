@@ -96,7 +96,9 @@ jobs:
           # first or last element being missed.
           WRAPPED=",$LIST,"
 
-          E2E_PROJECTS="web-studio|state|ui|domain|mock-services|mock-data|project-hub|video-studio|production-suite"
+          # Workspace sync e2e starts apps/api and drives two browser contexts,
+          # so API, adapter and port changes must run it too.
+          E2E_PROJECTS="web-studio|state|ui|domain|ports|adapters-http|api|mock-services|mock-data|project-hub|video-studio|production-suite"
           RENDER_PROJECTS="domain|render|render-worker|mock-data"
           # The DemoPlan drives the shipped UI, so any page, store or contract
           # change can invalidate its assertions. Capture is also the only gate

@@ -4,7 +4,9 @@ import { defineConfig, devices } from '@playwright/test';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(here, '..');
-const viteBin = path.resolve(appRoot, '../../node_modules/vite/bin/vite.js');
+const workspaceRoot = path.resolve(appRoot, '../..');
+const viteBin = path.resolve(workspaceRoot, 'node_modules/vite/bin/vite.js');
+const apiDbPath = path.resolve(workspaceRoot, 'dist/e2e/asvs-e2e.sqlite');
 
 export default defineConfig({
   testDir: here,
@@ -53,13 +55,34 @@ export default defineConfig({
       },
     },
   ],
-  webServer: {
-    command: `node "${viteBin}" --config vite.config.ts`,
-    cwd: appRoot,
-    url: 'http://localhost:4200',
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  },
+  webServer: [
+    {
+      command: `node "${viteBin}" --config vite.config.ts`,
+      cwd: appRoot,
+      url: 'http://localhost:4200',
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+    {
+      // The workspace sync spec drives two real browser contexts against the
+      // local Fastify API, so e2e starts it with a throwaway SQLite file.
+      // Call the tsx CLI directly instead of through pnpm: on Windows a
+      // concurrent pnpm invocation can try to rewrite the workspace lockfile.
+      command: `node "${path.resolve(workspaceRoot, 'node_modules/tsx/dist/cli.mjs')}" --tsconfig apps/api/tsconfig.json apps/api/src/main.ts`,
+      cwd: workspaceRoot,
+      url: 'http://127.0.0.1:4300/v1/health',
+      env: {
+        ...(process.env as Record<string, string>),
+        ASVS_API_PORT: '4300',
+        ASVS_DB_PATH: apiDbPath,
+        ASVS_LOG_LEVEL: 'warn',
+      },
+      reuseExistingServer: !process.env.CI,
+      timeout: 60_000,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+  ],
 });

@@ -4,6 +4,7 @@
   "sourceRoot": "workers/render-worker/src",
   "projectType": "application",
   "tags": ["type:worker", "scope:render", "runtime:node"],
+  "implicitDependencies": ["domain", "render"],
   "targets": {
     "lint": {
       "executor": "nx:run-commands",

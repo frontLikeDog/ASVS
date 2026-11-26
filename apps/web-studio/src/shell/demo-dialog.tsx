@@ -78,7 +78,7 @@ export function DemoDialog({ open, onOpenChange }: { open: boolean; onOpenChange
               <li>AI 模型调用：本地确定性规则，不请求外部模型。</li>
               <li>录屏、配音与渲染：模拟任务与进度，不生成音视频文件。</li>
               <li>MP4 / WebM 导出：只有状态，不会伪造可播放成片。</li>
-              <li>上传、发布与真实审批流：未接入后端。</li>
+              <li>上传、发布与真实审批流：未接入外部服务；工作区可写入本机 SQLite API。</li>
             </ul>
           </section>
         </div>
@@ -86,11 +86,11 @@ export function DemoDialog({ open, onOpenChange }: { open: boolean; onOpenChange
         <Callout tone="info" className="mt-4" title="数据保存在哪里">
           <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <Database size={12} />
-            工作区数据保存在浏览器 localStorage 的
+            默认保存在浏览器 localStorage 的
             <code className="rounded bg-ink px-1 py-0.5 font-mono text-[10.5px] text-fg">asvs.studio.v1</code>
             ，界面偏好保存在
             <code className="rounded bg-ink px-1 py-0.5 font-mono text-[10.5px] text-fg">asvs.ui.v1</code>
-            。没有账号、云端同步或真实上传。
+            。可在项目设置中启用本机 SQLite API 同步；没有账号、第三方云或真实上传。
           </span>
         </Callout>
 

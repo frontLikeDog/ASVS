@@ -4,6 +4,7 @@
   "sourceRoot": "libs/features/production-suite/src",
   "projectType": "library",
   "tags": ["type:feature", "scope:production", "runtime:browser"],
+  "implicitDependencies": ["domain", "state", "ui"],
   "targets": {
     "lint": {
       "executor": "nx:run-commands",

@@ -5,10 +5,12 @@
   "type": "module",
   "packageManager": "pnpm@10.18.3",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "scripts": {
     "dev": "nx serve web-studio",
+    "dev:api": "nx serve api",
+    "dev:stack": "nx run-many -t serve -p web-studio api --parallel=2",
     "build": "nx build web-studio",
     "budget": "node scripts/check-bundle-budget.mjs",
     "lint": "nx run-many -t lint",

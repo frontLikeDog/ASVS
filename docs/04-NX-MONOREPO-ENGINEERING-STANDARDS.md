@@ -92,11 +92,11 @@ pnpm nx show projects
 
 建议标签：
 
-- `type:app | worker | domain | application | port | adapter | ui | contract | tooling`
+- `type:app | api | worker | domain | application | port | adapter | ui | contract | tooling`
 - `scope:project | knowledge | video | production | shared | integration`
 - `runtime:browser | node | universal | native`
 
-约束：domain 只依赖 domain/contract；adapter 可以依赖 port/contract/domain；UI 不得依赖 node/native；API 不得 import Worker 私有模块；ATVG2 adapter 不得被 domain 依赖。使用 Nx ESLint module-boundaries 规则在 CI 强制执行；配置语法以安装的 `@nx/eslint` 版本核验。
+约束：domain 只依赖 domain/contract；adapter 可以依赖 port/contract/domain；UI 不得依赖 node/native；API 不得 import Worker 私有模块，也不得依赖 React 应用、Zustand store 或 feature；ATVG2 adapter 不得被 domain 依赖。使用 Nx ESLint module-boundaries 规则在 CI 强制执行；配置语法以安装的 `@nx/eslint` 版本核验。
 
 ## 6. 根级配置示意
 

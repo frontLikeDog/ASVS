@@ -204,10 +204,10 @@ pnpm capture:plan-digest
 | 边界 | 说明 | 下一步 |
 |---|---|---|
 | 字体 | 依赖系统 CJK 字体；CI 安装 `fonts-noto-cjk`，未做字体子集化 | 视觉回归前固定字体包 |
-| Web UI 仍是模拟 | 生产监控不启动 Playwright；录屏通过 CLI 触发 | Step 3 接后端任务队列 |
+| Web UI 仍是模拟 | 生产监控不启动 Playwright；录屏通过 CLI 触发 | Step 3 只同步工作区元数据；接任务队列需后续排期 |
 | 只录制自家 fixture | 只有 web-studio + 本地 seed，没有外部 staging / 登录态 | 外部环境需要账号隔离方案 |
 | selector 走查成本 | 页面文案改名会让计划失败；这是有意的，失败会给出截图 | 计划变更必须重新审批 |
 | 隐私 QA 未实现 | docs/07 §9 的敏感信息检查还没接入 | 接外部环境前必须补 |
-| 产物只落本地 | `storageRef` 是工作区相对路径，无对象存储 / 队列 | Step 3 |
+| 产物只落本地 | `storageRef` 是工作区相对路径，无对象存储 / 队列。Step 3 的工作区备份不含媒体 | 对象存储 / 队列排期 |
 | 片段固定 16:9 | 与 Step 1 渲染一致；竖屏需要独立布局 | 后续 |
 | CI 远端验证 | `capture` job 尚未在 GitHub Actions Linux runner 上实跑 | PR #3 合并前跑通 |

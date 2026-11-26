@@ -4,6 +4,7 @@
   "sourceRoot": "libs/features/project-hub/src",
   "projectType": "library",
   "tags": ["type:feature", "scope:project", "runtime:browser"],
+  "implicitDependencies": ["domain", "state", "ui"],
   "targets": {
     "lint": {
       "executor": "nx:run-commands",

@@ -1,5 +1,6 @@
 export * from './id';
 export * from './delay';
+export * from './studio-services';
 export * from './director-service';
 export * from './production-engine';
 export * from './review-service';

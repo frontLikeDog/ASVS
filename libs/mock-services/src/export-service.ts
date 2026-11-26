@@ -1,12 +1,9 @@
 import type { AspectRatio, ExportFormat, ExportRecord, VideoProject } from '@asvs/domain';
 import { buildExportFileName } from '@asvs/domain';
+import type { ExportConfig } from '@asvs/ports';
 import { newId, nowIso } from './id';
 
-export interface ExportConfig {
-  format: ExportFormat;
-  aspect: AspectRatio;
-  resolution: string;
-}
+export type { ExportConfig };
 
 export function isSimulatedMedia(format: ExportFormat): boolean {
   return format === 'mp4' || format === 'webm';

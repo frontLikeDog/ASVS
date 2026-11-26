@@ -4,6 +4,7 @@
   "sourceRoot": "workers/browser-worker/src",
   "projectType": "application",
   "tags": ["type:worker", "scope:capture", "runtime:node"],
+  "implicitDependencies": ["domain"],
   "targets": {
     "lint": {
       "executor": "nx:run-commands",
