@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  ASSET_MEDIA_MIME_TYPES,
   DEFAULT_VIDEO_FPS,
   assetSchema,
   featureSchema,
@@ -30,6 +31,25 @@ export const renderProfileSchema = z.object({
 });
 export type RenderProfile = z.infer<typeof renderProfileSchema>;
 export const DEFAULT_RENDER_PROFILE: RenderProfile = renderProfileSchema.parse({});
+
+const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/, '需要 64 位小写十六进制 SHA256');
+
+/**
+ * A real file backing an `Asset.media` entry. The fixture keeps the source
+ * outside the render bundle (dist is disposable); the render worker hashes it,
+ * copies it into a temporary public dir and serves it through `staticFile`.
+ */
+export const renderMediaAssetV1Schema = z.object({
+  assetId: idSchema,
+  /** Workspace-relative path to the immutable capture artifact. */
+  sourceFile: z.string().min(1),
+  sha256: sha256Schema,
+  mimeType: z.enum(ASSET_MEDIA_MIME_TYPES),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  durationMs: z.number().int().positive(),
+});
+export type RenderMediaAssetV1 = z.infer<typeof renderMediaAssetV1Schema>;
 
 /**
  * A scene as the renderer sees it. This is docs/05 `VideoSceneV1` plus the
@@ -87,10 +107,10 @@ export const renderFixtureV1Schema = z.object({
   project: projectSchema,
   features: z.array(featureSchema),
   assets: z.array(assetSchema),
+  /** Real files referenced by `Asset.media`; empty for the Step 1 fixture. */
+  media: z.array(renderMediaAssetV1Schema).default([]),
 });
 export type RenderFixtureV1 = z.infer<typeof renderFixtureV1Schema>;
-
-const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/, '需要 64 位小写十六进制 SHA256');
 
 /** docs/05 §4 `ArtifactReceiptV1` with the fields docs/03/07 require. */
 export const artifactReceiptV1Schema = z.object({
@@ -118,8 +138,13 @@ export const sceneDigestSchema = z.object({
 });
 export const assetHashSchema = z.object({
   assetId: idSchema,
+  /** Digest of the Asset JSON (as in Step 1). */
   sha256: sha256Schema,
   mock: z.boolean(),
+  /** File-level hash for real captures, plus the path used to re-verify it. */
+  mediaSha256: sha256Schema.optional(),
+  mediaSourceFile: z.string().min(1).optional(),
+  mediaMimeType: z.enum(ASSET_MEDIA_MIME_TYPES).optional(),
 });
 
 /** Manifest fields from docs/07 §4: compositionId, sceneDigests, assetHashes, rendererVersion. */
@@ -267,6 +292,29 @@ export function buildRenderInput(source: RenderInputSource): RenderInputV1 {
     assets,
     renderProfile,
   });
+}
+
+/**
+ * A real capture is only real when the asset says so AND carries the media
+ * metadata. The placeholder must stay in place for `mock: true` or media-less
+ * assets, even if a `src` string was persisted by mistake.
+ */
+export type RealCaptureAsset = Asset & {
+  media: NonNullable<Asset['media']>;
+  mock: false;
+};
+
+export function isRealCaptureAsset(asset: Asset | undefined): asset is RealCaptureAsset {
+  return Boolean(asset && asset.mock === false && asset.media);
+}
+
+export function findRealCaptureAsset(
+  scene: Pick<StoryboardSceneV1, 'assetIds'>,
+  assets: Asset[],
+): RealCaptureAsset | undefined {
+  return scene.assetIds
+    .map((assetId) => assets.find((asset) => asset.id === assetId))
+    .find((asset): asset is RealCaptureAsset => isRealCaptureAsset(asset));
 }
 
 export function totalStoryboardFrames(storyboard: StoryboardV1): number {

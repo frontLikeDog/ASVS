@@ -222,9 +222,9 @@ export function MockBadge({
   label: string;
   detail?: string;
   u: Unit;
-  tone?: 'amber' | 'red';
+  tone?: 'amber' | 'red' | 'green';
 }) {
-  const color = tone === 'red' ? '#FF8A7A' : '#F0B860';
+  const color = tone === 'red' ? '#FF8A7A' : tone === 'green' ? '#6FD3A0' : '#F0B860';
   return (
     <div
       style={{

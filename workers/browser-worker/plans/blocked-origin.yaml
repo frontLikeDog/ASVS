@@ -1,0 +1,44 @@
+# docs/08 §9 用例 2：导航目标不在 allowlist 时，必须在发出请求前阻断。
+# 由 `pnpm capture:safety` 用真实 Chromium 执行；预期结果是失败，而不是通过。
+schemaVersion: '1'
+id: plan_blocked_origin_probe
+projectId: proj_asvs_studio
+name: allowlist 阻断验收
+environmentId: local_web_studio
+baseUrl: http://localhost:4200
+allowedOrigins:
+  - http://localhost:4200
+resetStrategy: none
+clockTime: '2026-11-20T12:00:00.000Z'
+viewport:
+  width: 1920
+  height: 1080
+  deviceScaleFactor: 1
+locale: zh-CN
+timezoneId: Asia/Shanghai
+colorScheme: dark
+reducedMotion: no-preference
+capture:
+  width: 1920
+  height: 1080
+  fps: 30
+  clipDurationMs: 2000
+asset:
+  id: asset_blocked_origin_probe
+  name: allowlist 阻断探针
+  description: 仅用于安全验收，不会产出真实素材。
+  palette: ['#FF8A7A', '#23262D']
+approval:
+  approvalId: appr_blocked_origin_probe_001
+  approvedPlanDigest: 'dba38f8669269f9dba1d311282e07c1b4a4cc50128ab3df3ae31939b93d6c39e'
+  approvedAt: '2026-11-20T00:00:00.000Z'
+steps:
+  - id: blocked-navigate
+    action: navigate
+    target: https://example.invalid/
+    timeoutMs: 5000
+  - id: never-reached
+    action: assert
+    target: heading=这个页面不应该被打开
+    assertion:
+      kind: visible

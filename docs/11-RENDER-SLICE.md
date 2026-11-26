@@ -131,3 +131,5 @@ CI：`.github/workflows/ci.yml` 的 `render` job 在受影响项目中包含 `re
 - `real_demo` 场景已保留 `demoPlanId` / `assetId`；Step 2 产出真实录屏后，用真实素材替换占位组件即可。
 - `Asset.mock = false` 的素材可直接进入同一 `RenderInputV1`；渲染管线不需要再改 IR。
 - 录屏回执（CaptureReceipt）应与 asset hash 对应，并写入 `manifest.assetHashes`，形成「录屏 → 成片」的可追溯链。
+
+**Step 2 已接入（2026-11-26）**：`RealDemoScene` 通过 `findRealCaptureAsset()` 读取 `mock:false` 且带 `media` 的 Asset，用 `OffthreadVideo` 播放真实片段；render worker 在打包前校验 `RenderFixtureV1.media` 的源文件、SHA256、尺寸与时长，并把 `mediaSha256` / `mediaSourceFile` 写入 `manifest.assetHashes`。实测成片见 `dist/render-worker/captured-30s/captured-30s.mp4`，完整记录见 [docs/12](12-CAPTURE-SLICE.md)。

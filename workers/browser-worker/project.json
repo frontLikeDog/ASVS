@@ -1,0 +1,74 @@
+{
+  "name": "browser-worker",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "workers/browser-worker/src",
+  "projectType": "application",
+  "tags": ["type:worker", "scope:capture", "runtime:node"],
+  "targets": {
+    "lint": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "eslint workers/browser-worker/src",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc -p workers/browser-worker/tsconfig.json --noEmit",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "vitest run --config vitest.config.ts --passWithNoTests workers/browser-worker",
+        "cwd": "{workspaceRoot}"
+      }
+    },
+    "capture-demo": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsx src/capture.ts",
+        "cwd": "workers/browser-worker"
+      },
+      "cache": false,
+      "dependsOn": [{ "target": "build", "projects": ["web-studio"] }],
+      "outputs": ["{workspaceRoot}/dist/browser-worker"]
+    },
+    "repeat-capture": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsx src/repeat.ts --runs 3",
+        "cwd": "workers/browser-worker"
+      },
+      "cache": false,
+      "dependsOn": [{ "target": "build", "projects": ["web-studio"] }],
+      "outputs": ["{workspaceRoot}/dist/browser-worker/repeat"]
+    },
+    "safety-check": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsx src/safety-check.ts",
+        "cwd": "workers/browser-worker"
+      },
+      "cache": false
+    },
+    "plan-digest": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsx src/plan-digest.ts plans/web-studio-tour.yaml",
+        "cwd": "workers/browser-worker"
+      },
+      "cache": false
+    },
+    "verify-capture": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsx src/verify-capture.ts",
+        "cwd": "workers/browser-worker"
+      },
+      "cache": false
+    }
+  }
+}

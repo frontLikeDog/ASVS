@@ -1,5 +1,6 @@
 export * from './schemas';
 export * from './render';
+export * from './capture';
 export * from './timeline';
 export * from './format';
 export * from './production';

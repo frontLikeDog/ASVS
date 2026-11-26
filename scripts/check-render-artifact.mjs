@@ -144,6 +144,30 @@ function main() {
       failures.push(`receipt 帧率与 manifest 不一致（${receipt.fps} vs ${recorded.fps}）`);
     }
 
+    // Real captures are traceable to the exact file that was rendered. A
+    // mock asset must never pretend to have one.
+    for (const entry of manifest.assetHashes ?? []) {
+      if (entry.mock === false) {
+        if (!entry.mediaSha256 || !entry.mediaSourceFile) {
+          failures.push(`真实 Asset ${entry.assetId} 缺少 mediaSha256 / mediaSourceFile`);
+          continue;
+        }
+        const sourceFile = path.resolve(workspaceRoot, entry.mediaSourceFile);
+        if (!existsSync(sourceFile)) {
+          failures.push(`真实素材不存在：${entry.mediaSourceFile}`);
+        } else {
+          const actual = sha256(sourceFile);
+          if (actual !== entry.mediaSha256) {
+            failures.push(
+              `真实素材 SHA256 不一致：${entry.mediaSourceFile}（${actual} vs ${entry.mediaSha256}）`,
+            );
+          }
+        }
+      } else if (entry.mediaSha256) {
+        failures.push(`mock Asset ${entry.assetId} 不应记录 mediaSha256`);
+      }
+    }
+
     console.log('\n渲染产物校验');
     console.log('─'.repeat(64));
     console.log(`  目录       ${path.relative(workspaceRoot, artifactDir)}`);

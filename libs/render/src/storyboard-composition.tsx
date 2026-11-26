@@ -5,13 +5,13 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from 'remotion';
-import type { RenderInputV1, StoryboardSceneV1 } from '@asvs/domain';
+import { findRealCaptureAsset, type RenderInputV1, type StoryboardSceneV1 } from '@asvs/domain';
 import { Caption, MockBadge, TopBar, Vignette, type Unit } from './chrome';
 import { sceneTheme } from './theme';
 import { CtaScene } from './scenes/cta-scene';
 import { GeneratedScene } from './scenes/generated-scene';
 import { MotionScene } from './scenes/motion-scene';
-import { RealDemoPlaceholder } from './scenes/real-demo-placeholder';
+import { RealDemoScene } from './scenes/real-demo-scene';
 import { TitleScene } from './scenes/title-scene';
 import type { SceneProps } from './scenes/scene-props';
 import type { StoryboardProps } from './types';
@@ -25,7 +25,7 @@ function SceneBody(props: SceneProps) {
     case 'cta':
       return <CtaScene {...props} />;
     case 'real_demo':
-      return <RealDemoPlaceholder {...props} />;
+      return <RealDemoScene {...props} />;
     case 'generated_visual':
       return <GeneratedScene {...props} />;
   }
@@ -56,6 +56,10 @@ function SceneFrame({
   const opacity = Math.min(enter, exit);
   const scale = interpolate(frame, [0, 20], [0.992, 1], { extrapolateRight: 'clamp' });
   const showCaption = scene.visual.type !== 'title' && scene.visual.type !== 'cta';
+  const realCapture =
+    scene.visual.type === 'real_demo'
+      ? findRealCaptureAsset(scene, input.assets)
+      : undefined;
   const sceneProps: SceneProps = { scene, input, index, total, theme, u };
 
   return (
@@ -81,7 +85,16 @@ function SceneFrame({
         u={u}
       />
       {scene.visual.type === 'real_demo' ? (
-        <MockBadge label="未接入真实录屏" detail="占位画面" tone="red" u={u} />
+        realCapture ? (
+          <MockBadge
+            label="真实录屏"
+            detail={`Playwright · ${realCapture.media.capturePlanId ?? '断言通过'}`}
+            tone="green"
+            u={u}
+          />
+        ) : (
+          <MockBadge label="未接入真实录屏" detail="占位画面" tone="red" u={u} />
+        )
       ) : null}
       {scene.visual.type === 'generated_visual' ? (
         <MockBadge label="生成画面" detail="模拟素材" u={u} />

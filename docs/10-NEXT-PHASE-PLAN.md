@@ -241,6 +241,29 @@ SHA256 已记录进 manifest
 | 录屏漂移 | 同一计划两次画面不同 | 固定全部环境变量；接受像素差异，比较结构化指标 |
 | 敏感信息入镜 | 截图里出现 token / 邮箱 | 接入 docs/07 §9 的隐私 QA 检查 |
 
+### 执行状态（2026-11-26）
+
+| ID | 状态 | 证据 |
+|---|---|---|
+| S2-1 | ✅ 完成 | `workers/browser-worker`：固定 1920×1080 / DPR 1 / zh-CN / Asia/Shanghai / dark / 固定时钟；production build + `vite preview` 录制 |
+| S2-2 | ✅ 完成 | `capture.ts` 的 DemoPlan schema + `executor.ts`；未识别 action、CSS / XPath / nth / JS selector 在打开浏览器前被拒绝，`capture.test.ts` / `selector.test.ts` 覆盖 |
+| S2-3 | ✅ 完成 | `allowlist.ts` 精确 origin，导航前与网络路由双层检查；`plans/blocked-origin.yaml` + `pnpm capture:safety` 实测越界请求 0；失败写 screenshot + trace |
+| S2-4 | ✅ 完成 | `captureReceiptV1Schema` 强制 `assertions.failed = 0` 且全部 step passed；`outcome.test.ts` 证明零断言 / 断言失败 / 步骤失败都判失败 |
+| S2-5 | ✅ 完成 | `resetFixture()` 清 storage + 固定时钟 + 重载；`pnpm capture:repeat` 3/3 通过（100%） |
+| S2-6 | ✅ 完成 | `Asset.mock:false` + `media`；`RealDemoScene` 用 `OffthreadVideo` 播放，未接入时回退占位；`pnpm render:captured` 产出 30 秒成片 |
+
+**Exit Gate 核对**
+
+| Gate | 状态 | 证据 |
+|---|---|---|
+| 同一 DemoPlan 重复执行，记录通过率与失败原因分布 | ✅ | 3/3 = 100%（门槛 80%），`repeat-report.json` |
+| 每次失败都有 screenshot + trace | ✅ | 失败路径写 `failure-report.json` + `*-FAILED.png` + `trace.zip`；开发中两次真实失败已验证 |
+| 断言失败 → 判失败（有专门测试） | ✅ | `outcome.test.ts` + `capture.test.ts` 的回执不变量 |
+| 录屏产物能进入 Step 1 的渲染管线并产出成片 | ✅ | `dist/render-worker/captured-30s/captured-30s.mp4`，30,000ms / 900 帧，manifest 记录 `mediaSha256` |
+| CI 跑通 capture gate | ⚠️ 已配置，未在真实远端验证 | `.github/workflows/ci.yml` 的 `capture` job；仍受 S0-1（无 `origin`）阻塞 |
+
+完整验收记录、复现步骤与边界见 [docs/12](12-CAPTURE-SLICE.md)。
+
 ---
 
 ## 7. Step 3 · 最薄后端与接口抽象（1.5 周，可与 Step 2 并行）

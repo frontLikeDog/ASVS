@@ -9,6 +9,7 @@ import {
 } from '@asvs/domain';
 import { assertDecodable, probeVideo, validateProbe } from './ffprobe';
 import { buildArtifactRecords, storageRefFor } from './manifest';
+import { preparePublicDir } from './media';
 import { defaultFixture, defaultOutDir, renderEntry, workspaceRoot } from './paths';
 import { rendererVersion } from './renderer-version';
 import { loadRenderFixture } from './load-fixture';
@@ -100,19 +101,28 @@ async function main(): Promise<void> {
   console.log(`  视频        ${fixture.video.title}`);
   console.log(`  分镜        ${input.storyboard.scenes.length} 个 / ${totalFrames} 帧`);
   console.log(`  规格        ${input.renderProfile.width}×${input.renderProfile.height} · ${input.storyboard.fps}fps · ${expectedDurationMs}ms`);
+  console.log(`  真实素材    ${fixture.media.length} 个`);
   console.log(`  Remotion    ${version}`);
   console.log('─'.repeat(64));
 
   mkdirSync(options.outDir, { recursive: true });
   const bundleDir = path.join(options.outDir, '.bundle');
+  const publicDir = path.join(options.outDir, '.public');
   rmSync(bundleDir, { recursive: true, force: true });
 
+  let realMedia: ReturnType<typeof preparePublicDir> = [];
   try {
+    console.log('\n[0/4] 校验真实素材并准备 Remotion public 目录…');
+    realMedia = preparePublicDir({ input, media: fixture.media, publicDir });
+    for (const entry of realMedia) {
+      console.log(`  ${entry.assetId} · ${entry.sourceFile} · ${entry.sha256.slice(0, 12)}…`);
+    }
+
     console.log('\n[1/4] 打包 Remotion composition…');
     const serveUrl = await bundle({
       entryPoint: renderEntry,
       outDir: bundleDir,
-      publicDir: null,
+      publicDir,
       webpackOverride,
       onProgress: progressLogger('打包'),
     });
@@ -185,6 +195,7 @@ async function main(): Promise<void> {
       probe,
       rendererVersion: version,
       createdAt,
+      media: realMedia,
     });
 
     writeFileSync(path.join(options.outDir, 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`);
@@ -202,7 +213,10 @@ async function main(): Promise<void> {
     console.log('\n回执 JSON：');
     console.log(JSON.stringify(receipt, null, 2));
   } finally {
-    if (!options.keepBundle) rmSync(bundleDir, { recursive: true, force: true });
+    if (!options.keepBundle) {
+      rmSync(bundleDir, { recursive: true, force: true });
+      rmSync(publicDir, { recursive: true, force: true });
+    }
   }
 }
 

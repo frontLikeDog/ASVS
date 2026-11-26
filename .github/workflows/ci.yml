@@ -31,6 +31,7 @@ jobs:
       code: ${{ steps.scope.outputs.code }}
       e2e: ${{ steps.scope.outputs.e2e }}
       render: ${{ steps.scope.outputs.render }}
+      capture: ${{ steps.scope.outputs.capture }}
       # Downstream jobs reuse the exact range the affected job resolved,
       # instead of re-deriving it (which breaks on `push`, where base_ref is empty).
       base: ${{ steps.scope.outputs.base }}
@@ -97,6 +98,10 @@ jobs:
 
           E2E_PROJECTS="web-studio|state|ui|domain|mock-services|mock-data|project-hub|video-studio|production-suite"
           RENDER_PROJECTS="domain|render|render-worker|mock-data"
+          # The DemoPlan drives the shipped UI, so any page, store or contract
+          # change can invalidate its assertions. Capture is also the only gate
+          # that proves the real-footage → render handoff.
+          CAPTURE_PROJECTS="browser-worker|domain|render|render-worker|mock-data|mock-services|state|ui|web-studio|project-hub|video-studio|production-suite"
 
           if printf '%s' "$WRAPPED" | grep -qE ",($E2E_PROJECTS),"; then
             E2E=true
@@ -112,6 +117,12 @@ jobs:
             RENDER=false
           fi
 
+          if printf '%s' "$WRAPPED" | grep -qE ",($CAPTURE_PROJECTS),"; then
+            CAPTURE=true
+          else
+            CAPTURE=false
+          fi
+
           # An empty array means nothing changed in a way Nx tracks.
           if [ -z "$LIST" ]; then
             CODE=false
@@ -122,6 +133,7 @@ jobs:
           echo "code=$CODE" >> "$GITHUB_OUTPUT"
           echo "e2e=$E2E" >> "$GITHUB_OUTPUT"
           echo "render=$RENDER" >> "$GITHUB_OUTPUT"
+          echo "capture=$CAPTURE" >> "$GITHUB_OUTPUT"
           echo "base=$BASE" >> "$GITHUB_OUTPUT"
           echo "head=$HEAD" >> "$GITHUB_OUTPUT"
 
@@ -269,6 +281,108 @@ jobs:
             dist/render-worker/golden-30s/receipt.json
           retention-days: 7
 
+  # Step 2 Exit Gate: execute the approved DemoPlan against the production
+  # build, require UI assertions (exit code alone is never enough), repeat it
+  # for a pass rate, and feed the recorded MP4 back through the Step 1 render.
+  capture:
+    name: Capture real demo (assertions, pass rate, real-footage render)
+    needs: affected
+    if: needs.affected.outputs.capture == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.18.3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The capture is only usable if Chinese text renders as text, not tofu.
+      # Shares the render job's cache so a render-gate run warms this one.
+      - name: Cache CJK fonts
+        id: font-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/fonts
+          key: noto-cjk-1:20240730+repack1-1build1
+
+      - name: Install ffmpeg, CJK fonts and Chromium
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 ffmpeg
+          if [ "${{ steps.font-cache.outputs.cache-hit }}" != "true" ]; then
+            sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 fonts-noto-cjk
+            mkdir -p "$HOME/.local/share/fonts"
+            if [ -d /usr/share/fonts/opentype/noto ]; then
+              sudo cp -r /usr/share/fonts/opentype/noto/. "$HOME/.local/share/fonts/"
+              sudo chown -R "$USER":"$USER" "$HOME/.local/share/fonts"
+            fi
+          fi
+          fc-cache -f "$HOME/.local/share/fonts"
+          pnpm exec playwright install --with-deps chromium
+
+      - name: Verify ffmpeg and ffprobe are available
+        run: |
+          ffmpeg -version
+          ffprobe -version
+
+      # The capture worker serves this build with `vite preview`; a dev server
+      # would show compiled-on-demand loading screens inside the recording.
+      - name: Build web-studio (capture target)
+        run: pnpm nx build web-studio
+
+      - name: Capture approved DemoPlan (assertion-first)
+        run: pnpm capture:demo
+
+      - name: Verify capture receipt, hashes and media metadata
+        run: pnpm verify:capture
+
+      # docs/08 §9 case 2: an out-of-allowlist plan must fail before any request.
+      - name: Allowlist safety probe
+        run: pnpm capture:safety
+
+      - name: Repeat capture (3 runs, pass rate ≥ 80%)
+        run: pnpm capture:repeat
+
+      - name: Render the captured clip through the Step 1 pipeline
+        run: pnpm render:captured
+
+      - name: Verify rendered MP4, receipt and real-media hashes
+        run: pnpm verify:render:captured
+
+      - name: Upload capture and render evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capture-evidence
+          path: |
+            dist/browser-worker/web-studio-tour/web-studio-tour.mp4
+            dist/browser-worker/web-studio-tour/capture-receipt.json
+            dist/browser-worker/web-studio-tour/captured-30s.json
+            dist/browser-worker/web-studio-tour/screenshots
+            dist/browser-worker/web-studio-tour/trace.zip
+            dist/browser-worker/web-studio-tour/failure-report.json
+            dist/browser-worker/repeat/**/repeat-report.json
+            dist/browser-worker/repeat/**/run-*/capture-receipt.json
+            dist/browser-worker/repeat/**/run-*/failure-report.json
+            dist/browser-worker/safety-blocked-origin/safety-report.json
+            dist/render-worker/captured-30s/captured-30s.mp4
+            dist/render-worker/captured-30s/manifest.json
+            dist/render-worker/captured-30s/receipt.json
+          retention-days: 7
+          if-no-files-found: warn
+
   e2e:
     name: E2E (Playwright, desktop + tablet + mobile)
     needs: affected
@@ -315,7 +429,7 @@ jobs:
   ci:
     name: CI
     if: always()
-    needs: [affected, validate, build, render, e2e]
+    needs: [affected, validate, build, render, capture, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
@@ -325,6 +439,7 @@ jobs:
           echo "validate=${{ needs.validate.result }}"
           echo "build=${{ needs.build.result }}"
           echo "render=${{ needs.render.result }}"
+          echo "capture=${{ needs.capture.result }}"
           echo "e2e=${{ needs.e2e.result }}"
 
           if [ "${{ needs.affected.result }}" != "success" ]; then
@@ -344,6 +459,7 @@ jobs:
           check validate "${{ needs.validate.result }}"
           check build "${{ needs.build.result }}"
           check render "${{ needs.render.result }}"
+          check capture "${{ needs.capture.result }}"
           check e2e "${{ needs.e2e.result }}"
 
           echo "All required jobs passed or were intentionally skipped."

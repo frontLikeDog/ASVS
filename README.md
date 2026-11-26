@@ -2,7 +2,7 @@
 
 一个前端优先、可完整走通的产品视频工作台：把可信的软件事实（功能、Claim、证据）变成可编辑、可生产、可审核的视频工程。
 
-当前版本包含两部分：可交互的商业级前端原型，以及一个真实可运行的渲染切片。项目、知识、分镜、审核与导出数据会真实写入浏览器本地存储；GitHub 授权、AI 模型、录屏、配音与 Web 内导出仍是明确标注的模拟能力。渲染切片通过 CLI 把固定 Storyboard 用 Remotion 真实渲染成可播放的 30 秒 MP4，并输出 SHA256 回执与 ffprobe 校验结果（见 [docs/11](docs/11-RENDER-SLICE.md)）。
+当前版本包含三部分：可交互的商业级前端原型、真实可运行的渲染切片，以及真实可运行的录屏切片。项目、知识、分镜、审核与导出数据会真实写入浏览器本地存储；GitHub 授权、AI 模型、配音与 Web 内导出仍是明确标注的模拟能力。渲染切片通过 CLI 把固定 Storyboard 用 Remotion 真实渲染成可播放的 30 秒 MP4，并输出 SHA256 回执与 ffprobe 校验结果（见 [docs/11](docs/11-RENDER-SLICE.md)）。录屏切片用已批准的 DemoPlan 驱动 Playwright 录制 web-studio 自身，断言全部通过后才写回执，并把真实片段接回渲染管线（见 [docs/12](docs/12-CAPTURE-SLICE.md)）。
 
 ---
 
@@ -76,6 +76,22 @@ pnpm verify:render       # 独立复核 MP4 / manifest / receipt / ffprobe
 ```
 
 输出包含 `golden-30s.mp4`、`receipt.json`（SHA256、时长、尺寸、fps、渲染器版本）与 `manifest.json`（输入 digest、逐场景 digest、素材哈希）。详见 [docs/11](docs/11-RENDER-SLICE.md)。
+
+### 真实录屏样片（CLI）
+
+需要先构建 web-studio（录屏使用 production build + `vite preview`，避免 dev server 的按需编译出现在画面里），并安装 Playwright Chromium：
+
+```bash
+pnpm build
+pnpm capture:demo       # 执行已批准 DemoPlan → dist/browser-worker/web-studio-tour
+pnpm verify:capture     # 重新哈希、ffprobe、回执 / 素材 / fixture 一致性
+pnpm capture:safety     # 越界 origin 必须在请求前被拒绝
+pnpm capture:repeat     # 3 次重复执行，通过率低于 80% 失败
+pnpm render:captured    # 用真实片段渲染 30 秒成片
+pnpm verify:render:captured
+```
+
+DemoPlan 是 YAML 数据而不是脚本：只支持 `navigate` / `click` / `fill` / `press` / `wait_for` / `assert` / `capture`，selector 只能使用 role / label / heading / testid / text 等语义前缀。任何计划修改都会让审批摘要失效，必须重新审阅。只有全部 UI 断言通过才写 `CaptureReceipt`；失败会留下截图、trace、raw WebM 与 `failure-report.json`。详见 [docs/12](docs/12-CAPTURE-SLICE.md)。
 
 ---
 
@@ -163,6 +179,7 @@ workers/render-worker           CLI：fixture → bundle → renderMedia → ffp
 | 审核检查、批准 / 退回、版本失效 | 真实规则与持久化 |
 | 工程 JSON / SRT 下载 | 真实生成文件并通过浏览器下载 |
 | CLI 真实渲染 | Remotion → 30 秒 MP4；ffprobe + 全片解码 + SHA256 回执（`pnpm render:fixture`） |
+| CLI 真实录屏 | Playwright 执行已批准 DemoPlan，UI 断言 11/11 通过后写 `CaptureReceipt`；重复 3 次通过率 100%；真实片段进入渲染管线（`pnpm capture:demo`） |
 | 持久化迁移 | v1 工作区快照迁移到 v2，不丢数据；损坏数据才回退 |
 | 品牌套件与主题 | 真实写入并影响所有预览 |
 | 演示数据重置 | 真实恢复种子快照 |
@@ -173,7 +190,7 @@ workers/render-worker           CLI：fixture → bundle → renderMedia → ffp
 | --- | --- |
 | GitHub OAuth / API / 仓库读取 / 代码扫描 | 本地确定性模拟连接与快照 |
 | AI 模型调用 / Mastra / Agent 运行时 | 不请求外部模型，使用确定性意图解析 |
-| 真实录屏、界面断言、Playwright 生产执行 | 生产步骤为模拟，不启动浏览器或录制；`real_demo` 场景是明确标注的占位 |
+| Web UI 内的录屏 / 生产执行 | 生产监控仍是模拟，不启动浏览器或录制；真实录屏只能通过 CLI `pnpm capture:demo` 触发 |
 | 配音 / TTS | 只有文本与时间轴，不播放或生成音频；样片为静音视频 |
 | Web 内 FFmpeg / Remotion / 服务端渲染 | Web UI 未接入；CLI `workers/render-worker` 已能真实渲染（见 §7 与 docs/11） |
 | Web 内 MP4 / WebM 导出 | 仅任务状态与进度，不产生媒体文件；CLI 样片是真实文件 |
@@ -197,9 +214,10 @@ workers/render-worker           CLI：fixture → bundle → renderMedia → ffp
 pnpm test --skip-nx-cache
 ```
 
-- **10 个测试文件，81 个测试全部通过**
+- **15 个测试文件，117 个测试全部通过**（2026-11-26 重跑）
 - 覆盖：时间线与分镜重排、Zod Schema 校验、SRT / 工程 JSON 序列化、生产引擎（成功 / 失败重试 / 审批 / 取消 / 暂停 / 速度）、AI 导演有限意图与未知指令、审核规则与版本失效、导出模拟与真实文件、Zustand 撤销 / 重做 / 持久化 / 品牌失效。
 - 新增覆盖（Step 1）：渲染 IR 判别联合的接受 / 拒绝、Storyboard 帧数与素材过滤、非 16:9 拒绝、回执 / 清单 Schema、Remotion composition 元数据、ffprobe 帧率与容差校验、v1→v2 持久化迁移。
+- 新增覆盖（Step 2）：DemoPlan schema（未知 action、零断言、危险 selector、approval digest）、精确 origin allowlist、断言优先判定、回执不变量、素材媒体 schema、片段起点 / 时长规划。
 - 关键回归：`normalizeSceneOrder` 必须保留传入数组顺序，不得按旧 `order` 重排。
 
 ### 真实渲染（Step 1）
@@ -214,6 +232,24 @@ pnpm verify:render
 - `verify:render` 重新计算 MP4 哈希并核对 manifest / receipt / ffprobe，全部一致；全片解码无错误。
 - 抽帧检查 2s / 8s / 17s / 22s / 28s：标题、动效、占位、深色主题与 CTA 均正确留白，无越界。
 - 详见 [docs/11](docs/11-RENDER-SLICE.md)。
+
+### 真实录屏（Step 2）
+
+```bash
+pnpm build
+pnpm capture:demo
+pnpm verify:capture
+pnpm capture:safety
+pnpm capture:repeat
+pnpm render:captured
+pnpm verify:render:captured
+```
+
+- 计划：`plan_web_studio_tour`，审批摘要 `104ce016…4d2142`；11/11 条 UI 断言通过。
+- 片段：h264 · 1920×1080 · 30fps · 17,967ms；SHA256 `932b8553…6ac31ae`。
+- 重复执行 3/3 通过（100%，门槛 80%）；越界 origin 探针 PASS，越界请求 0。
+- 真实片段进入 Step 1：成片 `captured-30s.mp4`（30,000ms / 900 帧），manifest 记录 `mediaSha256` 与源文件，复核一致。
+- 详见 [docs/12](docs/12-CAPTURE-SLICE.md)。
 
 ### E2E（Playwright + Chromium）
 
@@ -313,6 +349,7 @@ pnpm build
 - [实施路线与验收](docs/09-IMPLEMENTATION-ROADMAP-AND-ACCEPTANCE.md)
 - [下一阶段排期与迭代建议](docs/10-NEXT-PHASE-PLAN.md)
 - [真实渲染切片（Step 1 验收记录）](docs/11-RENDER-SLICE.md)
+- [真实录屏切片（Step 2 验收记录）](docs/12-CAPTURE-SLICE.md)
 - UX 文档：
   - [前端体验计划](docs/ux/FRONTEND-EXPERIENCE-PLAN.md)
   - [信息架构](docs/ux/INFORMATION-ARCHITECTURE.md)
