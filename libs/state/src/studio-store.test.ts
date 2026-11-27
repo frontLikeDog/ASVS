@@ -1,11 +1,16 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { Scene, VideoProject } from '@asvs/domain';
+import type { PRChangeCandidateV1, Scene, VideoProject } from '@asvs/domain';
 import { orderedScenes, studioSnapshotSchema, totalDuration } from '@asvs/domain';
 import {
   STUDIO_PERSIST_VERSION,
   migratePersistedStudioState,
   useStudioStore,
 } from './studio-store';
+import {
+  createRealGitHubProject,
+  promotePRCandidate,
+  reconcileDiscoveryCandidates,
+} from './github-knowledge-actions';
 
 const RELEASE_VIDEO = 'vid_lumen_release';
 const TUTORIAL_VIDEO = 'vid_lumen_tutorial';
@@ -228,5 +233,217 @@ describe('审核、导出与品牌失效', () => {
     expect(video.stage).toBe('changes_requested');
     expect(video.review?.status).toBe('pending');
     expect(video.review?.note).toContain('品牌资产已更新');
+  });
+});
+
+describe('Step 4D 真实 GitHub 知识投影与过期失效', () => {
+  const COMMIT_1 = '1111111111111111111111111111111111111111';
+  const SNAP_1 = 'snap_11111111111111111111111111111111';
+  const ISO_1 = '2026-11-27T10:00:00.000Z';
+
+  function featureCandidate(overrides: Partial<PRChangeCandidateV1> = {}): PRChangeCandidateV1 {
+    return {
+      schemaVersion: '1',
+      id: 'prc_0000000000000201',
+      repo: 'acme/livenotes',
+      pullNumber: 201,
+      title: 'feat: add share link',
+      author: 'alice',
+      state: 'closed',
+      draft: false,
+      merged: true,
+      mergedAt: ISO_1,
+      baseBranch: 'main',
+      headBranch: 'feat/share',
+      headSha: COMMIT_1,
+      mergeCommitSha: COMMIT_1,
+      htmlUrl: 'https://github.com/acme/livenotes/pull/201',
+      labels: ['feature'],
+      classification: 'user_facing_feature',
+      promotable: true,
+      confidence: 88,
+      rationale: ['feat 前缀'],
+      snapshotId: SNAP_1,
+      changedFiles: [
+        {
+          path: 'src/ui/share.tsx',
+          status: 'modified',
+          additions: 15,
+          deletions: 2,
+          category: 'ui',
+        },
+      ],
+      diffStats: {
+        filesChanged: 1,
+        additions: 15,
+        deletions: 2,
+        userFacingFiles: 1,
+        internalFiles: 0,
+        renamedOnlyFiles: 0,
+      },
+      claims: [
+        {
+          schemaVersion: '1',
+          id: 'claim_0000000000000201',
+          candidateId: 'prc_0000000000000201',
+          repo: 'acme/livenotes',
+          pullNumber: 201,
+          statement: '支持生成只读分享链接',
+          audience: '所有产品用户',
+          status: 'proposed',
+          eligibility: 'blocked_unverified',
+          verification: {
+            commitSha: COMMIT_1,
+            snapshotId: SNAP_1,
+            environmentId: 'unverified',
+            verifiedAt: ISO_1,
+            validityScope: 'unverified',
+            deployed: false,
+          },
+          evidenceIds: ['evd_0000000000000201'],
+          blockers: ['缺少运行态证据'],
+          guidance: '待验证',
+        },
+      ],
+      evidence: [
+        {
+          id: 'evd_0000000000000201',
+          kind: 'source',
+          status: 'valid',
+          title: '源码证据',
+          detail: 'src/ui/share.tsx',
+          filePath: 'src/ui/share.tsx',
+          sourceDigest: 'a'.repeat(64),
+          commitSha: COMMIT_1,
+          snapshotId: SNAP_1,
+          capturedAt: ISO_1,
+        },
+      ],
+      analyzedAt: ISO_1,
+      ...overrides,
+    };
+  }
+
+  it('创建真实 GitHub 项目、AC-02 拒绝内部重构、写入可推广功能并在 AC-09 过期时失效已批准视频', () => {
+    const projectId = createRealGitHubProject({
+      name: 'LiveNotes Real',
+      productName: 'LiveNotes',
+      description: '真实仓库接入测试',
+      website: '',
+      methods: ['github'],
+      githubRepo: 'acme/livenotes',
+      branch: 'main',
+      demoUrl: '',
+      docs: [],
+      resetStrategy: 'fixture',
+      brand: store().projects[0]!.brand,
+      defaultAspect: '16:9',
+      defaultLanguage: 'zh-CN',
+      templateId: 'tpl_signal',
+      connections: {},
+    });
+
+    const project = store().projects.find((item) => item.id === projectId)!;
+    expect(project.demo).toBe(false);
+    expect(project.sources[0]!.demo).toBe(false);
+
+    const internal: PRChangeCandidateV1 = {
+      ...featureCandidate(),
+      id: 'prc_0000000000000202',
+      pullNumber: 202,
+      title: 'refactor: cleanup',
+      classification: 'internal_non_promotable',
+      promotable: false,
+      claims: [],
+      evidence: [],
+    };
+    const rejected = promotePRCandidate(projectId, internal);
+    expect(rejected.ok).toBe(false);
+
+    const candidate = featureCandidate();
+    const promoted = promotePRCandidate(projectId, candidate);
+    expect(promoted.ok).toBe(true);
+
+    const projClaim = store().claims.find((item) => item.projectId === projectId)!;
+    expect(projClaim.demo).toBe(false);
+    expect(projClaim.eligibility).toBe('blocked_unverified');
+
+    const publishableCandidate = featureCandidate({
+      claims: [
+        {
+          ...candidate.claims[0]!,
+          status: 'verified',
+          eligibility: 'publishable',
+          blockers: [],
+          verification: {
+            ...candidate.claims[0]!.verification,
+            environmentId: 'production',
+            deployed: true,
+            validityScope: 'production_runtime_approved',
+          },
+        },
+      ],
+    });
+    reconcileDiscoveryCandidates(projectId, [publishableCandidate], {
+      snapshotId: SNAP_1,
+      commitSha: COMMIT_1,
+    });
+    expect(store().claims.find((item) => item.id === projClaim.id)!.eligibility).toBe('publishable');
+
+    const vidId = store().createVideo({
+      projectId,
+      title: '分享功能发布',
+      mode: 'release_video',
+      brief: {
+        objective: '介绍分享链接',
+        audience: '用户',
+        featureIds: [promoted.featureId!],
+        durationSec: 20,
+        aspect: '16:9',
+        language: 'zh-CN',
+        tone: 'confident',
+        style: 'editorial',
+        templateId: 'tpl_signal',
+        useRealCapture: false,
+        useGeneratedVisuals: false,
+        cta: '试用',
+        bannedPhrases: [],
+      },
+    });
+    useStudioStore.setState((state) => ({
+      videos: state.videos.map((v) =>
+        v.id === vidId
+          ? {
+              ...v,
+              stage: 'approved',
+              review: { status: 'approved', decidedAt: ISO_1 },
+            }
+          : v,
+      ),
+    }));
+
+    const staleCandidate = featureCandidate({
+      claims: [
+        {
+          ...candidate.claims[0]!,
+          status: 'stale',
+          eligibility: 'blocked_stale',
+          blockers: ['文件变更'],
+        },
+      ],
+      evidence: [
+        {
+          ...candidate.evidence[0]!,
+          status: 'stale',
+        },
+      ],
+    });
+    const summary = reconcileDiscoveryCandidates(projectId, [staleCandidate]);
+    expect(summary.staleClaims).toBe(1);
+    expect(summary.invalidatedVideoIds).toEqual([vidId]);
+
+    const updatedVideo = store().videos.find((v) => v.id === vidId)!;
+    expect(updatedVideo.stage).toBe('changes_requested');
+    expect(updatedVideo.review?.status).toBe('pending');
   });
 });

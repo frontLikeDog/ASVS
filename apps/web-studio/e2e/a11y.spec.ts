@@ -42,6 +42,10 @@ test.describe('axe 无障碍扫描（WCAG 2.1 A/AA）', () => {
     await scan(page, '/projects/proj_lumen/knowledge', '知识中心');
   });
 
+  test('知识中心 · PR 变更发现', async ({ page }) => {
+    await scan(page, '/projects/proj_lumen/knowledge?tab=discovery', '知识中心');
+  });
+
   test('视频库', async ({ page }) => {
     await scan(page, '/videos', '视频库');
   });

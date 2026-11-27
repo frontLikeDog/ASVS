@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type {
   AspectRatio,
   Feature,
@@ -37,6 +37,7 @@ import {
   Badge,
   Button,
   Callout,
+  ClaimEligibilityBadge,
   ClaimStatusBadge,
   FeatureStatusBadge,
   Field,
@@ -69,6 +70,8 @@ const STEP_LABELS = ['类型与目标', '创作简报', '生成预览'];
 
 export function VideoWizardPage() {
   const { projectId = '' } = useParams();
+  const [searchParams] = useSearchParams();
+  const preselectedFeatureId = searchParams.get('feature');
   const navigate = useNavigate();
   const project = useStudioStore((state) => state.projects.find((item) => item.id === projectId));
   const features = useStudioStore(
@@ -108,7 +111,15 @@ export function VideoWizardPage() {
   );
   const [objective, setObjective] = useState('让现有用户和潜在客户在 30 秒内理解本次更新最重要的价值。');
   const [audience, setAudience] = useState('现有客户、产品评估者与团队决策者');
-  const [featureIds, setFeatureIds] = useState<string[]>(() => initialFeatures('release_video', features, claims));
+  const [featureIds, setFeatureIds] = useState<string[]>(() => {
+    if (
+      preselectedFeatureId &&
+      features.some((feature) => feature.id === preselectedFeatureId)
+    ) {
+      return [preselectedFeatureId];
+    }
+    return initialFeatures('release_video', features, claims);
+  });
   const [releaseId, setReleaseId] = useState<string | undefined>(releases[0]?.id);
   const [durationSec, setDurationSec] = useState(30);
   const [aspect, setAspect] = useState<AspectRatio>(project?.defaultAspect ?? '16:9');
@@ -138,10 +149,19 @@ export function VideoWizardPage() {
   });
   const blocking = claimStates.filter(
     ({ feature, claim }) =>
-      !claim || claim.status === 'stale' || claim.status === 'rejected' || feature.status === 'stale',
+      !claim ||
+      claim.status === 'stale' ||
+      claim.status === 'rejected' ||
+      feature.status === 'stale' ||
+      claim.eligibility === 'blocked_unverified' ||
+      claim.eligibility === 'blocked_stale' ||
+      claim.eligibility === 'blocked_rejected',
   );
   const limited = claimStates.filter(
-    ({ claim }) => claim?.status === 'supported' || claim?.status === 'proposed',
+    ({ claim }) =>
+      claim?.eligibility === 'needs_qualification' ||
+      (claim?.eligibility === undefined &&
+        (claim?.status === 'supported' || claim?.status === 'proposed')),
   );
 
   const applyMode = (next: VideoMode) => {
@@ -434,7 +454,18 @@ export function VideoWizardPage() {
                       {sortedFeatures.map((feature) => {
                         const claim = claims.find((item) => item.id === feature.claimIds[0]);
                         const active = featureIds.includes(feature.id);
-                        const risk = !claim || claim.status === 'stale' || claim.status === 'rejected' || feature.status === 'stale';
+                        const risk =
+                          !claim ||
+                          claim.status === 'stale' ||
+                          claim.status === 'rejected' ||
+                          feature.status === 'stale' ||
+                          claim.eligibility === 'blocked_unverified' ||
+                          claim.eligibility === 'blocked_stale' ||
+                          claim.eligibility === 'blocked_rejected';
+                        const qualified =
+                          claim?.eligibility === 'needs_qualification' ||
+                          (claim?.eligibility === undefined &&
+                            (claim?.status === 'supported' || claim?.status === 'proposed'));
                         return (
                           <button
                             key={feature.id}
@@ -469,11 +500,14 @@ export function VideoWizardPage() {
                                   {feature.summary}
                                 </p>
                                 <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                  {claim?.eligibility ? (
+                                    <ClaimEligibilityBadge eligibility={claim.eligibility} />
+                                  ) : null}
                                   {claim ? <ClaimStatusBadge status={claim.status} /> : <Badge tone="danger">无声明</Badge>}
                                   <span className={cn('text-[9px]', risk ? 'text-danger' : 'text-faint')}>
                                     {risk
-                                      ? '使用后可能阻断审核'
-                                      : claim?.status === 'supported' || claim?.status === 'proposed'
+                                      ? claim?.blockers?.[0] ?? '使用后会阻断审核'
+                                      : qualified
                                         ? '字幕会保留限定表述'
                                         : '可用于公开视频'}
                                   </span>

@@ -1,8 +1,10 @@
 import type {
+  ClaimPublishEligibility,
   ClaimStatus,
   EvidenceStatus,
   ExportStatus,
   FeatureStatus,
+  PRChangeClassification,
   RunStatus,
   SceneStatus,
   SuggestionStatus,
@@ -101,6 +103,41 @@ export function VideoStageBadge({ stage, className }: { stage: VideoStage; class
 
 export function RunStatusBadge({ status, className }: { status: RunStatus; className?: string }) {
   return <StatusBadge meta={RUN_STATUS_META[status]} className={className} />;
+}
+
+export const CLAIM_ELIGIBILITY_META: Record<ClaimPublishEligibility, StatusMeta> = {
+  publishable: { label: '可发布', tone: 'success' },
+  needs_qualification: { label: '需限定表述', tone: 'warn' },
+  blocked_unverified: { label: '未核验阻断', tone: 'danger' },
+  blocked_stale: { label: '证据过期阻断', tone: 'danger' },
+  blocked_rejected: { label: '人工驳回阻断', tone: 'danger' },
+};
+
+export const PR_CLASSIFICATION_META: Record<PRChangeClassification, StatusMeta> = {
+  user_facing_feature: { label: '用户新功能', tone: 'success' },
+  user_facing_improvement: { label: '用户改进', tone: 'accent' },
+  internal_non_promotable: { label: '内部变更 · 不建议宣传', tone: 'warn' },
+  ambiguous_needs_review: { label: '待人工复核', tone: 'neutral' },
+};
+
+export function ClaimEligibilityBadge({
+  eligibility,
+  className,
+}: {
+  eligibility: ClaimPublishEligibility;
+  className?: string;
+}) {
+  return <StatusBadge meta={CLAIM_ELIGIBILITY_META[eligibility]} className={className} />;
+}
+
+export function PRClassificationBadge({
+  classification,
+  className,
+}: {
+  classification: PRChangeClassification;
+  className?: string;
+}) {
+  return <StatusBadge meta={PR_CLASSIFICATION_META[classification]} className={className} />;
 }
 
 export function ExportStatusBadge({ status, className }: { status: ExportStatus; className?: string }) {

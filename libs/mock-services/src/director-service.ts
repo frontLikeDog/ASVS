@@ -53,7 +53,8 @@ const TEMPLATE_LABEL: Record<string, string> = {
   tpl_type: 'Type',
 };
 
-const LIMITATION_PATTERN = /预发布|验证中|待验证|提示|辅助|参考|限定|Beta|beta|确认/;
+const LIMITATION_PATTERN =
+  /Release|release|随 Release|staging|beta|preview|测试环境|预发布|验证中|待验证|提示|辅助|参考|限定|Beta|确认/;
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -69,7 +70,26 @@ function claimForFeature(feature: Feature, claims: Claim[]): Claim | undefined {
   return claims.find((claim) => claim.id === feature.claimIds[0]);
 }
 
-function limitationText(status: ClaimStatus | 'missing'): string {
+function limitationText(claim: Claim | undefined, status: ClaimStatus | 'missing'): string {
+  if (claim?.eligibility === 'needs_qualification') {
+    const env = claim.verification?.environmentId;
+    if (env && env !== 'unverified' && env !== 'production') {
+      return `（仅 ${env} 环境，非生产可用）`;
+    }
+    if (claim.verification?.releaseTag) {
+      return `（随 Release ${claim.verification.releaseTag} 发布，待生产运行态验证）`;
+    }
+    return '（待验证能力，以实际环境为准）';
+  }
+  if (claim?.eligibility === 'blocked_unverified') {
+    return '（已合并待验证，尚未上线）';
+  }
+  if (claim?.eligibility === 'blocked_stale') {
+    return '（源码证据已过期，需重新验证）';
+  }
+  if (claim?.eligibility === 'blocked_rejected') {
+    return '（声明已被人工驳回）';
+  }
   switch (status) {
     case 'supported':
       return '（预发布能力，以实际环境为准）';
@@ -87,9 +107,16 @@ function limitationText(status: ClaimStatus | 'missing'): string {
 }
 
 function isDemoSafe(feature: Feature, claim?: Claim): boolean {
+  if (!claim) return false;
+  if (claim.eligibility !== undefined) {
+    return (
+      claim.eligibility === 'publishable' &&
+      claim.status === 'verified' &&
+      feature.status !== 'stale'
+    );
+  }
   return (
-    Boolean(claim) &&
-    claim?.status === 'verified' &&
+    claim.status === 'verified' &&
     (feature.status === 'verified' || feature.status === 'deployed')
   );
 }
@@ -157,7 +184,7 @@ function buildFeatureScene({
   }
 
   if (!safeToDemo) {
-    caption = `${caption}${limitationText(status)}`;
+    caption = `${caption}${limitationText(claim, status)}`;
   }
 
   return {
@@ -589,7 +616,7 @@ function alternateScene(
     narration = pick(narrationOptions[scene.visualType], 0);
   }
   if (claim && claim.status !== 'verified') {
-    caption = `${caption}${limitationText(claim.status)}`;
+    caption = `${caption}${limitationText(claim, claim.status)}`;
   }
   return { title, narration, caption };
 }
@@ -1222,7 +1249,7 @@ export function interpretDirectorCommand({
         if (!claim || claim.status === 'verified') return;
         if (LIMITATION_PATTERN.test(scene.caption)) return;
         const from = scene.caption;
-        scene.caption = `${scene.caption}${limitationText(claim.status)}`;
+        scene.caption = `${scene.caption}${limitationText(claim, claim.status)}`;
         scene.notes = '导演补充：该声明尚未核验，需保留限定表述。';
         changes.push({
           field: `scene.${scene.id}.caption`,

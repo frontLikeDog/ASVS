@@ -7,10 +7,19 @@ import {
   type KnowledgeSnapshotV1,
 } from './knowledge';
 import {
+  CLAIM_PUBLISH_ELIGIBILITIES,
+  CLAIM_VERIFICATION_DECISIONS,
+  PR_CHANGE_CLASSIFICATIONS,
+  claimPublishEligibilitySchema,
   claimStatusSchema,
+  claimVerificationDecisionSchema,
   evidenceKindSchema,
   evidenceStatusSchema,
+  prChangeClassificationSchema,
+  type ClaimPublishEligibility,
   type ClaimStatus,
+  type ClaimVerificationDecision,
+  type PRChangeClassification,
 } from './schemas';
 
 /**
@@ -70,14 +79,11 @@ export const verificationEnvironmentIdSchema = z
       .regex(/^[a-z0-9][a-z0-9._-]*$/, '环境标识只能包含小写字母、数字、.、_ 与 -'),
   );
 
-export const PR_CHANGE_CLASSIFICATIONS = [
-  'user_facing_feature',
-  'user_facing_improvement',
-  'internal_non_promotable',
-  'ambiguous_needs_review',
-] as const;
-export const prChangeClassificationSchema = z.enum(PR_CHANGE_CLASSIFICATIONS);
-export type PRChangeClassification = z.infer<typeof prChangeClassificationSchema>;
+export {
+  PR_CHANGE_CLASSIFICATIONS,
+  prChangeClassificationSchema,
+  type PRChangeClassification,
+};
 
 const USER_FACING_CLASSIFICATIONS: ReadonlySet<PRChangeClassification> = new Set([
   'user_facing_feature',
@@ -88,15 +94,11 @@ export function isPromotableClassification(classification: PRChangeClassificatio
   return USER_FACING_CLASSIFICATIONS.has(classification);
 }
 
-export const CLAIM_PUBLISH_ELIGIBILITIES = [
-  'publishable',
-  'needs_qualification',
-  'blocked_unverified',
-  'blocked_stale',
-  'blocked_rejected',
-] as const;
-export const claimPublishEligibilitySchema = z.enum(CLAIM_PUBLISH_ELIGIBILITIES);
-export type ClaimPublishEligibility = z.infer<typeof claimPublishEligibilitySchema>;
+export {
+  CLAIM_PUBLISH_ELIGIBILITIES,
+  claimPublishEligibilitySchema,
+  type ClaimPublishEligibility,
+};
 
 /**
  * `deployed` 只表示「存在发布证据或真实环境运行态证据」，不等于「生产可用」。
@@ -117,9 +119,11 @@ export const verificationContextV1Schema = z.object({
 });
 export type VerificationContextV1 = z.infer<typeof verificationContextV1Schema>;
 
-export const CLAIM_VERIFICATION_DECISIONS = ['approve', 'reject'] as const;
-export const claimVerificationDecisionSchema = z.enum(CLAIM_VERIFICATION_DECISIONS);
-export type ClaimVerificationDecision = z.infer<typeof claimVerificationDecisionSchema>;
+export {
+  CLAIM_VERIFICATION_DECISIONS,
+  claimVerificationDecisionSchema,
+  type ClaimVerificationDecision,
+};
 
 export const evidenceRefV1Schema = z.object({
   id: evidenceRefIdSchema,

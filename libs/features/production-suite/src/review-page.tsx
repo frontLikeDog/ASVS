@@ -30,6 +30,7 @@ import {
   Badge,
   Button,
   Callout,
+  ClaimEligibilityBadge,
   ClaimStatusBadge,
   Dialog,
   DialogContent,
@@ -130,7 +131,11 @@ export function ReviewPage() {
       video.brief.featureIds.includes(feature.id) ||
       scenes.some((scene) => scene.featureId === feature.id),
   );
-  const riskyClaims = relatedClaims.filter((claim) => claim.status !== 'verified');
+  const riskyClaims = relatedClaims.filter(
+    (claim) =>
+      claim.status !== 'verified' ||
+      (claim.eligibility !== undefined && claim.eligibility !== 'publishable'),
+  );
   const latestSuccess = runs.find((run) => run.status === 'succeeded');
   const latestRun = runs[0];
   const approved =
@@ -206,7 +211,9 @@ export function ReviewPage() {
         <Link to={`/videos/${video.id}/editor`} className="hover:text-accent">{video.title}</Link>
         <span>/</span>
         <span>审核与导出</span>
-        <span className="ml-auto rounded-sm border border-line px-1.5 py-0.5 text-[9px]">Demo · 本地工程</span>
+        <span className="ml-auto rounded-sm border border-line px-1.5 py-0.5 text-[9px]">
+          {project.demo ? 'Demo · 本地工程' : '真实知识来源 · 本地工程'}
+        </span>
       </div>
 
       <div className="mt-2 flex flex-wrap items-start justify-between gap-4">
@@ -364,10 +371,35 @@ export function ReviewPage() {
                           {featureClaims.map((claim) => {
                             const claimEvidence = evidence.filter((item) => item.claimId === claim.id);
                             return (
-                              <div key={claim.id} className="flex flex-wrap items-start gap-1.5 text-[10px]">
-                                <ClaimStatusBadge status={claim.status} />
-                                <span className="min-w-0 flex-1 leading-4 text-muted">{claim.statement}</span>
-                                <span className="shrink-0 text-[9px] text-faint">{claimEvidence.length} 条证据</span>
+                              <div key={claim.id} className="space-y-1 text-[10px]">
+                                <div className="flex flex-wrap items-start gap-1.5">
+                                  {claim.eligibility ? (
+                                    <ClaimEligibilityBadge eligibility={claim.eligibility} />
+                                  ) : null}
+                                  <ClaimStatusBadge status={claim.status} />
+                                  <span className="min-w-0 flex-1 leading-4 text-muted">{claim.statement}</span>
+                                  <span className="shrink-0 text-[9px] text-faint">{claimEvidence.length} 条证据</span>
+                                </div>
+                                {claim.verification?.commitSha ||
+                                claim.verification?.environmentId ||
+                                claim.verification?.releaseTag ? (
+                                  <div className="flex flex-wrap gap-2 pl-1 font-mono text-[9px] text-faint">
+                                    {claim.verification.environmentId ? (
+                                      <span>env:{claim.verification.environmentId}</span>
+                                    ) : null}
+                                    {claim.verification.releaseTag ? (
+                                      <span>release:{claim.verification.releaseTag}</span>
+                                    ) : null}
+                                    {claim.verification.commitSha ? (
+                                      <span>commit:{claim.verification.commitSha.slice(0, 8)}</span>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+                                {claim.blockers && claim.blockers.length > 0 ? (
+                                  <div className="pl-1 text-[9.5px] text-danger">
+                                    {claim.blockers.join(' ')}
+                                  </div>
+                                ) : null}
                               </div>
                             );
                           })}

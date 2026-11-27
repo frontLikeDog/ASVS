@@ -4,7 +4,7 @@
   "sourceRoot": "libs/state/src",
   "projectType": "library",
   "tags": ["type:state", "scope:shared", "runtime:browser"],
-  "implicitDependencies": ["domain", "ports", "mock-services", "mock-data"],
+  "implicitDependencies": ["domain", "ports", "adapters-http", "mock-services", "mock-data"],
   "targets": {
     "lint": {
       "executor": "nx:run-commands",

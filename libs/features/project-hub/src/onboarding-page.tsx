@@ -4,12 +4,15 @@ import type {
   AspectRatio,
   BrandKit,
   FontPair,
+  GitHubConnectionStatus,
+  GitHubWriteProbeResult,
   LogoMark,
   OnboardingDraft,
   SourceConnection,
   SourceKind,
   VisualStyle,
 } from '@asvs/domain';
+import { formatGitHubRepoRef, parseGitHubRepoRef } from '@asvs/domain';
 import {
   BRAND_PRESETS,
   DEFAULT_BRAND,
@@ -46,7 +49,12 @@ import {
   Textarea,
   cn,
 } from '@asvs/ui';
-import { useStudioStore, useUiStore } from '@asvs/state';
+import {
+  createRealGitHubProject,
+  getGitHubKnowledgeClient,
+  useStudioStore,
+  useUiStore,
+} from '@asvs/state';
 
 const STEPS = [
   { title: '项目信息', description: '产品、项目与一句话定位' },
@@ -104,6 +112,13 @@ const INIT_STEPS = [
   { title: '写入本地知识快照', detail: '项目与知识同时生效' },
 ];
 
+const REAL_INIT_STEPS = [
+  { title: '核验 GitHub App 只读权限', detail: '严格 GET 只读，拒绝任何写权限（AC-01）' },
+  { title: '运行 4B 增量知识索引', detail: '生成不可变快照与文件 SHA256 指纹' },
+  { title: '运行 4C PR 变更发现与分类', detail: '过滤内部重构（AC-02），绑定源码证据指纹' },
+  { title: '写入本地工作区并进入知识中心', detail: '待确认的候选功能与发布守门已就绪' },
+];
+
 function inferMode(methods: SourceKind[]): AccessMode {
   if (methods.length > 1) return 'combo';
   if (methods[0] === 'website') return 'website';
@@ -123,16 +138,32 @@ export function OnboardingPage() {
   const [step, setStep] = useState(0);
   const [maxVisited, setMaxVisited] = useState(0);
   const [accessMode, setAccessMode] = useState<AccessMode>(() => inferMode(loadDraft().methods));
+  const [githubMode, setGithubMode] = useState<'mock' | 'real'>(() => {
+    const initial = loadDraft();
+    return initial.connections.github && !initial.connections.github.demo ? 'real' : 'mock';
+  });
+  const [githubStatus, setGithubStatus] = useState<GitHubConnectionStatus | null>(null);
+  const [githubProbe, setGithubProbe] = useState<GitHubWriteProbeResult | null>(null);
+  const [probingGitHub, setProbingGitHub] = useState(false);
   const [connecting, setConnecting] = useState<Partial<Record<SourceKind, boolean>>>({});
   const [connectionErrors, setConnectionErrors] = useState<Partial<Record<SourceKind, string>>>({});
   const [attempted, setAttempted] = useState(false);
   const [initializing, setInitializing] = useState(false);
   const [initIndex, setInitIndex] = useState(-1);
+  const [initError, setInitError] = useState<string | null>(null);
   const [createdProjectId, setCreatedProjectId] = useState<string | null>(null);
   const mounted = useRef(true);
 
   useEffect(() => {
     mounted.current = true;
+    void getGitHubKnowledgeClient()
+      .then((client) => client.getStatus())
+      .then((status) => {
+        if (mounted.current) setGithubStatus(status);
+      })
+      .catch(() => {
+        if (mounted.current) setGithubStatus(null);
+      });
     return () => {
       mounted.current = false;
     };
@@ -167,6 +198,72 @@ export function OnboardingPage() {
   };
 
   const connect = async (kind: SourceKind) => {
+    if (kind === 'github' && githubMode === 'real') {
+      setConnecting((current) => ({ ...current, github: true }));
+      setConnectionErrors((current) => ({ ...current, github: undefined }));
+      setGithubProbe(null);
+      try {
+        const parsedRepo = parseGitHubRepoRef(draft.githubRepo);
+        const client = await getGitHubKnowledgeClient();
+        const status = await client.getStatus(parsedRepo);
+        if (!mounted.current) return;
+        setGithubStatus(status);
+        if (!status.configured) {
+          setConnectionErrors((current) => ({
+            ...current,
+            github: '本机 API 尚未配置 GitHub App 只读凭证（apps/api/.env.local），不会伪造真实连接。',
+          }));
+          return;
+        }
+        if (!status.readOnly) {
+          setConnectionErrors((current) => ({
+            ...current,
+            github: `安全阻断：检测到写权限 [${status.writePermissions.join(', ')}]，只读模式拒绝接入。`,
+          }));
+          return;
+        }
+        if (!status.connected) {
+          setConnectionErrors((current) => ({
+            ...current,
+            github: status.error ?? '无法连接目标仓库，请确认 GitHub App 已安装且有权限访问。',
+          }));
+          return;
+        }
+        const meta = await client.getRepository(parsedRepo);
+        if (!mounted.current) return;
+        const resolvedBranch = draft.branch.trim() || meta.defaultBranch || 'main';
+        const fullRepo = formatGitHubRepoRef(parsedRepo);
+        setDraft((current) => ({
+          ...current,
+          githubRepo: fullRepo,
+          branch: resolvedBranch,
+          connections: {
+            ...current.connections,
+            github: {
+              id: `src_${Date.now().toString(36)}`,
+              kind: 'github',
+              name: fullRepo,
+              detail: `只读 GitHub App 连接 · 默认分支 ${meta.defaultBranch}`,
+              status: 'connected',
+              scope: resolvedBranch,
+              lastSyncedAt: status.checkedAt,
+              readOnlyVerifiedAt: status.checkedAt,
+              demo: false,
+            },
+          },
+        }));
+      } catch (error) {
+        if (!mounted.current) return;
+        setConnectionErrors((current) => ({
+          ...current,
+          github: error instanceof Error ? error.message : 'GitHub 只读连接验证失败。',
+        }));
+      } finally {
+        if (mounted.current) setConnecting((current) => ({ ...current, github: false }));
+      }
+      return;
+    }
+
     setConnecting((current) => ({ ...current, [kind]: true }));
     setConnectionErrors((current) => ({ ...current, [kind]: undefined }));
     const value =
@@ -188,7 +285,29 @@ export function OnboardingPage() {
     }
   };
 
+  const probeGitHubWriteBlocked = async () => {
+    setConnectionErrors((current) => ({ ...current, github: undefined }));
+    setProbingGitHub(true);
+    try {
+      const parsedRepo = parseGitHubRepoRef(draft.githubRepo);
+      const client = await getGitHubKnowledgeClient();
+      const probe = await client.verifyReadOnly(parsedRepo);
+      if (mounted.current) setGithubProbe(probe);
+    } catch (error) {
+      if (mounted.current) {
+        setConnectionErrors((current) => ({
+          ...current,
+          github: error instanceof Error ? error.message : '只读边界验证失败。',
+        }));
+      }
+    } finally {
+      if (mounted.current) setProbingGitHub(false);
+    }
+  };
+
   const fillExample = async () => {
+    setGithubMode('mock');
+    setGithubProbe(null);
     const example = cloneDraft(defaultOnboardingDraft());
     example.name = 'Atlas 增长操作系统';
     example.productName = 'Atlas';
@@ -249,10 +368,78 @@ export function OnboardingPage() {
     patch({ methods: [...target.methods] });
   };
 
+  const isRealGitHubFlow =
+    draft.methods.includes('github') &&
+    Boolean(draft.connections.github) &&
+    draft.connections.github?.demo === false;
+
   const initialize = async () => {
     if (initializing) return;
     setInitializing(true);
     setInitIndex(-1);
+    setInitError(null);
+
+    if (isRealGitHubFlow) {
+      try {
+        const parsedRepo = parseGitHubRepoRef(draft.githubRepo);
+        const branch = draft.branch.trim() || 'main';
+        const client = await getGitHubKnowledgeClient();
+
+        const status = await client.getStatus(parsedRepo);
+        if (!mounted.current) return;
+        if (!status.configured || !status.connected || !status.readOnly) {
+          throw new Error(status.error ?? 'GitHub App 只读连接校验未通过，无法继续初始化。');
+        }
+        setInitIndex(0);
+
+        const snapshot = await client.indexRepository(parsedRepo, { branch });
+        if (!mounted.current) return;
+        setInitIndex(1);
+
+        const report = await client.discoverPullRequests(parsedRepo, {
+          branch,
+          snapshotId: snapshot.id,
+          state: 'closed',
+          limit: 15,
+        });
+        if (!mounted.current) return;
+        setInitIndex(2);
+
+        const projectId = createRealGitHubProject(
+          {
+            ...draft,
+            name: draft.name.trim() || `${draft.productName.trim()} 视频项目`,
+            connections: draft.connections,
+            docs: docsFromDraft(draft),
+          },
+          {
+            snapshot,
+            candidates: report.candidates,
+            readOnlyVerifiedAt: status.checkedAt,
+          },
+        );
+        localStorage.removeItem('asvs.onboarding.v1');
+        setInitIndex(3);
+        setCreatedProjectId(projectId);
+        setLastProjectId(projectId);
+        pushToast({
+          tone: 'success',
+          title: `真实项目「${draft.name || draft.productName}」已创建`,
+          description: `完成 ${snapshot.stats.mode} 索引（${snapshot.stats.totalFiles} 文件）与 ${report.summary.analyzed} 个 PR 发现。`,
+          actionLabel: '打开知识中心',
+          actionHref: `/projects/${projectId}/knowledge?tab=discovery`,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 450));
+        if (!mounted.current) return;
+        navigate(`/projects/${projectId}/knowledge?tab=discovery&welcome=1`);
+      } catch (error) {
+        if (!mounted.current) return;
+        setInitializing(false);
+        setInitError(error instanceof Error ? error.message : '真实仓库初始化失败，请重试。');
+      }
+      return;
+    }
+
     for (let index = 0; index < INIT_STEPS.length; index += 1) {
       await new Promise((resolve) => setTimeout(resolve, index === 0 ? 450 : 520));
       if (!mounted.current) return;
@@ -357,7 +544,9 @@ export function OnboardingPage() {
               只读与本地优先
             </div>
             <p className="mt-1 text-[10.5px] leading-[17px] text-faint">
-              不会连接真实 GitHub，也不会写入任何仓库。所有连接结果为本地确定性模拟。
+              {githubMode === 'real'
+                ? '通过本机 API 以只读 GitHub App 接入，拒绝任何写权限（AC-01），绝不修改仓库。'
+                : '演示模式不会连接真实 GitHub，所有连接结果为本地确定性模拟；可切换到真实只读 GitHub App。'}
             </p>
           </div>
         </aside>
@@ -381,9 +570,27 @@ export function OnboardingPage() {
               <StepAccess
                 draft={draft}
                 accessMode={accessMode}
+                githubMode={githubMode}
+                githubStatus={githubStatus}
+                githubProbe={githubProbe}
+                probingGitHub={probingGitHub}
                 connecting={connecting}
                 connectionErrors={connectionErrors}
                 onModeChange={changeMode}
+                onGitHubModeChange={(mode) => {
+                  setGithubMode(mode);
+                  setGithubProbe(null);
+                  setConnectionErrors((current) => ({ ...current, github: undefined }));
+                  clearConnection('github');
+                  if (
+                    mode === 'real' &&
+                    !draft.githubRepo.trim() &&
+                    githubStatus?.accessibleRepositories[0]
+                  ) {
+                    patch({ githubRepo: githubStatus.accessibleRepositories[0] });
+                  }
+                }}
+                onProbeGitHub={probeGitHubWriteBlocked}
                 onPatch={patch}
                 onClearConnection={clearConnection}
                 onConnect={connect}
@@ -393,6 +600,7 @@ export function OnboardingPage() {
             {step === 2 ? (
               <StepSources
                 draft={draft}
+                githubMode={githubMode}
                 onPatch={patch}
                 onClearConnection={clearConnection}
                 errors={attempted ? errors : []}
@@ -408,8 +616,10 @@ export function OnboardingPage() {
               <StepInitialize
                 draft={draft}
                 brand={draft.brand}
+                isRealGitHub={isRealGitHubFlow}
                 initializing={initializing}
                 initIndex={initIndex}
+                initError={initError}
                 createdProjectId={createdProjectId}
                 onStart={initialize}
               />
@@ -440,7 +650,10 @@ export function OnboardingPage() {
                 <Button
                   variant="primary"
                   onClick={initialize}
-                  loading={initializing && initIndex < INIT_STEPS.length - 1}
+                  loading={
+                    initializing &&
+                    initIndex < (isRealGitHubFlow ? REAL_INIT_STEPS.length : INIT_STEPS.length) - 1
+                  }
                   disabled={Boolean(createdProjectId)}
                 >
                   {createdProjectId ? '正在进入知识中心…' : '开始初始化'}
@@ -590,9 +803,15 @@ function StepProject({
 function StepAccess({
   draft,
   accessMode,
+  githubMode,
+  githubStatus,
+  githubProbe,
+  probingGitHub,
   connecting,
   connectionErrors,
   onModeChange,
+  onGitHubModeChange,
+  onProbeGitHub,
   onPatch,
   onClearConnection,
   onConnect,
@@ -600,9 +819,15 @@ function StepAccess({
 }: {
   draft: OnboardingDraft;
   accessMode: AccessMode;
+  githubMode: 'mock' | 'real';
+  githubStatus: GitHubConnectionStatus | null;
+  githubProbe: GitHubWriteProbeResult | null;
+  probingGitHub: boolean;
   connecting: Partial<Record<SourceKind, boolean>>;
   connectionErrors: Partial<Record<SourceKind, string>>;
   onModeChange: (mode: AccessMode) => void;
+  onGitHubModeChange: (mode: 'mock' | 'real') => void;
+  onProbeGitHub: () => Promise<void>;
   onPatch: (value: Partial<OnboardingDraft>) => void;
   onClearConnection: (kind: SourceKind) => void;
   onConnect: (kind: SourceKind) => Promise<void>;
@@ -629,35 +854,139 @@ function StepAccess({
           <SourceConnectRow
             kind="github"
             title="GitHub 仓库"
-            description="模拟只读连接；不会打开真实 OAuth，也不会访问 GitHub API。"
+            description={
+              githubMode === 'real'
+                ? '连接本机 ASVS API 提供的只读 GitHub App；不接受写权限。'
+                : '模拟只读连接；不会打开真实 OAuth，也不会访问 GitHub API。'
+            }
             icon={<GitPullRequest size={15} />}
             connection={draft.connections.github}
             connecting={Boolean(connecting.github)}
+            connectLabel={githubMode === 'real' ? '验证只读连接' : '模拟连接'}
+            connectedBadgeLabel={githubMode === 'real' ? '已连接 · 真实只读' : '已连接 · 模拟'}
             error={connectionErrors.github}
             onConnect={() => onConnect('github')}
             input={
-              <div className="grid gap-2 sm:grid-cols-[1fr_120px]">
-                <Input
-                  value={draft.githubRepo}
-                  onChange={(event) => {
-                    onPatch({ githubRepo: event.target.value });
-                    onClearConnection('github');
-                  }}
-                  placeholder="owner/repo"
-                  aria-label="GitHub 仓库"
-                />
-                <Select
-                  value={draft.branch}
-                  onChange={(event) => {
-                    onPatch({ branch: event.target.value });
-                    onClearConnection('github');
-                  }}
-                  aria-label="分支"
-                >
-                  <option value="main">main</option>
-                  <option value="staging">staging</option>
-                  <option value="release/2.8">release/2.8</option>
-                </Select>
+              <div className="space-y-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onGitHubModeChange('mock')}
+                    className={cn(
+                      'rounded-full border px-2.5 py-0.5 text-[10.5px] transition-colors',
+                      githubMode === 'mock'
+                        ? 'border-accent/45 bg-accent-soft text-accent'
+                        : 'border-line text-muted hover:text-fg',
+                    )}
+                  >
+                    本地模拟（Demo）
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onGitHubModeChange('real')}
+                    className={cn(
+                      'rounded-full border px-2.5 py-0.5 text-[10.5px] transition-colors',
+                      githubMode === 'real'
+                        ? 'border-accent/45 bg-accent-soft text-accent'
+                        : 'border-line text-muted hover:text-fg',
+                    )}
+                  >
+                    真实只读 GitHub App
+                  </button>
+                  {githubMode === 'real' ? (
+                    <Badge
+                      tone={githubStatus?.configured ? 'success' : 'warn'}
+                      dot={false}
+                    >
+                      {githubStatus === null
+                        ? 'API 未连接'
+                        : githubStatus.configured
+                          ? 'API 已配置'
+                          : '未配置凭证'}
+                    </Badge>
+                  ) : null}
+                </div>
+
+                {githubMode === 'real' &&
+                githubStatus?.accessibleRepositories &&
+                githubStatus.accessibleRepositories.length > 0 ? (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[10px] text-faint">已授权仓库：</span>
+                    {githubStatus.accessibleRepositories.map((repoName) => (
+                      <button
+                        key={repoName}
+                        type="button"
+                        onClick={() => {
+                          onPatch({ githubRepo: repoName });
+                          onClearConnection('github');
+                        }}
+                        className="rounded-sm border border-line bg-overlay px-2 py-0.5 font-mono text-[10px] text-muted hover:text-fg"
+                      >
+                        {repoName}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+
+                <div className="grid gap-2 sm:grid-cols-[1fr_140px]">
+                  <Input
+                    value={draft.githubRepo}
+                    onChange={(event) => {
+                      onPatch({ githubRepo: event.target.value });
+                      onClearConnection('github');
+                    }}
+                    placeholder="owner/repo"
+                    aria-label="GitHub 仓库"
+                  />
+                  {githubMode === 'real' ? (
+                    <Input
+                      value={draft.branch}
+                      onChange={(event) => {
+                        onPatch({ branch: event.target.value });
+                        onClearConnection('github');
+                      }}
+                      placeholder="main"
+                      aria-label="分支"
+                    />
+                  ) : (
+                    <Select
+                      value={draft.branch}
+                      onChange={(event) => {
+                        onPatch({ branch: event.target.value });
+                        onClearConnection('github');
+                      }}
+                      aria-label="分支"
+                    >
+                      <option value="main">main</option>
+                      <option value="staging">staging</option>
+                      <option value="release/2.8">release/2.8</option>
+                    </Select>
+                  )}
+                </div>
+
+                {githubMode === 'real' && draft.connections.github && !draft.connections.github.demo ? (
+                  <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      loading={probingGitHub}
+                      onClick={() => void onProbeGitHub()}
+                      icon={<ShieldCheck size={12} />}
+                    >
+                      验证只读边界（AC-01）
+                    </Button>
+                    {githubProbe ? (
+                      <span
+                        className={cn(
+                          'text-[10px]',
+                          githubProbe.writeBlocked ? 'text-success' : 'text-danger',
+                        )}
+                      >
+                        {githubProbe.detail}（HTTP {githubProbe.statusCode}）
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             }
           />
@@ -732,6 +1061,8 @@ function SourceConnectRow({
   icon,
   connection,
   connecting,
+  connectLabel = '模拟连接',
+  connectedBadgeLabel = '已连接 · 模拟',
   error,
   onConnect,
   input,
@@ -742,6 +1073,8 @@ function SourceConnectRow({
   icon: ReactNode;
   connection?: SourceConnection;
   connecting: boolean;
+  connectLabel?: string;
+  connectedBadgeLabel?: string;
   error?: string;
   onConnect: () => void;
   input: ReactNode;
@@ -766,7 +1099,7 @@ function SourceConnectRow({
         <div className="flex items-center gap-2">
           {connection ? (
             <Badge tone="success" dot={false}>
-              已连接 · 模拟
+              {connectedBadgeLabel}
             </Badge>
           ) : error ? (
             <Badge tone="danger" dot={false}>
@@ -779,7 +1112,7 @@ function SourceConnectRow({
             onClick={onConnect}
             loading={connecting}
           >
-            {connection ? '重新连接' : '模拟连接'}
+            {connection ? '重新连接' : connectLabel}
           </Button>
         </div>
       </div>
@@ -797,11 +1130,13 @@ function SourceConnectRow({
 
 function StepSources({
   draft,
+  githubMode,
   onPatch,
   onClearConnection,
   errors,
 }: {
   draft: OnboardingDraft;
+  githubMode: 'mock' | 'real';
   onPatch: (value: Partial<OnboardingDraft>) => void;
   onClearConnection: (kind: SourceKind) => void;
   errors: string[];
@@ -826,21 +1161,33 @@ function StepSources({
                 placeholder="owner/repo"
                 aria-label="仓库"
               />
-              <Select
-                value={draft.branch}
-                onChange={(event) => {
-                  onPatch({ branch: event.target.value });
-                  onClearConnection('github');
-                }}
-                aria-label="分支"
-              >
-                <option value="main">main</option>
-                <option value="staging">staging</option>
-                <option value="release/2.8">release/2.8</option>
-              </Select>
+              {githubMode === 'real' ? (
+                <Input
+                  value={draft.branch}
+                  onChange={(event) => {
+                    onPatch({ branch: event.target.value });
+                    onClearConnection('github');
+                  }}
+                  placeholder="main"
+                  aria-label="分支"
+                />
+              ) : (
+                <Select
+                  value={draft.branch}
+                  onChange={(event) => {
+                    onPatch({ branch: event.target.value });
+                    onClearConnection('github');
+                  }}
+                  aria-label="分支"
+                >
+                  <option value="main">main</option>
+                  <option value="staging">staging</option>
+                  <option value="release/2.8">release/2.8</option>
+                </Select>
+              )}
             </div>
             <p className="mt-2 text-[10px] leading-4 text-faint">
-              修改仓库或分支会让已建立的模拟连接失效，需要回到上一步重新连接。
+              修改仓库或分支会让已建立的连接失效，需要回到上一步重新验证。
             </p>
           </div>
         ) : null}
@@ -945,7 +1292,9 @@ function StepSources({
           ) : null}
         </div>
         <Callout tone="info" className="mt-4" size="sm">
-          初始化只会生成明确标注为 Demo 的候选功能。任何 AI 推断都要在知识中心人工确认。
+          {githubMode === 'real'
+            ? '初始化将通过本机 API 执行真实只读索引与 PR 发现；所有候选项均需在知识中心人工确认与核验。'
+            : '初始化只会生成明确标注为 Demo 的候选功能。任何 AI 推断都要在知识中心人工确认。'}
         </Callout>
       </div>
     </div>
@@ -1349,19 +1698,23 @@ function StepDemoEnvironment({
 function StepInitialize({
   draft,
   brand,
+  isRealGitHub,
   initializing,
   initIndex,
+  initError,
   createdProjectId,
   onStart,
 }: {
   draft: OnboardingDraft;
   brand: BrandKit;
+  isRealGitHub: boolean;
   initializing: boolean;
   initIndex: number;
+  initError: string | null;
   createdProjectId: string | null;
   onStart: () => void;
 }) {
-  const sources = draft.methods.length;
+  const stepsList = isRealGitHub ? REAL_INIT_STEPS : INIT_STEPS;
   return (
     <div className="grid gap-5 xl:grid-cols-[.95fr_1.05fr]">
       <div>
@@ -1377,8 +1730,8 @@ function StepInitialize({
               <div className="font-display text-[15px] font-medium text-fg">{draft.name || '未命名项目'}</div>
               <div className="text-[10.5px] text-faint">{draft.productName || '产品名称'}</div>
             </div>
-            <Badge tone="outline" dot={false} className="ml-auto">
-              待创建
+            <Badge tone={isRealGitHub ? 'success' : 'outline'} dot={false} className="ml-auto">
+              {isRealGitHub ? '真实只读 GitHub' : '待创建'}
             </Badge>
           </div>
           <p className="mt-3 line-clamp-2 text-[11px] leading-[18px] text-muted">
@@ -1414,7 +1767,9 @@ function StepInitialize({
           </dl>
         </div>
         <Callout tone="info" className="mt-3" size="sm">
-          点击“开始初始化”后会用确定性步骤生成本地快照。整个过程不需要网络，也不会调用真实模型。
+          {isRealGitHub
+            ? '点击“开始初始化”会通过本机 API 执行真实只读索引与 PR 变更发现（不修改远程仓库）。'
+            : '点击“开始初始化”后会用确定性步骤生成本地快照。整个过程不需要网络，也不会调用真实模型。'}
         </Callout>
       </div>
 
@@ -1422,11 +1777,11 @@ function StepInitialize({
         <div className="flex items-center justify-between">
           <div className="text-[12px] font-medium text-fg">初始化进度</div>
           <span className="font-mono text-[10px] text-faint">
-            {initializing || createdProjectId ? `${Math.max(0, initIndex + 1)}/${INIT_STEPS.length}` : `0/${INIT_STEPS.length}`}
+            {initializing || createdProjectId ? `${Math.max(0, initIndex + 1)}/${stepsList.length}` : `0/${stepsList.length}`}
           </span>
         </div>
         <div className="mt-3 space-y-2.5">
-          {INIT_STEPS.map((item, index) => {
+          {stepsList.map((item, index) => {
             const done = initIndex >= index;
             const running = initializing && initIndex === index - 1;
             return (
@@ -1461,14 +1816,20 @@ function StepInitialize({
           <div
             className="h-full rounded-full bg-accent transition-[width] duration-500"
             style={{
-              width: `${createdProjectId ? 100 : initializing ? ((initIndex + 1) / INIT_STEPS.length) * 100 : 0}%`,
+              width: `${createdProjectId ? 100 : initializing ? ((initIndex + 1) / stepsList.length) * 100 : 0}%`,
             }}
           />
         </div>
-        {createdProjectId ? (
+        {initError ? (
+          <Callout tone="danger" size="sm" className="mt-3" title="初始化失败">
+            {initError}
+          </Callout>
+        ) : createdProjectId ? (
           <div className="mt-3 text-[10.5px] text-success">知识快照已写入。正在进入知识中心…</div>
         ) : initializing ? (
-          <div className="mt-3 text-[10.5px] text-muted">正在生成模拟知识，请稍候；不要关闭页面。</div>
+          <div className="mt-3 text-[10.5px] text-muted">
+            {isRealGitHub ? '正在运行真实仓库索引与 PR 发现，请稍候…' : '正在生成模拟知识，请稍候；不要关闭页面。'}
+          </div>
         ) : (
           <div className="mt-3 flex items-center gap-1.5 text-[10.5px] text-faint">
             <Sparkles size={11} className="text-ai" />
@@ -1495,7 +1856,7 @@ function validateStep(step: number, draft: OnboardingDraft): string[] {
       if (!draft.connections[method]) {
         errors.push(
           method === 'github'
-            ? '请先完成 GitHub 仓库的模拟连接。'
+            ? '请先完成 GitHub 仓库的连接验证。'
             : method === 'docs'
               ? '请先完成产品文档的模拟连接。'
               : '请先完成线上产品的模拟连接。',

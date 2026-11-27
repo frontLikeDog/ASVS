@@ -52,6 +52,29 @@ export const CONNECTOR_STATUSES = [
 export const connectorStatusSchema = z.enum(CONNECTOR_STATUSES);
 export type ConnectorStatus = z.infer<typeof connectorStatusSchema>;
 
+export const PR_CHANGE_CLASSIFICATIONS = [
+  'user_facing_feature',
+  'user_facing_improvement',
+  'internal_non_promotable',
+  'ambiguous_needs_review',
+] as const;
+export const prChangeClassificationSchema = z.enum(PR_CHANGE_CLASSIFICATIONS);
+export type PRChangeClassification = z.infer<typeof prChangeClassificationSchema>;
+
+export const CLAIM_PUBLISH_ELIGIBILITIES = [
+  'publishable',
+  'needs_qualification',
+  'blocked_unverified',
+  'blocked_stale',
+  'blocked_rejected',
+] as const;
+export const claimPublishEligibilitySchema = z.enum(CLAIM_PUBLISH_ELIGIBILITIES);
+export type ClaimPublishEligibility = z.infer<typeof claimPublishEligibilitySchema>;
+
+export const CLAIM_VERIFICATION_DECISIONS = ['approve', 'reject'] as const;
+export const claimVerificationDecisionSchema = z.enum(CLAIM_VERIFICATION_DECISIONS);
+export type ClaimVerificationDecision = z.infer<typeof claimVerificationDecisionSchema>;
+
 export const sourceConnectionSchema = z.object({
   id: idSchema,
   kind: sourceKindSchema,
@@ -60,6 +83,9 @@ export const sourceConnectionSchema = z.object({
   status: connectorStatusSchema,
   scope: z.string().optional(),
   lastSyncedAt: isoDateSchema.optional(),
+  lastSnapshotId: z.string().min(1).optional(),
+  lastCommitSha: z.string().min(1).optional(),
+  readOnlyVerifiedAt: isoDateSchema.optional(),
   error: z.string().optional(),
   demo: z.boolean(),
 });
@@ -122,6 +148,10 @@ export const featureSchema = z.object({
   demoRoute: z.string(),
   updatedAt: isoDateSchema,
   tags: z.array(z.string()),
+  sourceRepo: z.string().min(1).optional(),
+  sourceCandidateId: z.string().min(1).optional(),
+  sourcePullNumber: z.number().int().positive().optional(),
+  sourceClassification: prChangeClassificationSchema.optional(),
   demo: z.boolean(),
 });
 export type Feature = z.infer<typeof featureSchema>;
@@ -150,6 +180,8 @@ export const claimVerificationSchema = z.object({
   testRunId: z.string().min(1).max(200).optional(),
   /** Published release the claim was verified against. */
   releaseTag: z.string().min(1).max(120).optional(),
+  /** Whether release or runtime evidence exists (still subject to environment/approval gate). */
+  deployed: z.boolean().optional(),
 });
 export type ClaimVerification = z.infer<typeof claimVerificationSchema>;
 
@@ -160,8 +192,15 @@ export const claimSchema = z.object({
   statement: z.string().min(1),
   audience: z.string(),
   status: claimStatusSchema,
+  eligibility: claimPublishEligibilitySchema.optional(),
+  blockers: z.array(z.string()).optional(),
+  guidance: z.string().optional(),
   evidenceIds: z.array(idSchema),
   verification: claimVerificationSchema.optional(),
+  sourceRepo: z.string().min(1).optional(),
+  sourceCandidateId: z.string().min(1).optional(),
+  sourceClaimId: z.string().min(1).optional(),
+  sourcePullNumber: z.number().int().positive().optional(),
   demo: z.boolean(),
 });
 export type Claim = z.infer<typeof claimSchema>;
@@ -185,6 +224,15 @@ export const evidenceSchema = z.object({
   ref: z.string(),
   status: evidenceStatusSchema,
   capturedAt: isoDateSchema,
+  filePath: z.string().min(1).optional(),
+  sourceDigest: z.string().min(1).optional(),
+  commitSha: z.string().min(1).optional(),
+  snapshotId: z.string().min(1).optional(),
+  environmentId: z.string().min(1).optional(),
+  releaseTag: z.string().min(1).optional(),
+  testRunId: z.string().min(1).optional(),
+  decision: claimVerificationDecisionSchema.optional(),
+  actor: z.string().min(1).optional(),
   demo: z.boolean(),
 });
 export type Evidence = z.infer<typeof evidenceSchema>;
@@ -233,6 +281,13 @@ export const pullRequestSchema = z.object({
   kind: z.enum(PR_KINDS),
   summary: z.string(),
   featureIds: z.array(idSchema),
+  sourceCandidateId: z.string().min(1).optional(),
+  classification: prChangeClassificationSchema.optional(),
+  htmlUrl: z.string().url().optional(),
+  headSha: z.string().min(1).optional(),
+  mergeCommitSha: z.string().min(1).nullable().optional(),
+  snapshotId: z.string().min(1).optional(),
+  promotable: z.boolean().optional(),
   demo: z.boolean(),
 });
 export type PullRequest = z.infer<typeof pullRequestSchema>;
@@ -245,6 +300,8 @@ export const releaseSchema = z.object({
   releasedAt: isoDateSchema,
   prIds: z.array(idSchema),
   highlight: z.string(),
+  htmlUrl: z.string().url().optional(),
+  tagName: z.string().min(1).optional(),
   demo: z.boolean(),
 });
 export type Release = z.infer<typeof releaseSchema>;
