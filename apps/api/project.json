@@ -30,6 +30,16 @@
       "executor": "nx:run-commands",
       "options": { "command": "tsx src/main.ts", "cwd": "apps/api" },
       "cache": false
+    },
+    "verify-github": {
+      "executor": "nx:run-commands",
+      "options": { "command": "tsx src/scripts/verify-github-readonly.ts", "cwd": "apps/api" },
+      "cache": false
+    },
+    "index-benchmark": {
+      "executor": "nx:run-commands",
+      "options": { "command": "tsx src/scripts/knowledge-index-benchmark.ts", "cwd": "apps/api" },
+      "cache": false
     }
   }
 }

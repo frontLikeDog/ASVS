@@ -6,6 +6,10 @@ coverage/
 playwright-report/
 test-results/
 *.local
+.env
+.env.*
+!.env.example
+*.pem
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
