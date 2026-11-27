@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type {
   Claim,
   Evidence,
   Feature,
   FeatureStatus,
+  GitHubRepoRef,
   KnowledgeSuggestion,
 } from '@asvs/domain';
 import {
@@ -13,6 +14,7 @@ import {
   formatRelativeTime,
 } from '@asvs/domain';
 import {
+  AlertTriangle,
   ArrowRight,
   BookOpen,
   Check,
@@ -23,6 +25,7 @@ import {
   FileCode2,
   FlaskConical,
   GitPullRequest,
+  History,
   Link2,
   MonitorSmartphone,
   Pencil,
@@ -39,6 +42,7 @@ import {
   Button,
   Callout,
   Checkbox,
+  ClaimEligibilityBadge,
   ClaimStatusBadge,
   Dialog,
   DialogContent,
@@ -62,12 +66,23 @@ import {
   buttonStyles,
   cn,
 } from '@asvs/ui';
-import { useStudioStore, useUiStore } from '@asvs/state';
+import {
+  getGitHubKnowledgeClient,
+  parseProjectGitHubSource,
+  reconcileDiscoveryCandidates,
+  useStudioStore,
+  useUiStore,
+} from '@asvs/state';
 import { useShallow } from 'zustand/react/shallow';
+import {
+  ClaimVerificationAuditDialog,
+  ClaimVerificationDialog,
+} from './claim-verification-dialog';
+import { KnowledgeDiscoveryPanel } from './knowledge-discovery-panel';
 import { NotFoundInline } from './not-found-inline';
 
 type CatalogFilter = 'all' | 'verified' | 'attention' | 'proposed';
-type KnowledgeTab = 'catalog' | 'timeline' | 'pending';
+type KnowledgeTab = 'catalog' | 'discovery' | 'timeline' | 'pending';
 
 const EVIDENCE_KIND_META = {
   source: { label: '源码 / PR', icon: FileCode2 },
@@ -105,12 +120,31 @@ export function KnowledgePage() {
   const syncProjectKnowledge = useStudioStore((state) => state.syncProjectKnowledge);
   const pushToast = useUiStore((state) => state.pushToast);
 
-  const [tab, setTab] = useState<KnowledgeTab>('catalog');
+  const tabParam = searchParams.get('tab');
+  const [tab, setTab] = useState<KnowledgeTab>(() =>
+    tabParam === 'discovery' ||
+    tabParam === 'timeline' ||
+    tabParam === 'pending' ||
+    tabParam === 'catalog'
+      ? tabParam
+      : 'catalog',
+  );
+  useEffect(() => {
+    if (
+      tabParam === 'discovery' ||
+      tabParam === 'timeline' ||
+      tabParam === 'pending' ||
+      tabParam === 'catalog'
+    ) {
+      setTab(tabParam);
+    }
+  }, [tabParam]);
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<CatalogFilter>('all');
   const [syncing, setSyncing] = useState(false);
   const [welcomeDismissed, setWelcomeDismissed] = useState(false);
   const [pendingDecision, setPendingDecision] = useState<KnowledgeSuggestion | null>(null);
+  const realGitHub = useMemo(() => parseProjectGitHubSource(project), [project]);
 
   const featuredId = searchParams.get('feature');
   const selectedFeature =
@@ -138,13 +172,80 @@ export function KnowledgePage() {
   if (!project) return <NotFoundInline label="项目不存在或已被删除。" />;
 
   const selectFeature = (featureId: string) => {
-    const next = new URLSearchParams(searchParams);
-    next.set('feature', featureId);
-    next.delete('welcome');
-    setSearchParams(next, { replace: true });
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set('feature', featureId);
+        next.delete('welcome');
+        return next;
+      },
+      { replace: true },
+    );
+  };
+
+  const handleTabChange = (nextTab: KnowledgeTab) => {
+    setTab(nextTab);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (nextTab === 'catalog') next.delete('tab');
+        else next.set('tab', nextTab);
+        return next;
+      },
+      { replace: true },
+    );
   };
 
   const handleSync = async () => {
+    if (realGitHub) {
+      setSyncing(true);
+      try {
+        const client = await getGitHubKnowledgeClient();
+        const snapshot = await client.indexRepository(realGitHub.repo, {
+          branch: realGitHub.branch,
+        });
+        const staleness = await client.refreshStaleness(realGitHub.repo, {
+          snapshotId: snapshot.id,
+        });
+        const report = await client.discoverPullRequests(realGitHub.repo, {
+          branch: realGitHub.branch,
+          snapshotId: snapshot.id,
+          state: 'closed',
+          limit: 20,
+        });
+        const candidates = await client.listCandidates(realGitHub.repo, { limit: 100 });
+        const summary = reconcileDiscoveryCandidates(project.id, candidates, {
+          snapshotId: snapshot.id,
+          commitSha: snapshot.gitCommitSha,
+          branch: snapshot.branch,
+          syncedAt: snapshot.indexedAt,
+        });
+        handleTabChange('discovery');
+        pushToast({
+          tone:
+            staleness.claimsMarkedStale.length > 0 || summary.invalidatedVideoIds.length > 0
+              ? 'warning'
+              : 'success',
+          title: `真实同步完成（${snapshot.stats.mode}）`,
+          description: `分析 ${report.summary.analyzed} 个 PR；复用 ${snapshot.stats.reusedFiles} / 下载 ${snapshot.stats.fetchedFiles}${
+            summary.invalidatedVideoIds.length > 0
+              ? `；${summary.invalidatedVideoIds.length} 条已批准视频因过期失效`
+              : ''
+          }。`,
+        });
+      } catch (syncError) {
+        pushToast({
+          tone: 'danger',
+          title: '真实 GitHub 同步失败',
+          description:
+            syncError instanceof Error ? syncError.message : '无法连接本机 ASVS API。',
+        });
+      } finally {
+        setSyncing(false);
+      }
+      return;
+    }
+
     setSyncing(true);
     const result = await syncProjectKnowledge(project.id);
     setSyncing(false);
@@ -169,7 +270,7 @@ export function KnowledgePage() {
         actions={
           <>
             <Button variant="secondary" onClick={handleSync} loading={syncing} icon={<RefreshCw size={14} />}>
-              {syncing ? '同步中…' : '模拟重新分析'}
+              {syncing ? '同步中…' : realGitHub ? '增量索引并发现 PR' : '模拟重新分析'}
             </Button>
             <Link to={`/projects/${project.id}/videos/new`} className={buttonStyles({ variant: 'primary' })}>
               <Sparkles size={14} />
@@ -183,7 +284,11 @@ export function KnowledgePage() {
         <Callout
           tone="success"
           className="mt-4"
-          title={`初始化完成：模拟分析发现了 ${features.length} 个候选功能`}
+          title={
+            realGitHub
+              ? `真实仓库初始化完成：已连接 ${realGitHub.source.name}（${realGitHub.branch}）`
+              : `初始化完成：模拟分析发现了 ${features.length} 个候选功能`
+          }
           action={
             <button
               type="button"
@@ -195,7 +300,9 @@ export function KnowledgePage() {
             </button>
           }
         >
-          这些功能默认是候选状态，需要人工确认后才适合用于对外视频。先检查声明与证据，再创建视频。
+          {realGitHub
+            ? '请在「PR 变更发现」中选择用户可感知的 PR 写入功能目录，并补齐运行态与人工核验（AC-03）。'
+            : '这些功能默认是候选状态，需要人工确认后才适合用于对外视频。先检查声明与证据，再创建视频。'}
         </Callout>
       ) : null}
 
@@ -215,7 +322,13 @@ export function KnowledgePage() {
         </span>
         <span className="text-line-strong">·</span>
         <span className="font-mono text-[10px]">
-          {project.sources[0]?.scope ?? 'main'} · analysis #{project.analysisCount}
+          {realGitHub
+            ? `${realGitHub.source.name} · ${realGitHub.branch}${
+                realGitHub.source.lastSnapshotId
+                  ? ` · ${realGitHub.source.lastSnapshotId.slice(0, 13)}`
+                  : ''
+              }`
+            : `${project.sources[0]?.scope ?? 'main'} · analysis #${project.analysisCount}`}
         </span>
         <span className="ml-auto flex items-center gap-1.5 text-[10px] text-faint">
           <Clock3 size={11} />
@@ -223,16 +336,28 @@ export function KnowledgePage() {
             ? `同步于 ${formatRelativeTime(project.sources[0].lastSyncedAt)}`
             : '尚未同步'}
         </span>
-        <Badge tone="outline" dot={false}>Demo 快照</Badge>
+        {realGitHub ? (
+          <Badge tone="success" dot={false}>真实只读 GitHub</Badge>
+        ) : (
+          <Badge tone="outline" dot={false}>Demo 快照</Badge>
+        )}
       </div>
 
-      <Tabs value={tab} onValueChange={(value) => setTab(value as KnowledgeTab)} className="mt-5">
+      <Tabs value={tab} onValueChange={(value) => handleTabChange(value as KnowledgeTab)} className="mt-5">
         <TabsList>
           <TabsTrigger value="catalog">
             <BookOpen size={13} /> 功能目录
             <span className="rounded-full bg-overlay px-1.5 py-0.5 font-mono text-[9px] text-faint">
               {features.length}
             </span>
+          </TabsTrigger>
+          <TabsTrigger value="discovery">
+            <GitPullRequest size={13} /> PR 变更发现
+            {realGitHub ? (
+              <span className="rounded-full bg-success-soft px-1.5 py-0.5 font-mono text-[9px] text-success">
+                真实
+              </span>
+            ) : null}
           </TabsTrigger>
           <TabsTrigger value="timeline">
             <GitPullRequest size={13} /> 时间线
@@ -349,6 +474,7 @@ export function KnowledgePage() {
               <FeatureDetail
                 key={selectedFeature.id}
                 projectId={project.id}
+                realRepo={realGitHub?.repo}
                 feature={selectedFeature}
                 claims={claims.filter((claim) => claim.featureId === selectedFeature.id)}
                 evidence={evidence}
@@ -422,6 +548,19 @@ export function KnowledgePage() {
               )}
             </div>
           </div>
+        </TabsContent>
+
+        <TabsContent value="discovery">
+          <KnowledgeDiscoveryPanel
+            project={project}
+            features={features}
+            claims={claims}
+            onOpenFeature={(featureId) => {
+              handleTabChange('catalog');
+              selectFeature(featureId);
+            }}
+            onToast={pushToast}
+          />
         </TabsContent>
 
         <TabsContent value="timeline">
@@ -588,6 +727,7 @@ function medianConfidence(features: Feature[]): number {
 
 function FeatureDetail({
   projectId,
+  realRepo,
   feature,
   claims,
   evidence,
@@ -597,6 +737,7 @@ function FeatureDetail({
   onToast,
 }: {
   projectId: string;
+  realRepo?: GitHubRepoRef;
   feature: Feature;
   claims: Claim[];
   evidence: Evidence[];
@@ -608,6 +749,8 @@ function FeatureDetail({
   const updateFeature = useStudioStore((state) => state.updateFeature);
   const reverifyClaim = useStudioStore((state) => state.reverifyClaim);
   const [editing, setEditing] = useState(false);
+  const [verifyClaim, setVerifyClaim] = useState<Claim | null>(null);
+  const [auditClaim, setAuditClaim] = useState<Claim | null>(null);
   const [draft, setDraft] = useState({
     name: feature.name,
     summary: feature.summary,
@@ -714,21 +857,33 @@ function FeatureDetail({
                 </Button>
               </>
             ) : (
-              <Button
-                variant="ghost"
-                size="sm"
-                icon={<Pencil size={12} />}
-                onClick={() => setEditing(true)}
-              >
-                编辑
-              </Button>
+              <>
+                <Link
+                  to={`/projects/${projectId}/videos/new?feature=${feature.id}`}
+                  className={buttonStyles({ variant: 'secondary', size: 'sm' })}
+                >
+                  <Sparkles size={12} /> 创建视频
+                </Link>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  icon={<Pencil size={12} />}
+                  onClick={() => setEditing(true)}
+                >
+                  编辑
+                </Button>
+              </>
             )}
           </div>
         </div>
 
         <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
           <MiniStat label="声明" value={`${claims.length}`} hint={`${claims.filter((claim) => claim.status === 'verified').length} 已核验`} />
-          <MiniStat label="证据" value={`${evidence.filter((item) => claims.some((claim) => claim.id === item.claimId)).length}`} hint="含模拟来源" />
+          <MiniStat
+            label="证据"
+            value={`${evidence.filter((item) => claims.some((claim) => claim.id === item.claimId)).length}`}
+            hint={feature.demo ? '含模拟来源' : '源码 / 核验追踪'}
+          />
           <MiniStat label="关联视频" value={`${relatedVideos.length}`} hint="使用该功能" />
           <MiniStat label="更新" value={formatRelativeTime(feature.updatedAt)} hint="人工或分析" small />
         </div>
@@ -752,6 +907,9 @@ function FeatureDetail({
                   <div className="flex flex-wrap items-start justify-between gap-2 border-b border-line px-3.5 py-3">
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
+                        {claim.eligibility ? (
+                          <ClaimEligibilityBadge eligibility={claim.eligibility} />
+                        ) : null}
                         <ClaimStatusBadge status={claim.status} />
                         <span className="text-[11.5px] leading-5 text-fg">{claim.statement}</span>
                       </div>
@@ -761,13 +919,43 @@ function FeatureDetail({
                           <span>
                             · {claim.verification.environment} · {claim.verification.appVersion} ·{' '}
                             {formatDate(claim.verification.verifiedAt)}
+                            {claim.verification.commitSha
+                              ? ` · commit ${claim.verification.commitSha.slice(0, 8)}`
+                              : ''}
                           </span>
                         ) : (
                           <span>· 还没有核验记录</span>
                         )}
                       </div>
+                      {claim.blockers && claim.blockers.length > 0 ? (
+                        <div className="mt-1.5 flex items-start gap-1.5 text-[10px] text-danger">
+                          <AlertTriangle size={11} className="mt-0.5 shrink-0" />
+                          <span>{claim.blockers.join(' ')}</span>
+                        </div>
+                      ) : claim.guidance ? (
+                        <div className="mt-1 text-[10px] text-muted">{claim.guidance}</div>
+                      ) : null}
                     </div>
-                    {claim.status !== 'verified' ? (
+                    {!claim.demo && realRepo && claim.sourceClaimId ? (
+                      <div className="flex shrink-0 items-center gap-1">
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          icon={<ShieldCheck size={11} />}
+                          onClick={() => setVerifyClaim(claim)}
+                        >
+                          提交核验记录
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          icon={<History size={11} />}
+                          onClick={() => setAuditClaim(claim)}
+                        >
+                          核验审计
+                        </Button>
+                      </div>
+                    ) : claim.status !== 'verified' ? (
                       <Button
                         variant="ghost"
                         size="sm"
@@ -806,9 +994,21 @@ function FeatureDetail({
                                 {meta.label}
                               </span>
                               <StatusBadge meta={statusMeta} />
+                              {item.decision ? (
+                                <Badge
+                                  tone={item.decision === 'approve' ? 'success' : 'danger'}
+                                  dot={false}
+                                >
+                                  {item.decision}
+                                </Badge>
+                              ) : null}
                             </div>
                             <div className="mt-0.5 text-[9.5px] leading-4 text-faint">
                               {item.detail} · <span className="font-mono">{item.ref}</span>
+                              {item.sourceDigest ? (
+                                <span className="font-mono"> · sha256:{item.sourceDigest.slice(0, 12)}</span>
+                              ) : null}
+                              {item.actor ? <span> · {item.actor}</span> : null}
                             </div>
                           </div>
                           {item.demo ? <span className="shrink-0 text-[8.5px] text-faint">Demo</span> : null}
@@ -879,6 +1079,46 @@ function FeatureDetail({
           </div>
         ) : null}
       </div>
+
+      {verifyClaim && realRepo && verifyClaim.sourceClaimId ? (
+        <ClaimVerificationDialog
+          open={Boolean(verifyClaim)}
+          onOpenChange={(open) => {
+            if (!open) setVerifyClaim(null);
+          }}
+          repo={realRepo}
+          claimId={verifyClaim.sourceClaimId}
+          claimStatement={verifyClaim.statement}
+          currentEligibility={verifyClaim.eligibility}
+          onVerified={async (updatedClaim) => {
+            const client = await getGitHubKnowledgeClient();
+            const candidate = verifyClaim.sourceCandidateId
+              ? await client.getCandidate(realRepo, verifyClaim.sourceCandidateId)
+              : null;
+            const list = candidate
+              ? [candidate]
+              : await client.listCandidates(realRepo, { limit: 100 });
+            reconcileDiscoveryCandidates(projectId, list);
+            onToast({
+              tone: updatedClaim.eligibility === 'publishable' ? 'success' : 'info',
+              title: '核验记录已写入',
+              description: `最新资格：${updatedClaim.eligibility}（${updatedClaim.guidance}）`,
+            });
+          }}
+        />
+      ) : null}
+
+      {auditClaim && realRepo && auditClaim.sourceClaimId ? (
+        <ClaimVerificationAuditDialog
+          open={Boolean(auditClaim)}
+          onOpenChange={(open) => {
+            if (!open) setAuditClaim(null);
+          }}
+          repo={realRepo}
+          claimId={auditClaim.sourceClaimId}
+          claimStatement={auditClaim.statement}
+        />
+      ) : null}
     </Panel>
   );
 }

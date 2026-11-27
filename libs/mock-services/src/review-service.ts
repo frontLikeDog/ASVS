@@ -11,7 +11,9 @@ import type {
 } from '@asvs/domain';
 import { MIN_SCENE_DURATION, totalDuration } from '@asvs/domain';
 
-const LIMITATION_PATTERN = /预发布|验证中|待验证|提示|辅助|参考|限定|Beta|beta|确认/;
+const LIMITATION_PATTERN =
+  /Release|release|随 Release|staging|beta|preview|测试环境|预发布|验证中|待验证|提示|辅助|参考|限定|Beta|确认/;
+const LAUNCHED_OVERCLAIM_PATTERN = /已上线|全面上线|现已上线|正式上线|全量可用|已全量开放/;
 
 const EMAIL_PATTERN = /[\w.+-]+@[\w-]+\.[\w.]+/;
 const SECRET_PATTERN = /(sk-[a-z0-9]{8,}|ghp_[a-z0-9]{10,}|bearer\s+[a-z0-9]{8,})/i;
@@ -129,6 +131,59 @@ function checkClaims(
   relatedClaims.forEach((claim) => {
     const feature = features.find((item) => item.id === claim.featureId);
     const featureLabel = feature?.name ?? claim.featureId;
+    const scenesForClaim = scenes.filter((scene) => scene.claimIds.includes(claim.id));
+
+    // When 4C eligibility is present, it is the authoritative publish gate
+    // (closing cases like `production_runtime_pending_approval` where status
+    // is `supported` but human approval is still missing).
+    if (claim.eligibility !== undefined) {
+      switch (claim.eligibility) {
+        case 'blocked_rejected':
+          failures.push(
+            `「${featureLabel}」已被人工驳回：${claim.blockers?.[0] ?? '不得发布。'}`,
+          );
+          return;
+        case 'blocked_stale':
+          failures.push(
+            `「${featureLabel}」的源码证据已过期（AC-09）：${claim.blockers?.[0] ?? '请重新索引并复核声明。'}`,
+          );
+          return;
+        case 'blocked_unverified':
+          failures.push(
+            `「${featureLabel}」未通过发布核验（AC-03）：${claim.blockers?.[0] ?? '缺少发布或人工批准证据，禁止公开发布。'}`,
+          );
+          return;
+        case 'needs_qualification': {
+          supportedCount += 1;
+          const hasOverclaim = scenesForClaim.some((scene) =>
+            LAUNCHED_OVERCLAIM_PATTERN.test(sceneText(scene)),
+          );
+          if (hasOverclaim) {
+            failures.push(
+              `「${featureLabel}」仅有限定范围证据，文案禁止宣称「已上线」或「全量可用」（AC-03）。`,
+            );
+            return;
+          }
+          const hasLimitation = scenesForClaim.some((scene) =>
+            LIMITATION_PATTERN.test(scene.caption),
+          );
+          if (!hasLimitation) {
+            failures.push(
+              `「${featureLabel}」需保留范围限定表述：${claim.guidance ?? '请在字幕注明非生产环境或随 Release 发布。'}`,
+            );
+          }
+          return;
+        }
+        case 'publishable':
+          if (feature?.status === 'stale' || claim.status !== 'verified') {
+            failures.push(`「${featureLabel}」的证据已过期或尚未完成核验，需要重新验证。`);
+            return;
+          }
+          verifiedCount += 1;
+          return;
+      }
+    }
+
     if (claim.status === 'verified') {
       verifiedCount += 1;
       if (feature?.status === 'stale') {
@@ -138,7 +193,6 @@ function checkClaims(
     }
     if (claim.status === 'supported') {
       supportedCount += 1;
-      const scenesForClaim = scenes.filter((scene) => scene.claimIds.includes(claim.id));
       const hasLimitation = scenesForClaim.some((scene) => LIMITATION_PATTERN.test(scene.caption));
       if (!hasLimitation) {
         failures.push(`「${featureLabel}」是待验证声明，但对应镜头的字幕没有限定表述。`);

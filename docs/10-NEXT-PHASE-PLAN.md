@@ -364,7 +364,7 @@ schema 变更一次，已有数据仍在
 | 4A · 只读 GitHub App | ✅ 完成 | `GitHubAppReadOnlyClient` 严格 `GET`，写权限 fail-closed，`redactSecrets` 脱敏；`pnpm github:verify` 对 `frontLikeDog/livenotes` 实测通过。 |
 | 4B · 增量索引与快照 | ✅ 完成 | `KnowledgeSnapshotV1` + `KnowledgeIndexPort`；GitHub tree/commit 只读读取；SHA256 `sourceDigests` 与按 blob sha 复用的增量扫描。**真实基准**（`frontLikeDog/livenotes` @ `78bb6a68`，322 个可索引文件）：冷扫描 37.9 s / 下载 357 个 blob → 同提交热扫描 1.7 s / **0 次下载** / 复用 322；`sourceDigests` 完全一致，约 21× 加速。SQLite `user_version` v2→v3 保留工作区与 `production_runs`。 |
 | 4C · PR 变更候选 | ✅ 完成（2026-11-27） | `PRDiscoveryPort` + 确定性分类器（无 LLM）；AC-02 / AC-03 / AC-09 均有纯函数守门与测试；SQLite v3→v4；`pnpm discovery:verify` 对 `frontLikeDog/livenotes` @ `96f90e90` 实测 3 个真实 PR：2 个 `feat` → 2 条 Claim 全部 `blocked_unverified`（阻止「已上线」），1 个 `refactor` → `internal_non_promotable` 且 0 Claim（真实验证 AC-02）。 |
-| 4D · Web UI | ⏳ 未开始 | 明确不在 4C 范围。 |
+| 4D · Web UI | ✅ 完成（2026-11-27） | `GitHubKnowledgeClientPort` / `HttpGitHubKnowledgeClient` + 纯投影层 `knowledge-projection.ts` + 惰性加载 `github-knowledge-actions.ts`；打通 Onboarding & 设置页双入口只读 GitHub 接入与 AC-01 写保护探针、知识中心「PR 变更发现」页签与显式推广、AC-03 核验录入与 append-only 审计、视频向导与审核页按 `Claim.eligibility` 硬守门、AC-09 过期传播及 Scene `review` / 视频 `changes_requested` 自动失效；Playwright `knowledge-real-flow.spec.ts` + `a11y.spec.ts`（38/38 通过）、`capture:demo` + `verify:capture`（11/11 通过）、`pnpm build` 初始包 `226 kB` gzip（预算 `230 kB`）。 |
 
 **4B 边界（已实现 vs 未实现）**
 
@@ -389,6 +389,16 @@ schema 变更一次，已有数据仍在
 - 未实现：候选重新分析时，只有 Claim 文案、提交与源码文件指纹均未变化且原状态未过期才会保留此前录入的 test / runtime / release / human 证据；文案、提交或任一源码指纹变化会丢弃旧批准（批准绑定具体文本与代码快照，完整历史留在 `claim_verifications`）。
 - 已知限制：`deployed=true` 只代表存在 Release 或真实环境运行态证据，不等于「生产可用」；「已上线」表述仍要求 `environmentId=production` 与人工批准同时成立。
 - 测试：`pnpm exec vitest run apps/api libs/domain` 21 个文件 / 198 个用例通过，覆盖 AC-02 / AC-03 / AC-09（含重发现防绕过、>100 候选全量过期、跨时区时间排序、未来时间拒绝、50 条证据上限保活、事务回滚）、v3→v4 迁移保留数据、路由 503/400/404/201/200 与 SQLite 往返。
+
+**4D 边界（已实现 vs 未实现）**
+
+- 已实现（端口与适配器）：`libs/ports/src/github-knowledge-client.ts`（`GitHubKnowledgeClientPort`，12 个只读/索引/发现/核验/过期方法）；`libs/adapters-http/src/http-github-knowledge-client.ts`（`HttpGitHubKnowledgeClient`，默认 15s / 长操作 180s 超时，响应全量 Zod 校验，`KnowledgeHttpError` 状态码映射）。
+- 已实现（领域投影与守门）：`libs/domain/src/knowledge-projection.ts` 的确定性投影函数（`promoteCandidateToKnowledge` 对非可推广候选执行 AC-02 硬阻断；`reconcileCandidatesIntoSnapshot` 幂等同步且在 AC-09 源码变化时同步标旧 Workspace Feature / Claim / Evidence、引用 Scene 标为 `review`、已批准视频退回 `changes_requested`）；`libs/mock-services/src/review-service.ts` 与 `director-service.ts` 改为优先依据 `Claim.eligibility` 硬守门，封堵 `production_runtime_pending_approval` 等未核验路径通过限定词绕过审核的缺口。
+- 已实现（状态隔离与包预算）：`libs/state/src/github-knowledge.ts` 经动态 `import('@asvs/adapters-http')` 懒加载 HTTP 客户端；`libs/state/src/github-knowledge-actions.ts` 独立于 `studio-store.ts`，避免把 `knowledge-projection` 拉入初始 JS chunk，使 `initial` 保持 `226 kB` gzip（预算 `230 kB`）。
+- 已实现（Web UI 双入口与端到端闭环）：Onboarding 新增可选真实只读 GitHub 接入模式（仍保留 AC-08 无源码仅文档路径）；Settings → 来源与同步支持绑定/切换真实仓库、AC-01 写保护探针、4B 快照历史、冷/热增量索引、PR 发现与 AC-09 过期刷新；知识中心新增「PR 变更发现」页签，显式推广候选至功能目录，支持按证据类型录入 `test`/`runtime`/`release`/`human` 核验与查看 append-only 审计记录；视频向导与审核页展示 `ClaimEligibilityBadge` 与真实 `commitSha`/`environmentId`/`releaseTag`。
+- 已实现（E2E 与真仓验证）：`apps/api/src/scripts/e2e-fixture-api.ts`（仅测试进程在 `127.0.0.1` 临时端口运行，不改动 `apps/api` 生产源码）驱动 `knowledge-real-flow.spec.ts`（503 降级、AC-08 无源码入门、AC-01/02/03/09 全链路闭环）；`a11y.spec.ts` 补齐 `?tab=discovery` axe 扫描；`pnpm github:verify` 与 `pnpm discovery:verify` 对 `frontLikeDog/livenotes` `@ 4ac866aac799` 实测通过（AC-01 HTTP 403；4 条 PR 中 3 个 `feat` 全部 `blocked_unverified`、1 个 `refactor` 判为 `internal_non_promotable`）。
+- 未实现（有意与既有边界）：Web UI 内生产监控、浏览器录屏调度、MP4 导出与 AI 导演仍为确定性本地模拟（不接外部 LLM / TTS / Web 端 Remotion 渲染队列）；内置演示项目（`proj_lumen`、`proj_pulse`，`demo: true`）保持本地 mock 同步；未运行或未配置 GitHub 凭证的 `apps/api` 严格返回 503 降级提示；仍无登录、多租户隔离与自动批准/自动发布；`S4-5`（5–8 位目标用户可用性测试）尚待开展。
+- 本阶段整体验证结果（2026-11-27）：`pnpm lint:boundary-check` 通过（0 违规，4 条反向探针全拒）；`pnpm exec nx run-many -t lint typecheck test --skip-nx-cache` 15 个项目全绿（Vitest **37 个文件 / 286 个用例**通过）；`pnpm build` 全部 bundle budget 达标；`pnpm test:e2e` **38/38 通过**；`pnpm capture:demo` + `pnpm verify:capture` **11/11 通过**。
 
 ### 为什么最后做
 

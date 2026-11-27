@@ -11,3 +11,4 @@ export * from './serialization';
 export * from './github';
 export * from './knowledge';
 export * from './pr-discovery';
+export * from './knowledge-projection';

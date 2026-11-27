@@ -241,4 +241,94 @@ describe('buildReviewBundle', () => {
     expect(freshness.action).toBe('editor');
     expect(result.canApprove).toBe(false);
   });
+
+  describe('4C Claim eligibility 审核守门', () => {
+    function bundleWithClaim(nextClaim: Claim, nextScenes?: Scene[]) {
+      const video = makeVideo(nextScenes ? { scenes: nextScenes } : {});
+      return buildReviewBundle({
+        video,
+        project,
+        features: [feature],
+        claims: [nextClaim],
+        evidence: [evidence],
+        runs: [successRun(video.id)],
+      });
+    }
+
+    it('blocked_unverified（含 production_runtime_pending_approval）即使字幕有限定词也必须阻断', () => {
+      const pendingApproval: Claim = {
+        ...claim,
+        status: 'supported',
+        eligibility: 'blocked_unverified',
+        blockers: ['缺少人工批准（docs/08 §5 要求公开发布必须人工明确批准）。'],
+      };
+      const result = bundleWithClaim(pendingApproval, [
+        scene('a', 0, 8, { caption: '支持规则自动执行（预发布）' }),
+        scene('b', 1, 8, { caption: '确认结果（预发布）' }),
+      ]);
+      const claimCheck = result.checks.find((check) => check.id === 'claims')!;
+      expect(claimCheck.status).toBe('fail');
+      expect(claimCheck.detail).toContain('AC-03');
+      expect(result.canApprove).toBe(false);
+    });
+
+    it('needs_qualification 禁止宣称「已上线」，保留限定词时降为 warn 允许审核', () => {
+      const stagingClaim: Claim = {
+        ...claim,
+        status: 'supported',
+        eligibility: 'needs_qualification',
+        guidance: '文案必须标注「仅 staging 环境」',
+      };
+
+      const overclaimed = bundleWithClaim(stagingClaim, [
+        scene('a', 0, 8, { caption: '新能力已上线（仅 staging 环境）' }),
+        scene('b', 1, 8),
+      ]);
+      expect(overclaimed.checks.find((c) => c.id === 'claims')?.status).toBe('fail');
+      expect(overclaimed.canApprove).toBe(false);
+
+      const missingQual = bundleWithClaim(stagingClaim, [
+        scene('a', 0, 8, { caption: '支持自动执行规则' }),
+        scene('b', 1, 8),
+      ]);
+      expect(missingQual.checks.find((c) => c.id === 'claims')?.status).toBe('fail');
+      expect(missingQual.canApprove).toBe(false);
+
+      const qualified = bundleWithClaim(stagingClaim, [
+        scene('a', 0, 8, { caption: '支持自动执行规则（仅 staging 环境）' }),
+        scene('b', 1, 8),
+      ]);
+      expect(qualified.checks.find((c) => c.id === 'claims')?.status).toBe('warn');
+      expect(qualified.canApprove).toBe(true);
+    });
+
+    it('blocked_stale 与 blocked_rejected 阻断审核，publishable + verified 通过', () => {
+      const stale = bundleWithClaim({
+        ...claim,
+        status: 'stale',
+        eligibility: 'blocked_stale',
+        blockers: ['源文件已修改'],
+      });
+      expect(stale.checks.find((c) => c.id === 'claims')?.status).toBe('fail');
+      expect(stale.canApprove).toBe(false);
+
+      const rejected = bundleWithClaim({
+        ...claim,
+        status: 'rejected',
+        eligibility: 'blocked_rejected',
+        blockers: ['人工驳回'],
+      });
+      expect(rejected.checks.find((c) => c.id === 'claims')?.status).toBe('fail');
+      expect(rejected.canApprove).toBe(false);
+
+      const publishable = bundleWithClaim({
+        ...claim,
+        status: 'verified',
+        eligibility: 'publishable',
+        blockers: [],
+      });
+      expect(publishable.checks.find((c) => c.id === 'claims')?.status).toBe('pass');
+      expect(publishable.canApprove).toBe(true);
+    });
+  });
 });

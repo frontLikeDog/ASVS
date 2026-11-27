@@ -61,6 +61,7 @@ export function DemoDialog({ open, onOpenChange }: { open: boolean; onOpenChange
             </h3>
             <ul className="mt-2.5 space-y-2 text-[12px] leading-[18px] text-muted">
               <li>结构化知识、声明与证据的增删改查，跨页面同步。</li>
+              <li>连接本机 API 后支持真实只读 GitHub App 接入、增量索引、PR 发现（AC-02）、核验审计（AC-03）与过期传播（AC-09）。</li>
               <li>AI 导演只执行有限的确定性指令，并列出每一处变更。</li>
               <li>分镜拖拽排序、时长编辑、字幕与画幅设置。</li>
               <li>时间驱动的预览、播放头、撤销 / 重做，刷新后保留。</li>
@@ -74,7 +75,7 @@ export function DemoDialog({ open, onOpenChange }: { open: boolean; onOpenChange
               明确模拟、不会伪造的部分
             </h3>
             <ul className="mt-2.5 space-y-2 text-[12px] leading-[18px] text-muted">
-              <li>GitHub 授权、仓库读取与代码扫描：模拟连接与快照。</li>
+              <li>GitHub 知识源：未配置本机 GitHub App 凭证或使用演示项目时为模拟；配置后可通过本机 API 真实只读接入。</li>
               <li>AI 模型调用：本地确定性规则，不请求外部模型。</li>
               <li>录屏、配音与渲染：模拟任务与进度，不生成音视频文件。</li>
               <li>MP4 / WebM 导出：只有状态，不会伪造可播放成片。</li>

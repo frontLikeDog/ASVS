@@ -190,11 +190,12 @@ workers/browser-worker          CLI：DemoPlan → Playwright 录屏 / 断言 / 
 | 能力 | 说明 |
 | --- | --- |
 | 项目 / 功能 / Claim / Evidence 数据编辑 | 跨页面同步，刷新后保留 |
+| 只读 GitHub App 接入、增量索引与 PR 发现（Web UI） | 通过本机 `apps/api`（4A/4B/4C）接入真实只读仓库：支持 Onboarding / 设置页双入口绑定与 AC-01 写保护探针、增量快照与 AC-09 过期传播、PR 变更分类与 AC-02 内部变更过滤、显式推广进功能目录、AC-03 核验录入与 append-only 审计、审核页按 `Claim.eligibility` 硬守门 |
 | 视频策划、Brief、分镜、字幕、时长、顺序 | 真实写入 store，支持撤销 / 重做 |
 | 时间驱动的模拟预览与播放头 | 基于镜头时长的本地时间轴，无真实视频解码 |
 | AI Director 有限意图 | 本地确定性规则，真实修改工程并返回变更清单 |
 | 生产 DAG 状态机 | 前端真实状态机；执行过程为模拟 |
-| 审核检查、批准 / 退回、版本失效 | 真实规则与持久化 |
+| 审核检查、批准 / 退回、版本失效 | 真实规则与持久化；接入真实仓库后按 `Claim.eligibility` 与 AC-09 上游变更自动失效 |
 | 工程 JSON / SRT 下载 | 真实生成文件并通过浏览器下载 |
 | 工作区同步与备份 | 可选启用本机 Fastify + SQLite；两个浏览器实例共享同一工作区；完整工作区 JSON 可导出、导入到全新浏览器 |
 | 工作区版本迁移 | v1 快照与 Zustand 备份迁移到 v2；API 读取旧行时升级；数据库迁移保留运行记录 |
@@ -207,8 +208,8 @@ workers/browser-worker          CLI：DemoPlan → Playwright 录屏 / 断言 / 
 
 | 能力 | 当前实现 |
 | --- | --- |
-| GitHub OAuth / API / 仓库读取 / 代码扫描 | **Web UI 仍是本地确定性模拟**；`apps/api` 已有真实只读 GitHub App 连接器与增量索引（CLI：`pnpm github:verify`、`pnpm index:benchmark`），但 Web 端尚未接入 |
-| AI 模型调用 / Mastra / Agent 运行时 | 不请求外部模型，使用确定性意图解析 |
+| 演示项目来源同步 / 未配置凭证降级 | 内置 `demo: true` 演示项目（如 `Lumen Analytics`）与无源码 AC-08 文档入门仍使用本地确定性模拟；未在 `apps/api/.env.local` 配置 GitHub App 凭证时，真实接入诚实提示 503，绝不伪造已连接状态 |
+| AI 模型调用 / Mastra / Agent 运行时 | 不请求外部模型，使用确定性意图解析与确定性 PR 分类规则 |
 | Web UI 内的录屏 / 生产执行 | 生产监控仍是模拟，不启动浏览器或录制；真实录屏只能通过 CLI `pnpm capture:demo` 触发 |
 | 配音 / TTS | 只有文本与时间轴，不播放或生成音频；样片为静音视频 |
 | Web 内 FFmpeg / Remotion / 服务端渲染 | Web UI 未接入；CLI `workers/render-worker` 已能真实渲染（见 §7 与 docs/11） |
@@ -233,14 +234,15 @@ workers/browser-worker          CLI：DemoPlan → Playwright 录屏 / 断言 / 
 ### 单元测试（Vitest）
 
 ```bash
-pnpm test --skip-nx-cache
+pnpm exec nx run-many -t test --skip-nx-cache
 ```
 
-- **21 个测试文件，151 个测试全部通过**（2026-11-27 `--skip-nx-cache` 重跑）
+- **37 个测试文件，286 个测试全部通过**（2026-11-27 `--skip-nx-cache` 重跑：domain 95、api 108、mock-services 31、browser-worker 24、state 13、adapters-http 7、render-worker 5、render 3）
 - 覆盖：时间线与分镜重排、Zod Schema 校验、SRT / 工程 JSON 序列化、生产引擎（成功 / 失败重试 / 审批 / 取消 / 暂停 / 速度）、AI 导演有限意图与未知指令、审核规则与版本失效、导出模拟与真实文件、Zustand 撤销 / 重做 / 持久化 / 品牌失效。
 - 新增覆盖（Step 1）：渲染 IR 判别联合的接受 / 拒绝、Storyboard 帧数与素材过滤、非 16:9 拒绝、回执 / 清单 Schema、Remotion composition 元数据、ffprobe 帧率与容差校验、v1→v2 持久化迁移。
 - 新增覆盖（Step 2）：DemoPlan schema（未知 action、零断言、危险 selector、approval digest）、精确 origin allowlist、断言优先判定、回执不变量、素材媒体 schema、片段起点 / 时长规划。
 - 新增覆盖（Step 3）：工作区信封 / 导出导入往返、v1 裸快照与 Zustand 备份迁移、未来版本拒绝、HTTP 仓库 404/409/错误映射、Fastify 路由与乐观并发（13 个 API / 数据库用例）、SQLite v1→v2 迁移保留运行记录、跨工作区相同 run id。
+- 新增覆盖（Step 4D）：`knowledge-projection.ts`（AC-02 不可推广硬阻断、幂等同步、AC-09 Scene `review` 与已批准视频 `changes_requested` 失效）、`HttpGitHubKnowledgeClient`（12 端口方法、超时与 404/503 错误映射）、`review-service.ts` 按 `Claim.eligibility` 硬守门（阻断未核验生产运行态与绝对上线表述）、Zustand 4D 投影闭环单测。
 - 关键回归：`normalizeSceneOrder` 必须保留传入数组顺序，不得按旧 `order` 重排。
 
 ### 真实渲染（Step 1）
@@ -315,7 +317,19 @@ pnpm discovery:verify   # 增量索引 → 发现 PR → 确定性分类 → 绑
 - 过期传播（AC-09）：全量扫描仓库候选；新快照中引用文件的 SHA256 变化或文件被删除 → 源码证据与 Claim 自动 `stale` / `blocked_stale`；源码指纹变更或已过期后重新 `discover` 不会复活旧批准，必须针对新代码重新核验。
 - 持久化：SQLite `user_version` v3→v4；`pr_change_candidates` 每 repo+PR 一行（源码指纹与文案均未变时保留已录入证据），`claim_verifications` 只追加不修改，核验录入与候选更新在同一事务内提交。
 - 实测（`frontLikeDog/livenotes` @ `96f90e90`）：增量索引 `mode=incremental total=328 reused=328`（无新增下载）；3 个真实 PR 中 2 个 `feat` 判为用户可感知新功能，2 条 Claim 全部 `blocked_unverified`（未部署声明被阻断）；1 个 `refactor` 判为内部变更且 0 Claim（真实验证 AC-02）；过期扫描 0 变更（证据刚绑定到同一快照）。
-- 边界：Release 只接受 `targetCommitish` 精确匹配或正文显式 `#PR`；不解析 PR 正文、不接外部模型；Web UI 接入留给 4D；`deployed=true` 不等于生产可用。
+- 边界：Release 只接受 `targetCommitish` 精确匹配或正文显式 `#PR`；不解析 PR 正文、不接外部模型；`deployed=true` 不等于生产可用。
+
+### Web Studio 真实知识端到端闭环（Step 4D）
+
+```bash
+pnpm test:e2e           # 含真实 Fastify + SQLite 夹具 API 驱动的 4D E2E 闭环
+pnpm github:verify      # 真仓只读与 AC-01 写保护探针（frontLikeDog/livenotes）
+pnpm discovery:verify   # 真仓索引 → PR 发现 → AC-02 / AC-03 / AC-09 验收
+```
+
+- 接入与投影：`GitHubKnowledgeClientPort`（`libs/ports`）+ 惰性加载的 `HttpGitHubKnowledgeClient`（`libs/adapters-http`，15s/180s 超时与 Zod 校验）+ 纯领域投影 `knowledge-projection.ts`（`libs/domain`）+ `github-knowledge-actions.ts`（`libs/state`，保持初始包不劣化）。
+- UI 闭环：Onboarding 与 `设置 → 来源与同步` 支持真实只读 GitHub App 绑定与 AC-01 探针（保留 AC-08 无源码仅文档路径）；知识中心「PR 变更发现」支持增量索引、PR 发现、AC-02 内部变更隔离（只进时间线不进目录）、显式写入功能目录、`test`/`runtime`/`release`/`human` 核验录入与 append-only 审计、AC-09 过期刷新；视频向导与审核页按 `Claim.eligibility` 硬守门。
+- 真仓与夹具验证：本地真实仓库 `frontLikeDog/livenotes` `@ 4ac866aac799` 复核 AC-01 写阻断（HTTP 403）、4 条 PR 中 3 个 `feat` 判为 `blocked_unverified`、1 个 `refactor` 判为内部变更；Playwright 由仅测试使用的 `apps/api/src/scripts/e2e-fixture-api.ts` 跑通「503 诚实降级」「AC-08 无源码入门」「AC-01/02/03/09 审核通过后因上游提交变动自动失效」全部 3 条用例。
 
 ### E2E（Playwright + Chromium）
 
@@ -323,7 +337,7 @@ pnpm discovery:verify   # 增量索引 → 发现 PR → 确定性分类 → 绑
 pnpm test:e2e
 ```
 
-- **34 个测试全部通过（1.3 分钟），桌面 1440×900 + 平板 768×1024 + 移动端 390×844**
+- **38 个测试全部通过（1.9 分钟），桌面 1440×900 + 平板 768×1024 + 移动端 390×844**
 - 覆盖：
   - 工作台加载、无运行时 console error
   - 六步入门完成初始化并落地知识中心
@@ -338,8 +352,9 @@ pnpm test:e2e
   - 命令面板跳转、404 页面、主题持久化、Demo 边界弹窗
   - 移动端抽屉导航、移动端命令面板、关键页面无横向溢出
   - 平板 768×1024：常驻侧栏而非抽屉、10 个关键页面无横向溢出、折叠侧栏可手动展开
-  - axe（WCAG 2.1 A/AA）扫描 11 个页面状态 + 浅色主题关键页面，0 违规
+  - axe（WCAG 2.1 A/AA）扫描 12 个页面状态（含 `?tab=discovery`）+ 浅色主题关键页面，0 违规
   - `prefers-reduced-motion: reduce` 下动画 / 过渡被压缩，交互仍可用
+  - Step 4D 真实知识闭环（`knowledge-real-flow.spec.ts`）：未配置 GitHub 凭证时诚实提示 503、AC-08 无源码仅文档完成入门、真实只读接入 → 增量索引 → PR 发现（AC-02 过滤 `refactor`）→ 核验与审计（AC-03）→ 审核通过 → 上游变更过期自动失效（AC-09）
 
 > 平板测试在首次运行时发现并修复了一个真实缺陷：768–1179px 下 `isTablet` 强制折叠侧栏，
 > 顶栏「展开侧栏」按钮因此完全无效。现在用户主动切换后会覆盖平板的默认折叠。
@@ -359,12 +374,12 @@ pnpm build
 - Nx 项目图补齐 `implicitDependencies`（domain / ports / adapters-http / state / features / workers），
   `nx affected` 会同时带出依赖项目，而不是只跑改动文件所在项目
 - `build`：路由级懒加载 + `vendor-react` 拆包，构建后自动执行 bundle budget 检查
-  - 初始 JS（entry + 静态依赖）：`743.8 kB` raw / `221.5 kB` gzip
-  - Editor：额外 `68.9 kB` raw / `23.5 kB` gzip
-  - Production：额外 `32.7 kB` raw / `13.4 kB` gzip
-  - Review：额外 `28.9 kB` raw / `10.6 kB` gzip
-  - 最大单 chunk：`392.3 kB` raw / `120.3 kB` gzip
-  - 工作区同步控制器按需加载：`6.68 kB` raw / `2.58 kB` gzip
+  - 初始 JS（entry + 静态依赖）：`758.8 kB` raw / `226 kB` gzip（预算 `230 kB` gzip）
+  - Editor：额外 `69.7 kB` raw / `24.1 kB` gzip
+  - Production：额外 `33.4 kB` raw / `13.7 kB` gzip
+  - Review：额外 `30.5 kB` raw / `11.2 kB` gzip
+  - 最大单 chunk：`407 kB` raw / `124.8 kB` gzip（预算 `160 kB` gzip）
+  - GitHub 知识动作按路由拆分（`14.75 kB` raw / `5.46 kB` gzip），HTTP 知识适配器与工作区同步控制器按需动态加载
   - 预算配置见 `bundle-budget.json`；任一预算超限会使 `pnpm build` 失败
 
 ### 已知未自动化覆盖
@@ -377,7 +392,7 @@ pnpm build
 
 ## 8. 已知缺口
 
-1. **初始包仍偏大**：路由已拆分，但初始 chunk 仍包含整个 Zustand 工作区、种子数据与 mock-services（约 `221.5 kB` gzip，预算 230 kB）；进一步下沉需要在 action 内按需导入服务。
+1. **初始包仍偏大**：路由已拆分，但初始 chunk 仍包含整个 Zustand 工作区、种子数据与 mock-services（约 `226 kB` gzip，预算 230 kB）；进一步下沉需要在 action 内按需导入服务。
 2. **品牌 CTA 不会重写既有片尾镜头**：更新品牌片尾 CTA 会更新项目品牌并使审核失效，但已有视频的 CTA 镜头文本不会自动改写，需要在 Editor 中手动调整。
 3. **动态表单标签仍需逐项检查**：`Field` 已为直接子级的 `Input` / `Textarea` / `Select` 自动生成 `id` 与 `htmlFor`，主要页面 axe 扫描通过；包裹容器或自定义控件仍需在新增时手动关联。
 4. **移动端侧栏无障碍不完整**：抽屉打开时未统一设置 `aria-hidden` / `inert`，焦点可能逸出到背景内容。
@@ -443,7 +458,7 @@ pnpm build
 ```text
 apps/web-studio/
   src/               应用壳、路由、侧栏、顶栏、命令面板、Demo 弹窗
-  e2e/               Playwright 配置、32 个桌面 / 移动端 / 平板 / 无障碍 / 动效用例
+  e2e/               Playwright 配置、38 个桌面 / 移动端 / 平板 / 无障碍 / 动效 / 真实知识闭环用例
 libs/
   domain/            时间线、Schema、生产蓝图、渲染 IR、序列化
   render/            Remotion composition、主题与场景组件
