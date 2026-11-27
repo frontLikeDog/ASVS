@@ -363,16 +363,32 @@ schema 变更一次，已有数据仍在
 |---|---|---|
 | 4A · 只读 GitHub App | ✅ 完成 | `GitHubAppReadOnlyClient` 严格 `GET`，写权限 fail-closed，`redactSecrets` 脱敏；`pnpm github:verify` 对 `frontLikeDog/livenotes` 实测通过。 |
 | 4B · 增量索引与快照 | ✅ 完成 | `KnowledgeSnapshotV1` + `KnowledgeIndexPort`；GitHub tree/commit 只读读取；SHA256 `sourceDigests` 与按 blob sha 复用的增量扫描。**真实基准**（`frontLikeDog/livenotes` @ `78bb6a68`，322 个可索引文件）：冷扫描 37.9 s / 下载 357 个 blob → 同提交热扫描 1.7 s / **0 次下载** / 复用 322；`sourceDigests` 完全一致，约 21× 加速。SQLite `user_version` v2→v3 保留工作区与 `production_runs`。 |
-| 4C · PR 变更候选 | ⏳ 未开始 | 明确不在 4B 范围。 |
-| 4D · Web UI | ⏳ 未开始 | 明确不在 4B 范围。 |
+| 4C · PR 变更候选 | ✅ 完成（2026-11-27） | `PRDiscoveryPort` + 确定性分类器（无 LLM）；AC-02 / AC-03 / AC-09 均有纯函数守门与测试；SQLite v3→v4；`pnpm discovery:verify` 对 `frontLikeDog/livenotes` @ `96f90e90` 实测 3 个真实 PR：2 个 `feat` → 2 条 Claim 全部 `blocked_unverified`（阻止「已上线」），1 个 `refactor` → `internal_non_promotable` 且 0 Claim（真实验证 AC-02）。 |
+| 4D · Web UI | ⏳ 未开始 | 明确不在 4C 范围。 |
 
 **4B 边界（已实现 vs 未实现）**
 
 - 已实现：`POST /v1/github/repos/:owner/:repo/index`（`branch` / `forceCold`）、`GET …/snapshots`、`GET …/snapshots/:snapshotId`；快照只追加、不覆写。
 - 已实现：Python / TypeScript / JavaScript / Markdown 的轻量结构信号（章节、`def`/`class`/路由装饰器、导出符号、入口点）；其他文本文件仍记录 digest、大小与行数。
 - 未实现：AST 级解析、跨文件引用图、ripgrep/本地 git 克隆；当前完全走 GitHub 只读 API，因此冷扫描耗时主要是网络（357 次取文件）。若要压冷扫描成本，下一步是单次 tarball/`git archive` 下载，而不是 Rust 化。
-- 未实现：增量复用只认 **完全相同的 blob sha**；文件重命名会被当作「删除 + 新增」。重命名检测留给 4C。
+- 未实现：增量复用只认 **完全相同的 blob sha**；文件重命名会被当作「删除 + 新增」。4C 的分类器已能在 PR 文件层面识别纯重命名并判为内部变更，但索引层仍未跨重命名复用提取结果。
 - 未实现：Web 端调用这些接口（4D）；`libs/state` 仍走 mock 知识服务。
+
+**4C 边界（已实现 vs 未实现）**
+
+- 已实现：`libs/domain/src/pr-discovery.ts` 的 `PRChangeCandidateV1` / `ClaimCandidateV1` / `VerificationContextV1` / `EvidenceRefV1`，以及两条纯守门函数：`evaluateClaimPublishability`（发布资格）与 `propagateSnapshotStaleness`（AC-09 传播）。
+- 已实现：`libs/ports/src/pr-discovery.ts` 的 `PRDiscoveryPort`（analyze / list / get / recordVerification / refreshStaleness）。
+- 已实现路由：`POST /v1/github/repos/:owner/:repo/discover`（未配置 GitHub → 503；成功 → 201）、`GET …/candidates`、`GET …/candidates/:candidateId`、`POST …/claims/:claimId/verify`、`POST …/candidates/refresh-staleness`（无快照 → 404）。
+- 已实现：确定性规则只使用 Conventional 前缀、标签、文件路径分类（界面 / 源码 / 测试 / CI / 构建 / 配置 / 文档）、纯重命名识别、4B 快照的路由符号 / 入口点 / 文档章节，以及 Release 的两种显式关联（`targetCommitish` 恰为合并提交，或正文显式 `#<PR>`）。
+- AC-02：`internal_non_promotable` 与 `ambiguous_needs_review` 一律 `promotable=false` 且 `claims=[]`，由 Zod `superRefine` 硬性约束；夹具覆盖 refactor 前缀、纯重命名、feat 但只改测试、内部标签、自由标题。
+- AC-03：初始 Claim 只有源码证据时固定 `deployed=false` / `blocked_unverified`；随后按证据逐级放行——只有发布证据 → `needs_qualification`（只能表述「随 Release 发布」）；非生产运行态 → `needs_qualification`（必须标注环境）；生产运行态但缺人工批准 → `blocked_unverified`；生产运行态 + 人工批准 → `publishable`。人工驳回 → `blocked_rejected`，最新人工决定生效。
+- AC-09：只对绑定了 `filePath + sourceDigest` 的源码证据做比对；最新快照中文件被修改或删除即标 `stale`，同时把 Claim 置为 `stale` / `blocked_stale`。未绑定指纹的证据不会被误判。
+- 持久化：SQLite `user_version` v3→v4，新增 `pr_change_candidates`（每 repo+PR 一行，重新分析为 upsert）与 `claim_verifications`（append-only 审计）；既有 workspaces / production_runs / knowledge_snapshots 原样保留。
+- 已实现：`pnpm discovery:verify [--repo owner/name] [--branch main] [--limit N] [--no-index]`，对真实仓库索引 → 发现 → 过期传播，并打印真实样本形态覆盖率。
+- 未实现（有意）：外部 LLM / 语义理解；PR 正文/评论解析；`/commits/:sha/pulls` 关联（端口未暴露）；自动把候选写入 `libs/state` 工作区（4D）；自动批准或自动发布。
+- 未实现：候选重新分析时，只有 Claim 文案未变化才会保留此前录入的 test / runtime / release / human 证据；文案变化会丢弃旧批准（批准绑定具体文本）。
+- 已知限制：`deployed=true` 只代表存在 Release 或真实环境运行态证据，不等于「生产可用」；「已上线」表述仍要求 `environmentId=production` 与人工批准同时成立。
+- 测试：`pnpm exec vitest run apps/api libs/domain` 21 个文件 / 188 个用例通过，覆盖 AC-02 / AC-03 / AC-09、v3→v4 迁移保留数据、路由 503/400/404/201/200 与 SQLite 往返。
 
 ### 为什么最后做
 

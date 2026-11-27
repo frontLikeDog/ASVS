@@ -40,6 +40,11 @@
       "executor": "nx:run-commands",
       "options": { "command": "tsx src/scripts/knowledge-index-benchmark.ts", "cwd": "apps/api" },
       "cache": false
+    },
+    "verify-discovery": {
+      "executor": "nx:run-commands",
+      "options": { "command": "tsx src/scripts/verify-pr-discovery.ts", "cwd": "apps/api" },
+      "cache": false
     }
   }
 }

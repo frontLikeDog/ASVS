@@ -110,6 +110,56 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 4,
+    up(db) {
+      // PR 变更候选与 Claim 核验审计（Step 4C）。候选按 (repo, pull_number)
+      // 唯一：同一 PR 重新分析会更新分析快照，但人工录入的核验证据由服务层
+      // 保留；审计表只追加，永不更新或删除。
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS pr_change_candidates (
+          id TEXT PRIMARY KEY,
+          repo TEXT NOT NULL,
+          pull_number INTEGER NOT NULL,
+          classification TEXT NOT NULL,
+          promotable INTEGER NOT NULL,
+          merged INTEGER NOT NULL,
+          merge_commit_sha TEXT,
+          snapshot_id TEXT,
+          analyzed_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          payload TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_pr_candidates_repo_pull
+          ON pr_change_candidates(repo, pull_number);
+
+        CREATE INDEX IF NOT EXISTS idx_pr_candidates_repo_analyzed
+          ON pr_change_candidates(repo, analyzed_at DESC);
+
+        CREATE TABLE IF NOT EXISTS claim_verifications (
+          id TEXT PRIMARY KEY,
+          repo TEXT NOT NULL,
+          candidate_id TEXT NOT NULL,
+          claim_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          decision TEXT,
+          environment_id TEXT,
+          release_tag TEXT,
+          test_run_id TEXT,
+          commit_sha TEXT,
+          file_path TEXT,
+          source_digest TEXT,
+          note TEXT NOT NULL,
+          recorded_at TEXT NOT NULL,
+          payload TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_claim_verifications_claim
+          ON claim_verifications(repo, claim_id, recorded_at);
+      `);
+    },
+  },
 ];
 
 function readUserVersion(db: DatabaseSync): number {

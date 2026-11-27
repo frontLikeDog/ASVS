@@ -130,11 +130,26 @@ export const CLAIM_STATUSES = ['proposed', 'supported', 'verified', 'stale', 're
 export const claimStatusSchema = z.enum(CLAIM_STATUSES);
 export type ClaimStatus = z.infer<typeof claimStatusSchema>;
 
+/**
+ * Step 4C extends the original four fields with optional traceability fields.
+ * They stay optional so the v2 persisted workspace and Step 1–3 fixtures
+ * remain valid; new clients always fill `commitSha` / `environmentId`.
+ */
 export const claimVerificationSchema = z.object({
   environment: z.string(),
   appVersion: z.string(),
   verifiedAt: isoDateSchema,
   scope: z.string(),
+  /** Exact commit the claim was checked against (docs/08 §4). */
+  commitSha: z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/).optional(),
+  /** 4B snapshot that supplied the source digests. */
+  snapshotId: z.string().regex(/^snap_[0-9a-f]{32}$/).optional(),
+  /** Runtime environment id, e.g. `production`; `unverified` when unknown. */
+  environmentId: z.string().min(1).max(80).optional(),
+  /** CI / E2E run that produced the test evidence. */
+  testRunId: z.string().min(1).max(200).optional(),
+  /** Published release the claim was verified against. */
+  releaseTag: z.string().min(1).max(120).optional(),
 });
 export type ClaimVerification = z.infer<typeof claimVerificationSchema>;
 

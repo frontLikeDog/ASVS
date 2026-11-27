@@ -13,6 +13,7 @@
     "dev:stack": "nx run-many -t serve -p web-studio api --parallel=2",
     "github:verify": "nx run api:verify-github",
     "index:benchmark": "nx run api:index-benchmark",
+    "discovery:verify": "nx run api:verify-discovery",
     "build": "nx build web-studio",
     "budget": "node scripts/check-bundle-budget.mjs",
     "lint": "nx run-many -t lint",
