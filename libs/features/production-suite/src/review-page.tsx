@@ -49,6 +49,7 @@ import {
 } from '@asvs/ui';
 import { selectReviewBundle, useStudioStore, useUiStore } from '@asvs/state';
 import { NotFoundInline } from './not-found-inline';
+import { ReviewArtifactPanel } from './review-artifact-panel';
 
 const CHECK_ICON = {
   pass: CheckCircle2,
@@ -255,6 +256,8 @@ export function ReviewPage() {
 
       <div className="mt-4 grid grid-cols-[minmax(0,1fr)] gap-4 xl:grid-cols-[minmax(0,1fr)_350px]">
         <div className="space-y-4">
+          {/* 5A: real server-rendered MP4 + manifest, when one exists. */}
+          <ReviewArtifactPanel videoId={video.id} />
           <Panel className="overflow-hidden">
             <div
               className={cn(

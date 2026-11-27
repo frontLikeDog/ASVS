@@ -50,6 +50,14 @@
       },
       "cache": false,
       "outputs": ["{workspaceRoot}/dist/render-worker/captured-30s"]
+    },
+    "render-job": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsx src/render-job.ts",
+        "cwd": "workers/render-worker"
+      },
+      "cache": false
     }
   }
 }

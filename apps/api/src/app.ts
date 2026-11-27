@@ -1,3 +1,4 @@
+import path from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import { ZodError, z } from 'zod';
@@ -11,12 +12,18 @@ import {
 } from '@asvs/domain';
 import type { GitHubReadOnlyPort, KnowledgeIndexPort, PRDiscoveryPort } from '@asvs/ports';
 import type { DatabaseSync } from 'node:sqlite';
+import type { OrchestrationServicePort, RenderJobExecutorPort } from '@asvs/ports';
 import { openDatabase } from './db/database';
+import { SqliteOrchestrationStore } from './db/orchestration-store';
+import { Orchestrator } from './orchestration/orchestrator';
+import { RenderProcessExecutor } from './orchestration/render-process-executor';
+import { registerOrchestrationRoutes } from './routes/orchestration';
 import { SqliteKnowledgeSnapshotStore } from './db/knowledge-store';
 import { SqlitePRDiscoveryStore } from './db/pr-discovery-store';
 import { SqliteWorkspaceStore } from './db/workspace-store';
 import { UnconfiguredGitHubReadOnlyClient } from './github/github-app-client';
 import { GitHubApiError } from './github/redact';
+import { OrchestrationHttpError } from './orchestration/errors';
 import { GitHubKnowledgeIndexer } from './knowledge/indexer';
 import { PRDiscoveryError, PRDiscoveryService } from './knowledge/pr-discovery-service';
 import { registerGitHubRoutes } from './routes/github';
@@ -32,6 +39,18 @@ export interface BuildAppOptions {
   knowledgeIndexer?: KnowledgeIndexPort;
   /** Defaults to a deterministic service over GitHub + 4B snapshots + SQLite. */
   prDiscovery?: PRDiscoveryPort;
+  /** Root for server-rendered MP4/manifest/receipt artifacts. */
+  artifactDir?: string;
+  /** Defaults to a real child-process render worker; tests inject a fake. */
+  renderExecutor?: RenderJobExecutorPort;
+  /** Defaults to `buildApp`'s own directory-relative repository root. */
+  mediaRoot?: string;
+  maxAttempts?: number;
+  leaseTtlMs?: number;
+  schedulerIntervalMs?: number;
+  /** Test hook: pin the instance id and clock used for lease recovery. */
+  orchestrationInstanceId?: string;
+  orchestrationNow?: () => Date;
 }
 
 export interface BuiltApp {
@@ -42,6 +61,9 @@ export interface BuiltApp {
   knowledgeIndexer: KnowledgeIndexPort;
   prDiscoveryStore: SqlitePRDiscoveryStore;
   prDiscovery: PRDiscoveryPort;
+  orchestrationStore: SqliteOrchestrationStore;
+  orchestration: OrchestrationServicePort;
+  orchestrator: Orchestrator;
 }
 
 const workspaceIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, 'workspace id 只能包含字母、数字、_ 与 -');
@@ -71,6 +93,21 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   const prDiscovery =
     options.prDiscovery ??
     new PRDiscoveryService({ github, knowledgeStore, store: prDiscoveryStore });
+  const orchestrationStore = new SqliteOrchestrationStore(db);
+  const artifactDir =
+    options.artifactDir ?? path.resolve(path.dirname(options.dbPath), 'artifacts');
+  const orchestrator = new Orchestrator({
+    store: orchestrationStore,
+    artifactDir,
+    mediaRoot: options.mediaRoot,
+    loadWorkspace: (workspaceId) => store.get(workspaceId)?.workspace ?? null,
+    executor: options.renderExecutor ?? new RenderProcessExecutor(),
+    maxAttempts: options.maxAttempts,
+    leaseTtlMs: options.leaseTtlMs,
+    schedulerIntervalMs: options.schedulerIntervalMs,
+    instanceId: options.orchestrationInstanceId,
+    now: options.orchestrationNow,
+  });
   const app = Fastify({
     logger: options.logger ?? false,
     bodyLimit: 8 * 1024 * 1024,
@@ -81,6 +118,8 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   });
 
   app.addHook('onClose', async () => {
+    // Stop the scheduler and let any render child exit before the DB closes.
+    await orchestrator.stop();
     db.close();
   });
 
@@ -95,6 +134,11 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     }
     if (error instanceof PRDiscoveryError) {
       return reply.code(error.httpStatus).send(errorBody(error.code, error.message));
+    }
+    if (error instanceof OrchestrationHttpError) {
+      return reply
+        .code(error.httpStatus)
+        .send(errorBody(error.code, error.message, error.details));
     }
     if (error instanceof ZodError) {
       return reply
@@ -111,11 +155,13 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     storage: 'sqlite',
     schemaVersion: STUDIO_SNAPSHOT_VERSION,
     githubConfigured: github.isConfigured(),
+    orchestrationReady: true,
   }));
 
   registerGitHubRoutes(app, github);
   registerKnowledgeRoutes(app, knowledgeIndexer);
   registerPRDiscoveryRoutes(app, prDiscovery);
+  registerOrchestrationRoutes(app, orchestrator);
 
   app.get<{ Params: { id: string } }>('/v1/workspaces/:id', async (request, reply) => {
     const id = parseWorkspaceId(request.params.id);
@@ -208,7 +254,20 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     },
   );
 
-  return { app, db, store, knowledgeStore, knowledgeIndexer, prDiscoveryStore, prDiscovery };
+  await orchestrator.start();
+
+  return {
+    app,
+    db,
+    store,
+    knowledgeStore,
+    knowledgeIndexer,
+    prDiscoveryStore,
+    prDiscovery,
+    orchestrationStore,
+    orchestration: orchestrator,
+    orchestrator,
+  };
 }
 
 /** Convenience for the entrypoint: build and return only the server. */

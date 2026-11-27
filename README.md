@@ -2,7 +2,7 @@
 
 一个前端优先、可完整走通的产品视频工作台：把可信的软件事实（功能、Claim、证据）变成可编辑、可生产、可审核的视频工程。
 
-当前版本包含三部分：可交互的商业级前端原型、真实可运行的渲染切片，以及真实可运行的录屏切片。项目、知识、分镜、审核与导出数据会真实写入浏览器本地存储；GitHub 授权、AI 模型、配音与 Web 内导出仍是明确标注的模拟能力。渲染切片通过 CLI 把固定 Storyboard 用 Remotion 真实渲染成可播放的 30 秒 MP4，并输出 SHA256 回执与 ffprobe 校验结果（见 [docs/11](docs/11-RENDER-SLICE.md)）。录屏切片用已批准的 DemoPlan 驱动 Playwright 录制 web-studio 自身，断言全部通过后才写回执，并把真实片段接回渲染管线（见 [docs/12](docs/12-CAPTURE-SLICE.md)）。
+当前版本包含三部分：可交互的商业级前端原型、真实可运行的渲染切片，以及真实可运行的录屏切片。项目、知识、分镜、审核与导出数据会真实写入浏览器本地存储；GitHub 授权、AI 模型、配音与 Web 内导出仍是明确标注的模拟能力。渲染切片通过 CLI 把固定 Storyboard 用 Remotion 真实渲染成可播放的 30 秒 MP4，并输出 SHA256 回执与 ffprobe 校验结果（见 [docs/11](docs/11-RENDER-SLICE.md)）。录屏切片用已批准的 DemoPlan 驱动 Playwright 录制 web-studio 自身，断言全部通过后才写回执，并把真实片段接回渲染管线（见 [docs/12](docs/12-CAPTURE-SLICE.md)）。服务端编排切片把生产运行迁到 SQLite 队列 + 独立 worker 子进程：崩溃或 API 重启后按 checkpoint 续跑，审核页可下载真实 MP4（见 [docs/13](docs/13-ORCHESTRATION-SLICE.md)）。
 
 ---
 
@@ -104,6 +104,14 @@ pnpm verify:render:captured
 
 DemoPlan 是 YAML 数据而不是脚本：只支持 `navigate` / `click` / `fill` / `press` / `wait_for` / `assert` / `capture`，selector 只能使用 role / label / heading / testid / text 等语义前缀。任何计划修改都会让审批摘要失效，必须重新审阅。只有全部 UI 断言通过才写 `CaptureReceipt`；失败会留下截图、trace、raw WebM 与 `failure-report.json`。详见 [docs/12](docs/12-CAPTURE-SLICE.md)。
 
+### 服务端编排验收（AC-06）
+
+```bash
+pnpm orchestration:verify   # 真实 worker 被 SIGKILL → API 重启 → 按 checkpoint 续跑 → ffprobe + SHA256
+```
+
+脚本建临时 SQLite 与工作区，用真实 `RenderProcessExecutor` 拉起 `workers/render-worker`，在 `bundle_ready` 后杀掉子进程与「API」，再启动新实例完成恢复；随后验证重试耗尽、声明阻断、非 16:9 拒绝、取消与非法迁移。设置 `ASVS_KEEP_VERIFY_DIR=1` 可保留产物。详见 [docs/13](docs/13-ORCHESTRATION-SLICE.md)。
+
 ---
 
 ## 3. 页面与交互清单
@@ -201,6 +209,7 @@ workers/browser-worker          CLI：DemoPlan → Playwright 录屏 / 断言 / 
 | 工作区版本迁移 | v1 快照与 Zustand 备份迁移到 v2；API 读取旧行时升级；数据库迁移保留运行记录 |
 | CLI 真实渲染 | Remotion → 30 秒 MP4；ffprobe + 全片解码 + SHA256 回执（`pnpm render:fixture`） |
 | CLI 真实录屏 | Playwright 执行已批准 DemoPlan（20 步：11 条断言 + 9 条交互），断言 11/11 通过后写 `CaptureReceipt`；重复 3 次通过率 100%；真实片段进入渲染管线（`pnpm capture:demo`） |
+| 服务端真实渲染与崩溃恢复 | 生产页启用工作区同步后可「启动服务端渲染」：SQLite 任务队列 + 独立 `render-worker` 子进程产出真实 16:9 MP4（无音轨），关闭页面后继续；`SIGKILL` / API 重启按 checkpoint 续跑；审核页可下载经 SHA256 校验的 MP4 与 manifest（`pnpm orchestration:verify`，见 [docs/13](docs/13-ORCHESTRATION-SLICE.md)） |
 | 品牌套件与主题 | 真实写入并影响所有预览 |
 | 演示数据重置 | 真实恢复种子快照 |
 
@@ -210,14 +219,14 @@ workers/browser-worker          CLI：DemoPlan → Playwright 录屏 / 断言 / 
 | --- | --- |
 | 演示项目来源同步 / 未配置凭证降级 | 内置 `demo: true` 演示项目（如 `Lumen Analytics`）与无源码 AC-08 文档入门仍使用本地确定性模拟；未在 `apps/api/.env.local` 配置 GitHub App 凭证时，真实接入诚实提示 503，绝不伪造已连接状态 |
 | AI 模型调用 / Mastra / Agent 运行时 | 不请求外部模型，使用确定性意图解析与确定性 PR 分类规则 |
-| Web UI 内的录屏 / 生产执行 | 生产监控仍是模拟，不启动浏览器或录制；真实录屏只能通过 CLI `pnpm capture:demo` 触发 |
-| 配音 / TTS | 只有文本与时间轴，不播放或生成音频；样片为静音视频 |
-| Web 内 FFmpeg / Remotion / 服务端渲染 | Web UI 未接入；CLI `workers/render-worker` 已能真实渲染（见 §7 与 docs/11） |
+| Web UI 内的录屏 / 生产执行 | 生产监控的「模拟 DAG」仍是浏览器内模拟，不启动浏览器或录制；服务端模式走真实的 SQLite 队列 + 子进程渲染，但只有 5 个编排步骤（不含录屏步骤）；真实录屏只能通过 CLI `pnpm capture:demo` 触发 |
+| 配音 / TTS | 只有文本与时间轴，不播放或生成音频；样片与服务端 MP4 都是静音视频 |
+| Web 内 FFmpeg / Remotion / 服务端渲染 | Web UI 只发起任务与展示产物，Worker 在服务端；CLI `workers/render-worker` 与 `apps/api` 编排器均已能真实渲染（见 §7、docs/11、docs/13） |
 | Web 内 MP4 / WebM 导出 | 仅任务状态与进度，不产生媒体文件；CLI 样片是真实文件 |
 | 局部重渲染 / 转场 / 多画幅 | 未实现；当前每次全片渲染，仅 16:9 |
 | 上传、对象存储、CDN、发布 / 审批流 | 未接入；渲染产物只落在本地 `dist/` |
 | 云端账号 / 多租户 / 权限 | 工作区 API 只监听本机，没有登录、租户隔离或成员权限 |
-| 服务端推进生产运行 | API 只保存和返回运行状态；计时器仍由当前页面驱动，关闭页面后不会继续 |
+| 服务端推进生产运行 | 服务端模式已由 SQLite 队列与独立 worker 推进（5A）；**模拟 DAG 仍由当前页面驱动**，关闭页面后只有服务端模式的任务继续 |
 | 工作区媒体备份 | 导出 JSON 只含元数据；`Asset.media` 指向相对路径，跨设备恢复后媒体可能缺失 |
 | ATVG2 运行时 | 不在本阶段范围 |
 
@@ -398,19 +407,19 @@ pnpm build
 4. **移动端侧栏无障碍不完整**：抽屉打开时未统一设置 `aria-hidden` / `inert`，焦点可能逸出到背景内容。
 5. **面包屑使用视频 ID**：分镜 / 编辑器等页面的面包屑会显示 `vid_...`，而不是视频标题。
 6. **预览依赖前台标签页**：`requestAnimationFrame` 在后台标签页会被节流，播放进度不会按真实时间推进；这是浏览器行为，未做 Web Worker 时钟兜底。
-7. **生产运行只在页面打开时推进**：这是刻意设计，用于避免后台伪造进度；刷新后运行状态按已持久化快照恢复，不会在后台继续。Step 3 的 API 只保存 / 返回运行状态，没有服务端调度或迁移校验。
+7. **模拟 DAG 只在页面打开时推进**：这是刻意设计，用于避免后台伪造进度；刷新后运行状态按已持久化快照恢复，不会在后台继续。服务端模式（5A）的任务由 SQLite 队列推进，与模拟 DAG 并存。
 8. **模拟预览没有音频**：只有字幕与时间轴，没有真实配音；这是当前边界，不应被误解为成片。
 9. **建议弹窗文案不够精确**：部分“接受建议会升级 Claim 状态”的说明可能高估实际状态变化，需要按建议类型细化。
 10. **CI 覆盖范围**：`.github/workflows/ci.yml` 的 `validate` / `build` / `e2e`（含 API webServer）/ `render` / `capture` 均已在 GitHub Actions Linux runner 跑通；仍未覆盖文档类 PR 跳门禁的回归验证。
-11. **渲染切片尚未接入 Web UI**：CLI 能产出真实 MP4，但浏览器内的导出仍是模拟状态；在队列、对象存储与任务状态打通前，不应让 UI 宣称已生成文件。
-12. **渲染只支持 16:9、无音频、字体未打包**：竖屏需要单独布局；没有 TTS / 配乐；依赖系统 CJK 字体，跨机器字形可能不同。
+11. **渲染切片与 Web UI 的边界**：服务端模式（5A）可从生产页启动真实渲染、在审核页下载经 SHA256 校验的 MP4（无音轨）；但「模拟 DAG」与 Web 内 MP4 / WebM 导出仍是模拟状态，两者在 UI 上分别标注。
+12. **渲染只支持 16:9、无音频、字体未打包**：竖屏需要单独布局；没有 TTS / 配乐；依赖系统 CJK 字体，跨机器字形可能不同。服务端 MP4 同样无音轨，配音与 SRT 留待 5B。
 13. **Remotion 许可**：个人或 ≤3 员工公司可免费使用；更大组织商用前需要公司许可。
 14. **渲染耗时无基线**：单次全片渲染在本机约数分钟，尚未采集成功率与耗时分布。
 15. **工作区 API 无鉴权 / 租户隔离**：默认只监听 `127.0.0.1`，CORS 只允许本地 4200；不能直接暴露到公网。
 16. **SQLite 单写入者**：没有多实例并发、租户字段或按实体审计；多实例部署前需要 PostgreSQL 或串行化层。
 17. **工作区备份不含媒体**：导出只有元数据；`Asset.media` 是相对路径，跨设备恢复后 MP4 / 截图可能缺失，需另行拷贝。
 18. **导入会整体替换**：不做实体级合并；导入前会迁移与 Schema 校验，但成功后当前工作区与撤销历史被覆盖。
-19. **服务端不校验运行状态迁移**：客户端 PUT 可以写入任意运行状态；docs/05 的「状态迁移由应用服务校验」尚未实现。
+19. **服务端编排仍为单实例**：租约以「其他实例即孤儿」回收，适配单 API 进程 + 单 SQLite 文件；多实例部署前需要真正的租约表或 PostgreSQL。服务端模式仅监听本机，无鉴权。
 
 ---
 
@@ -443,6 +452,7 @@ pnpm build
 - [下一阶段排期与迭代建议](docs/10-NEXT-PHASE-PLAN.md)
 - [真实渲染切片（Step 1 验收记录）](docs/11-RENDER-SLICE.md)
 - [真实录屏切片（Step 2 验收记录）](docs/12-CAPTURE-SLICE.md)
+- [服务端编排切片（Step 5A 验收记录）](docs/13-ORCHESTRATION-SLICE.md)
 - UX 文档：
   - [前端体验计划](docs/ux/FRONTEND-EXPERIENCE-PLAN.md)
   - [信息架构](docs/ux/INFORMATION-ARCHITECTURE.md)

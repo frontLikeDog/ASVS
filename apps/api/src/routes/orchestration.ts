@@ -1,0 +1,197 @@
+import { createReadStream } from 'node:fs';
+import type { FastifyInstance, FastifyReply } from 'fastify';
+import { z } from 'zod';
+import { orchestrationRunStatusSchema } from '@asvs/domain';
+import type { OrchestrationServicePort } from '@asvs/ports';
+import { fileSize } from '../orchestration/artifacts';
+import { OrchestrationHttpError } from '../orchestration/errors';
+
+const runLookupSchema = z.object({
+  videoId: z.string().trim().min(1).max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  status: orchestrationRunStatusSchema.optional(),
+});
+
+const createRunBodySchema = z.object({
+  videoId: z.string().trim().min(1).max(200),
+  idempotencyKey: z.string().trim().min(8).max(200),
+  renderProfile: z
+    .object({
+      width: z.number().int().min(320).max(4096).optional(),
+      height: z.number().int().min(180).max(4096).optional(),
+      crf: z.number().int().min(0).max(51).optional(),
+    })
+    .optional(),
+});
+
+const approveBodySchema = z.object({
+  approvalId: z.string().trim().min(1).max(200),
+  subjectDigest: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+});
+
+function errorBody(code: string, message: string, details?: unknown) {
+  return { error: { code, message, ...(details === undefined ? {} : { details }) } };
+}
+
+function sendOrchestrationError(reply: FastifyReply, error: unknown): void {
+  if (error instanceof OrchestrationHttpError) {
+    void reply.code(error.httpStatus).send(errorBody(error.code, error.message, error.details));
+    return;
+  }
+  throw error;
+}
+
+/**
+ * Routes for the 5A server-authoritative orchestrator. Paths are nested under
+ * the workspace so every query is scoped by the same id the workspace PUT uses;
+ * the service itself refuses cross-workspace reads.
+ */
+export function registerOrchestrationRoutes(
+  app: FastifyInstance,
+  service: OrchestrationServicePort,
+): void {
+  const base = '/v1/workspaces/:workspaceId/orchestration';
+
+  app.post<{ Params: { workspaceId: string } }>(`${base}/runs`, async (request, reply) => {
+    const body = createRunBodySchema.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send(errorBody('invalid_request', '创建运行需要 videoId 与 idempotencyKey。', body.error.issues));
+    }
+    try {
+      const result = await service.createRun(request.params.workspaceId, body.data);
+      return reply.code(result.created ? 201 : 200).send(result);
+    } catch (error) {
+      return sendOrchestrationError(reply, error);
+    }
+  });
+
+  app.get<{ Params: { workspaceId: string } }>(`${base}/runs`, async (request, reply) => {
+    const query = runLookupSchema.safeParse(request.query);
+    if (!query.success) {
+      return reply
+        .code(400)
+        .send(errorBody('invalid_request', '查询参数无效。', query.error.issues));
+    }
+    const runs = await service.listRuns(request.params.workspaceId, {
+      videoId: query.data.videoId,
+      limit: query.data.limit,
+    });
+    const filtered = query.data.status
+      ? runs.filter((run) => run.status === query.data.status)
+      : runs;
+    return { runs: filtered };
+  });
+
+  app.get<{ Params: { workspaceId: string; runId: string } }>(
+    `${base}/runs/:runId`,
+    async (request, reply) => {
+      const detail = await service.getRun(request.params.workspaceId, request.params.runId);
+      if (!detail) {
+        return reply.code(404).send(errorBody('not_found', `运行 ${request.params.runId} 不存在。`));
+      }
+      return detail;
+    },
+  );
+
+  app.post<{ Params: { workspaceId: string; runId: string } }>(
+    `${base}/runs/:runId/cancel`,
+    async (request, reply) => {
+      try {
+        const run = await service.cancelRun(request.params.workspaceId, request.params.runId);
+        return { run };
+      } catch (error) {
+        return sendOrchestrationError(reply, error);
+      }
+    },
+  );
+
+  app.post<{ Params: { workspaceId: string; runId: string } }>(
+    `${base}/runs/:runId/retry`,
+    async (request, reply) => {
+      try {
+        const run = await service.retryRun(request.params.workspaceId, request.params.runId);
+        return { run };
+      } catch (error) {
+        return sendOrchestrationError(reply, error);
+      }
+    },
+  );
+
+  app.post<{ Params: { workspaceId: string; runId: string } }>(
+    `${base}/runs/:runId/approve`,
+    async (request, reply) => {
+      const body = approveBodySchema.safeParse(request.body);
+      if (!body.success) {
+        return reply.code(400).send(errorBody('invalid_request', '审批需要 approvalId。', body.error.issues));
+      }
+      try {
+        const approval = await service.approveRun(
+          request.params.workspaceId,
+          request.params.runId,
+          body.data,
+        );
+        return { approval };
+      } catch (error) {
+        return sendOrchestrationError(reply, error);
+      }
+    },
+  );
+
+  /**
+   * Artifact download. `storageRef` is re-resolved under the artifact root and
+   * traversal is refused; the ETag is the stored SHA256, so a client can
+   * verify the bytes it received against the receipt.
+   */
+  app.get<{ Params: { workspaceId: string; artifactId: string } }>(
+    `${base}/artifacts/:artifactId`,
+    async (request, reply) => {
+      const resolved = await service.resolveArtifactFile(
+        request.params.workspaceId,
+        request.params.artifactId,
+      );
+      if (!resolved) {
+        return reply
+          .code(404)
+          .send(errorBody('not_found', `产物 ${request.params.artifactId} 不存在或文件已被清理。`));
+      }
+      const { artifact, file } = resolved;
+      const etag = `"sha256-${artifact.sha256}"`;
+      if (request.headers['if-none-match'] === etag) {
+        return reply.code(304).send();
+      }
+      reply.header('etag', etag);
+      reply.header('x-content-sha256', artifact.sha256);
+      reply.header('content-type', artifact.mimeType);
+      reply.header('content-length', String(fileSize(file)));
+      reply.header(
+        'content-disposition',
+        `attachment; filename="${artifact.fileName.replace(/["\\]/g, '_')}"`,
+      );
+      return reply.send(createReadStream(file));
+    },
+  );
+
+  app.get<{ Params: { workspaceId: string; videoId: string } }>(
+    `${base}/videos/:videoId/latest-video-artifact`,
+    async (request, reply) => {
+      const found = service.findLatestSucceededVideo(
+        request.params.workspaceId,
+        request.params.videoId,
+      );
+      if (!found) {
+        return reply.code(404).send(errorBody('not_found', '该视频还没有服务端渲染产物。'));
+      }
+      // Path-form URL so the browser can use it directly as an `<a download>`.
+      return {
+        run: found.run,
+        artifact: found.artifact,
+        downloadUrl: `${base.replace(':workspaceId', request.params.workspaceId)}/artifacts/${found.artifact.id}`,
+      };
+    },
+  );
+}

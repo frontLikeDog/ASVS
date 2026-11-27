@@ -54,6 +54,8 @@ import {
 import { useStudioStore, useUiStore } from '@asvs/state';
 import { useShallow } from 'zustand/react/shallow';
 import { NotFoundInline } from './not-found-inline';
+import { ServerOrchestrationPanel } from './server-orchestration-panel';
+import { useServerOrchestration } from './server-orchestration';
 
 const SCENARIOS: { value: RunScenario; label: string; short: string; detail: string; icon: typeof Sparkles }[] = [
   {
@@ -140,6 +142,9 @@ export function ProductionPage() {
 
   const [selectedRunId, setSelectedRunId] = useState<string | undefined>();
   const [scenario, setScenario] = useState<RunScenario>('happy_path');
+  // 5A: server-authoritative real render (SQLite + worker subprocess). The
+  // browser-only simulated DAG below stays untouched when the API is absent.
+  const serverApi = useServerOrchestration(videoId);
   const [cancelling, setCancelling] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
 
@@ -236,6 +241,7 @@ export function ProductionPage() {
 
       <div className="mt-4 grid grid-cols-[minmax(0,1fr)] gap-4 xl:grid-cols-[minmax(0,1fr)_330px]">
         <div className="space-y-4">
+          <ServerOrchestrationPanel api={serverApi} />
           {!selectedRun ? (
             <Panel>
               <div className="p-6">

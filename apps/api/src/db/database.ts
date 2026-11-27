@@ -160,6 +160,115 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 5,
+    up(db) {
+      // Step 5A production orchestration (docs/06 §5, AC-06). These tables are
+      // deliberately decoupled from the client-synced `production_runs`:
+      // every workspace PUT replaces that table wholesale, which would destroy
+      // server-authoritative run state.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS orchestration_runs (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          project_id TEXT NOT NULL,
+          video_id TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL,
+          status TEXT NOT NULL,
+          input_digest TEXT,
+          current_step_key TEXT,
+          approval_json TEXT,
+          failure_json TEXT,
+          payload TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          finished_at TEXT
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_runs_workspace_idem
+          ON orchestration_runs(workspace_id, idempotency_key);
+
+        CREATE INDEX IF NOT EXISTS idx_orch_runs_workspace_video
+          ON orchestration_runs(workspace_id, video_id, created_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_orch_runs_status
+          ON orchestration_runs(status, created_at);
+
+        CREATE TABLE IF NOT EXISTS orchestration_jobs (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES orchestration_runs(id) ON DELETE CASCADE,
+          workspace_id TEXT NOT NULL,
+          step_key TEXT NOT NULL,
+          job_type TEXT NOT NULL,
+          status TEXT NOT NULL,
+          attempt INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 3,
+          input_digest TEXT NOT NULL,
+          lease_owner TEXT,
+          lease_expires_at TEXT,
+          heartbeat_at TEXT,
+          worker_pid INTEGER,
+          deadline_at TEXT,
+          last_checkpoint_phase TEXT,
+          error_code TEXT,
+          error_message TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_orch_jobs_poll
+          ON orchestration_jobs(status, lease_expires_at, created_at);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_jobs_run_step
+          ON orchestration_jobs(run_id, step_key);
+
+        CREATE TABLE IF NOT EXISTS orchestration_checkpoints (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES orchestration_runs(id) ON DELETE CASCADE,
+          step_key TEXT NOT NULL,
+          phase TEXT NOT NULL,
+          input_digest TEXT NOT NULL,
+          payload TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_checkpoints_key
+          ON orchestration_checkpoints(run_id, step_key, phase);
+
+        CREATE TABLE IF NOT EXISTS orchestration_artifacts (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES orchestration_runs(id) ON DELETE CASCADE,
+          workspace_id TEXT NOT NULL,
+          job_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          file_name TEXT NOT NULL,
+          mime_type TEXT NOT NULL,
+          byte_size INTEGER NOT NULL,
+          sha256 TEXT NOT NULL,
+          storage_ref TEXT NOT NULL,
+          metadata_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_orch_artifacts_run
+          ON orchestration_artifacts(run_id, kind);
+
+        CREATE TABLE IF NOT EXISTS orchestration_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          run_id TEXT NOT NULL REFERENCES orchestration_runs(id) ON DELETE CASCADE,
+          step_key TEXT,
+          level TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          message TEXT NOT NULL,
+          details_json TEXT,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_orch_events_run
+          ON orchestration_events(run_id, id);
+      `);
+    },
+  },
 ];
 
 function readUserVersion(db: DatabaseSync): number {
