@@ -9,20 +9,32 @@ import {
   workspaceExportFileName,
   workspacePutRequestSchema,
 } from '@asvs/domain';
+import type { GitHubReadOnlyPort, KnowledgeIndexPort } from '@asvs/ports';
 import type { DatabaseSync } from 'node:sqlite';
 import { openDatabase } from './db/database';
+import { SqliteKnowledgeSnapshotStore } from './db/knowledge-store';
 import { SqliteWorkspaceStore } from './db/workspace-store';
+import { UnconfiguredGitHubReadOnlyClient } from './github/github-app-client';
+import { GitHubApiError } from './github/redact';
+import { GitHubKnowledgeIndexer } from './knowledge/indexer';
+import { registerGitHubRoutes } from './routes/github';
+import { registerKnowledgeRoutes } from './routes/knowledge';
 
 export interface BuildAppOptions {
   dbPath: string;
   corsOrigins?: string[];
   logger?: boolean | { level: string };
+  github?: GitHubReadOnlyPort;
+  /** Defaults to a GitHub-backed indexer over the same SQLite file. */
+  knowledgeIndexer?: KnowledgeIndexPort;
 }
 
 export interface BuiltApp {
   app: FastifyInstance;
   db: DatabaseSync;
   store: SqliteWorkspaceStore;
+  knowledgeStore: SqliteKnowledgeSnapshotStore;
+  knowledgeIndexer: KnowledgeIndexPort;
 }
 
 const workspaceIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, 'workspace id 只能包含字母、数字、_ 与 -');
@@ -43,6 +55,11 @@ function parseWorkspaceId(id: string): string | null {
 export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   const db = openDatabase(options.dbPath);
   const store = new SqliteWorkspaceStore(db);
+  const github = options.github ?? new UnconfiguredGitHubReadOnlyClient();
+  const knowledgeStore = new SqliteKnowledgeSnapshotStore(db);
+  const knowledgeIndexer =
+    options.knowledgeIndexer ??
+    new GitHubKnowledgeIndexer({ github, store: knowledgeStore });
   const app = Fastify({
     logger: options.logger ?? false,
     bodyLimit: 8 * 1024 * 1024,
@@ -57,6 +74,11 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   });
 
   app.setErrorHandler((error, request, reply) => {
+    if (error instanceof GitHubApiError) {
+      return reply
+        .code(error.httpStatus)
+        .send(errorBody(error.code, error.message, error.details));
+    }
     if (error instanceof WorkspaceImportError) {
       return reply.code(400).send(errorBody('invalid_workspace', error.message));
     }
@@ -74,7 +96,11 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     service: 'asvs-api',
     storage: 'sqlite',
     schemaVersion: STUDIO_SNAPSHOT_VERSION,
+    githubConfigured: github.isConfigured(),
   }));
+
+  registerGitHubRoutes(app, github);
+  registerKnowledgeRoutes(app, knowledgeIndexer);
 
   app.get<{ Params: { id: string } }>('/v1/workspaces/:id', async (request, reply) => {
     const id = parseWorkspaceId(request.params.id);
@@ -167,7 +193,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     },
   );
 
-  return { app, db, store };
+  return { app, db, store, knowledgeStore, knowledgeIndexer };
 }
 
 /** Convenience for the entrypoint: build and return only the server. */

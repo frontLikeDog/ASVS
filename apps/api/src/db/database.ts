@@ -75,6 +75,41 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 3,
+    up(db) {
+      // Append-only knowledge snapshots (Step 4B). One row per snapshot; the
+      // payload is the full validated `KnowledgeSnapshotV1`, the indexed
+      // columns exist only for listing/filtering without parsing JSON.
+      // No foreign key to workspaces: knowledge is keyed by repository, not by
+      // a video workspace, and snapshots must outlive workspace deletion.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS knowledge_snapshots (
+          id TEXT PRIMARY KEY,
+          repo TEXT NOT NULL,
+          branch TEXT NOT NULL,
+          git_commit_sha TEXT NOT NULL,
+          parent_snapshot_id TEXT,
+          indexed_at TEXT NOT NULL,
+          index_mode TEXT NOT NULL,
+          total_files INTEGER NOT NULL,
+          indexed_files INTEGER NOT NULL,
+          reused_files INTEGER NOT NULL,
+          removed_files INTEGER NOT NULL,
+          skipped_files INTEGER NOT NULL,
+          fetched_files INTEGER NOT NULL,
+          duration_ms REAL NOT NULL,
+          payload TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_knowledge_snapshots_repo_branch
+          ON knowledge_snapshots(repo, branch, indexed_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_knowledge_snapshots_repo_commit
+          ON knowledge_snapshots(repo, git_commit_sha, indexed_at DESC);
+      `);
+    },
+  },
 ];
 
 function readUserVersion(db: DatabaseSync): number {

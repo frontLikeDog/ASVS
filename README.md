@@ -66,6 +66,17 @@ pnpm validate
 
 生产构建产物输出到 `dist/apps/web-studio`。`pnpm build` 会在构建后执行 `bundle-budget.json` 中的体积预算，超限即失败。
 
+### 真实 GitHub 只读连接与知识索引（CLI）
+
+需要 GitHub App 的只读安装凭证。把 `apps/api/.env.example` 复制为 `apps/api/.env.local`（已 gitignore），填入 `GITHUB_APP_ID` / `GITHUB_APP_INSTALLATION_ID` / `GITHUB_APP_PRIVATE_KEY_PATH` / `GITHUB_DEFAULT_REPO`。**不要提交 `.env.local` 或 `.pem`。**
+
+```bash
+pnpm github:verify      # 只读连接验收：列 PR / 文件 / Release / README + AC-01 写操作阻断探针
+pnpm index:benchmark    # 冷扫描 → 同提交热扫描 → 对照冷扫描，并断言增量复用
+```
+
+`index:benchmark` 会对真实仓库拉取文件树、为每个可索引文件计算 SHA256，并生成不可变快照。热扫描复用父快照中 blob sha 未变的文件：不重下、不重解析，`fetchedFiles = 0`。不配置凭证时这些脚本会明确失败，不会伪造结果。
+
 ### 真实渲染样片（CLI）
 
 需要 `ffmpeg` / `ffprobe` 在 `PATH` 中，以及中日韩字体；首次运行 Remotion 会下载 Chrome Headless Shell 到 `node_modules/.remotion`。
@@ -196,7 +207,7 @@ workers/browser-worker          CLI：DemoPlan → Playwright 录屏 / 断言 / 
 
 | 能力 | 当前实现 |
 | --- | --- |
-| GitHub OAuth / API / 仓库读取 / 代码扫描 | 本地确定性模拟连接与快照 |
+| GitHub OAuth / API / 仓库读取 / 代码扫描 | **Web UI 仍是本地确定性模拟**；`apps/api` 已有真实只读 GitHub App 连接器与增量索引（CLI：`pnpm github:verify`、`pnpm index:benchmark`），但 Web 端尚未接入 |
 | AI 模型调用 / Mastra / Agent 运行时 | 不请求外部模型，使用确定性意图解析 |
 | Web UI 内的录屏 / 生产执行 | 生产监控仍是模拟，不启动浏览器或录制；真实录屏只能通过 CLI `pnpm capture:demo` 触发 |
 | 配音 / TTS | 只有文本与时间轴，不播放或生成音频；样片为静音视频 |
@@ -275,6 +286,21 @@ pnpm validate
 - 迁移：`STUDIO_SNAPSHOT_VERSION = 2` 的 v1→v2 迁移同时用于浏览器持久化、API 读取与导入；SQLite `PRAGMA user_version` v1→v2 保留运行记录并改为 `(workspace_id, id)` 复合主键。
 - 浏览器：设置 → 演示数据可启用同步、拉取、上传、断开、导出 / 导入工作区；两个独立 browser context 通过同一工作区 ID 看到同一份数据，导出文件可在全新 context 导入。
 - 设计记录：[ADR-001 Fastify](docs/adr/ADR-001-api-framework-fastify.md)、[ADR-008 SQLite](docs/adr/ADR-008-sqlite-workspace-storage.md)。
+
+### 增量知识索引（Step 4B）
+
+```bash
+pnpm dev:api            # 需要 apps/api/.env.local 中的只读 GitHub App 凭证
+pnpm index:benchmark    # 真实仓库冷扫描 → 热扫描 → 对照冷扫描
+```
+
+- 契约：`KnowledgeSnapshotV1`（`libs/domain`）+ `KnowledgeIndexPort`（`libs/ports`）；快照只追加，永不覆写。
+- 路由：`POST /v1/github/repos/:owner/:repo/index`（`branch` / `forceCold`）、`GET …/snapshots`、`GET …/snapshots/:snapshotId`；未配置 GitHub 时索引请求返回 503。
+- 复用判据：父快照中 blob sha 未变的文件直接复用上一份提取结果，不重新下载、不重新解析；下载后才判定为二进制/超大的文件也会记录 skip（含 blob sha），热扫描同样不再重下。
+- 持久化：SQLite `knowledge_snapshots` 表，`PRAGMA user_version` v2→v3 迁移保留既有工作区与 `production_runs`；快照按 repo + branch 索引，用于挑选增量父快照。
+- 实测（`frontLikeDog/livenotes` @ `78bb6a68`，322 个可索引文件 / 109 个跳过）：冷扫描 37.9 s、357 次 blob 下载；同提交热扫描 1.7 s、**0 次下载**、复用 322，`sourceDigests` 与冷扫描逐字节一致（约 21×）。
+- 测试：57 个 API / 领域用例，新增覆盖冷扫描 digest、单文件增量复用（断言只读取该文件）、删除清理、forceCold、跨分支不复用、二进制/超大/敏感/路径穿越跳过、v2→v3 迁移保留数据、路由 503/400/404/201 与 SQLite 往返。
+- 边界：只有 blob sha 完全相同的文件才复用，重命名视为删除+新增；AST 级解析、跨文件引用图、Web UI 接入（4C / 4D）尚未开始。
 
 ### E2E（Playwright + Chromium）
 

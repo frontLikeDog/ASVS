@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { MIGRATIONS, migrateDatabase } from './database';
 
 const ISO = '2026-11-27T10:00:00.000Z';
+const LATEST_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
 
 describe('SQLite 迁移链', () => {
   it('从 v1 升级到最新版本时保留运行记录并改为复合主键', () => {
@@ -23,7 +24,7 @@ describe('SQLite 迁移链', () => {
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run('run_1', 'ws_a', 'vid_1', 'succeeded', 1000, ISO, ISO, '{}', ISO);
 
-    expect(migrateDatabase(db)).toBe(2);
+    expect(migrateDatabase(db)).toBe(LATEST_VERSION);
 
     const kept = db.prepare('SELECT id, workspace_id FROM production_runs').all();
     expect(kept).toEqual([{ id: 'run_1', workspace_id: 'ws_a' }]);
@@ -39,7 +40,7 @@ describe('SQLite 迁移链', () => {
         .run('run_1', 'ws_b', 'vid_2', 'running', 0, ISO, null, '{}', ISO),
     ).not.toThrow();
 
-    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 });
+    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: LATEST_VERSION });
     db.close();
   });
 });

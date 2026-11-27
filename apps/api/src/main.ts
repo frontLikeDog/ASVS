@@ -1,11 +1,19 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { buildApp } from './app';
-import { loadConfig } from './config';
+import { createGitHubPortFromConfig, loadConfig } from './config';
+import { loadApiLocalEnv } from './env';
+
+const apiDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+loadApiLocalEnv(apiDir);
 
 const config = loadConfig();
+const github = createGitHubPortFromConfig(config.github);
 const { app } = await buildApp({
   dbPath: config.dbPath,
   corsOrigins: config.corsOrigins,
   logger: { level: config.logLevel },
+  github,
 });
 
 const shutdown = async (signal: string): Promise<void> => {
@@ -25,7 +33,11 @@ process.once('SIGTERM', () => void shutdown('SIGTERM'));
 try {
   await app.listen({ host: config.host, port: config.port });
   app.log.info(
-    { dbPath: config.dbPath, storage: 'sqlite' },
+    {
+      dbPath: config.dbPath,
+      storage: 'sqlite',
+      githubConfigured: github.isConfigured(),
+    },
     `ASVS API 已启动：http://${config.host}:${config.port}`,
   );
 } catch (error) {

@@ -357,6 +357,23 @@ schema 变更一次，已有数据仍在
 | S4-4 | 证据板结：Claim 绑定 `VerificationContext`（commitSha / environment / verifiedAt） | 已合并未部署标记「待验证」（AC-03） |
 | S4-5 | **先做用户验证**：5–8 位目标用户可用性测试 | 结论决定继续投索引还是投录屏 |
 
+### 执行状态（2026-11-27）
+
+| 切片 | 状态 | 证据 |
+|---|---|---|
+| 4A · 只读 GitHub App | ✅ 完成 | `GitHubAppReadOnlyClient` 严格 `GET`，写权限 fail-closed，`redactSecrets` 脱敏；`pnpm github:verify` 对 `frontLikeDog/livenotes` 实测通过。 |
+| 4B · 增量索引与快照 | ✅ 完成 | `KnowledgeSnapshotV1` + `KnowledgeIndexPort`；GitHub tree/commit 只读读取；SHA256 `sourceDigests` 与按 blob sha 复用的增量扫描。**真实基准**（`frontLikeDog/livenotes` @ `78bb6a68`，322 个可索引文件）：冷扫描 37.9 s / 下载 357 个 blob → 同提交热扫描 1.7 s / **0 次下载** / 复用 322；`sourceDigests` 完全一致，约 21× 加速。SQLite `user_version` v2→v3 保留工作区与 `production_runs`。 |
+| 4C · PR 变更候选 | ⏳ 未开始 | 明确不在 4B 范围。 |
+| 4D · Web UI | ⏳ 未开始 | 明确不在 4B 范围。 |
+
+**4B 边界（已实现 vs 未实现）**
+
+- 已实现：`POST /v1/github/repos/:owner/:repo/index`（`branch` / `forceCold`）、`GET …/snapshots`、`GET …/snapshots/:snapshotId`；快照只追加、不覆写。
+- 已实现：Python / TypeScript / JavaScript / Markdown 的轻量结构信号（章节、`def`/`class`/路由装饰器、导出符号、入口点）；其他文本文件仍记录 digest、大小与行数。
+- 未实现：AST 级解析、跨文件引用图、ripgrep/本地 git 克隆；当前完全走 GitHub 只读 API，因此冷扫描耗时主要是网络（357 次取文件）。若要压冷扫描成本，下一步是单次 tarball/`git archive` 下载，而不是 Rust 化。
+- 未实现：增量复用只认 **完全相同的 blob sha**；文件重命名会被当作「删除 + 新增」。重命名检测留给 4C。
+- 未实现：Web 端调用这些接口（4D）；`libs/state` 仍走 mock 知识服务。
+
 ### 为什么最后做
 
 docs/01 §10 列着一条尚未回答的问题：

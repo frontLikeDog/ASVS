@@ -8,3 +8,5 @@ export * from './production';
 export * from './defaults';
 export * from './contracts';
 export * from './serialization';
+export * from './github';
+export * from './knowledge';
