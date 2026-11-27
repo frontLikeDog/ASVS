@@ -22,9 +22,36 @@ export interface ApiConfig {
   corsOrigins: string[];
   logLevel: string;
   github: GitHubEnvConfig;
+  /** Root for server-rendered MP4 / manifest / receipt artifacts. */
+  artifactDir: string;
+  /** How many render subprocesses may run at once (SQLite single writer). */
+  maxConcurrentRenders: number;
+  /** Job lease TTL; a missed heartbeat past this marks the worker as crashed. */
+  leaseTtlMs: number;
+  /** Attempts before a crashing worker turns the run into a terminal failure. */
+  workerMaxAttempts: number;
+  /** Scheduler poll interval. */
+  schedulerIntervalMs: number;
+  /** Explicit worker script path; defaults to the in-repo tsx entry. */
+  workerScript?: string;
 }
 
 const DEFAULT_CORS_ORIGINS = ['http://localhost:4200', 'http://127.0.0.1:4200'];
+
+function readPositiveInt(
+  env: NodeJS.ProcessEnv,
+  key: string,
+  fallback: number,
+  { min = 1, max = Number.MAX_SAFE_INTEGER }: { min?: number; max?: number } = {},
+): number {
+  const raw = env[key]?.trim();
+  if (!raw) return fallback;
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${key} 无效：${raw}（需要 ${min}–${max} 的整数）`);
+  }
+  return value;
+}
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   const port = Number.parseInt(env.ASVS_API_PORT ?? '4300', 10);
@@ -41,6 +68,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
   const defaultRepo = defaultRepoRaw ? parseGitHubRepoRef(defaultRepoRaw) : undefined;
   const rawPrivateKey = env.GITHUB_APP_PRIVATE_KEY?.trim();
 
+  const artifactDir =
+    env.ASVS_ARTIFACT_DIR?.trim() || path.resolve(path.dirname(dbPath), 'artifacts');
+
   return {
     host: env.ASVS_API_HOST?.trim() || '127.0.0.1',
     port,
@@ -55,6 +85,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
       defaultRepo,
       apiBaseUrl: env.GITHUB_API_BASE_URL?.trim() || undefined,
     },
+    artifactDir,
+    maxConcurrentRenders: readPositiveInt(env, 'ASVS_MAX_CONCURRENT_RENDERS', 1, { min: 1, max: 8 }),
+    leaseTtlMs: readPositiveInt(env, 'ASVS_LEASE_TTL_MS', 15_000, { min: 3_000, max: 600_000 }),
+    workerMaxAttempts: readPositiveInt(env, 'ASVS_WORKER_MAX_ATTEMPTS', 3, { min: 1, max: 10 }),
+    schedulerIntervalMs: readPositiveInt(env, 'ASVS_SCHEDULER_INTERVAL_MS', 500, {
+      min: 50,
+      max: 60_000,
+    }),
+    workerScript: env.ASVS_RENDER_WORKER_SCRIPT?.trim() || undefined,
   };
 }
 

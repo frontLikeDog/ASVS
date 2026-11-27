@@ -341,6 +341,52 @@ schema 变更一次，已有数据仍在
 - 服务端不校验生产运行状态迁移，也不推进运行；`docs/05` §27 的「状态迁移只能由应用服务修改」尚未在 API 落地。
 - Zod 默认剥离未知字段；未来客户端新增字段若未升级 schema，保存时会被丢弃。
 
+> 更新（2026-11-27）：上述第 4 条缺口已由 Step 5A 关闭——运行状态迁移与推进已迁到服务端 SQLite 队列与独立 worker 子进程，见 §7A / [docs/13](13-ORCHESTRATION-SLICE.md)。
+
+---
+
+## 7A. Step 5A · 服务端编排底座与崩溃恢复（WP-03 / AC-06）
+
+**目标**：生产运行从「浏览器定时器」搬到「服务端持久化任务队列」，崩溃可恢复，且审核页能下载真实 MP4。
+
+### 工作项
+
+| ID | 任务 | 验收 |
+|---|---|---|
+| S5A-1 | SQLite v5：`orchestration_runs / _jobs / _checkpoints / _artifacts / _events`（不复用 `production_runs`） | 迁移测试通过；旧表不受影响 |
+| S5A-2 | `libs/domain/src/orchestration.ts` 纯状态机契约 + `libs/ports` 服务/执行器端口 | 非法迁移在类型层与运行时都拒绝 |
+| S5A-3 | `Orchestrator`：`BEGIN IMMEDIATE` 租约、attempt 自增、checkpoint、终态保护 | 单测覆盖幂等、崩溃重试、耗尽、取消、声明阻断 |
+| S5A-4 | `RenderProcessExecutor`：`spawn(process.execPath, ['--import', tsxUrl, worker, …], {shell:false})` + JSONL | `apps/api` 不 import `workers/render-worker`（边界守卫） |
+| S5A-5 | HTTP 路由：创建/列表/详情/取消/重试/批准/下载 + `latest-video-artifact` | 409 非法迁移、404、ETag=sha256、路径穿越拒绝 |
+| S5A-6 | Web：生产页服务端面板 + 审核页真实产物面板，动态加载适配器 | 首屏预算不劣化；未连接时诚实降级，模拟 DAG 不变 |
+| S5A-7 | `pnpm orchestration:verify`：真实 SIGKILL + API 重启 + ffprobe + SHA256 | 23 项断言全过 |
+
+### Exit Gate
+
+```text
+关闭页面 / 刷新后运行继续（状态在 SQLite，不在浏览器）
+真实 worker 被 SIGKILL 后，新 API 进程按 checkpoint 续跑并产出 MP4
+连续崩溃到 maxAttempts → failed / worker_crash_exhausted
+非 16:9 与声明阻断在启动 worker 之前被拒绝
+审核页可下载经 SHA256 校验的真实 MP4，且明确标注「无音轨」
+```
+
+### 执行状态（2026-11-27）
+
+| ID | 状态 | 证据 |
+|---|---|---|
+| S5A-1 | ✅ | `apps/api/src/db/database.ts` v5 + `database-v5.test.ts`（5 用例） |
+| S5A-2 | ✅ | `libs/domain/src/orchestration.ts`（状态机、`ORCHESTRATION_STEPS`、`renderJobInputV1Schema`、worker 事件协议）+ `libs/ports/src/orchestration.ts` |
+| S5A-3 | ✅ | `apps/api/src/orchestration/orchestrator.ts` + `orchestrator.test.ts`（15 用例） |
+| S5A-4 | ✅ | `apps/api/src/orchestration/render-process-executor.ts`；`--import` 使用 `file://` URL（Windows 裸路径会被当作 `d:` 协议，实测修复） |
+| S5A-5 | ✅ | `apps/api/src/routes/orchestration.ts` + `orchestration.test.ts`（8 用例） |
+| S5A-6 | ✅ | `libs/features/production-suite/src/server-orchestration{,-panel}.tsx`、`review-artifact-panel.tsx`；`libs/state/src/orchestration.ts` 动态 `import('@asvs/adapters-http')` |
+| S5A-7 | ✅ | `apps/api/src/scripts/verify-orchestration.ts`：23/23 通过，产出 1920×1080 · h264 · 30fps · 6000ms · 无音轨 MP4（264,088 bytes），SHA256 `ad5c52e4…c89c0722` |
+
+**验证记录**：`pnpm lint:boundary-check` 4/4；`nx run-many -t lint typecheck test --skip-nx-cache` 15 项目 / 352 测试全绿；`pnpm test:e2e` 42/42（新增 4 条）；`pnpm build` 初始 227.2 kB gzip（预算 230），Production 19.2 / Review 15.0 kB；`pnpm render:fixture && pnpm verify:render` 复现 docs/11 的 SHA256。详见 [docs/13](13-ORCHESTRATION-SLICE.md) §1 / §7。
+
+**Step 5A 边界**：不做 TTS / 配音 / SRT；不接服务端驱动的 Playwright；未实现隐私 QA、LLM AI Director、局部重渲染；无 Redis / BullMQ / PostgreSQL / 对象存储；无批准不自动发布。
+
 ---
 
 ## 8. Step 4 · 真实知识源（3–4 周，对应 WP-10 / WP-11）
@@ -496,6 +542,7 @@ docs/01 §7 的北极星指标需要真实后端才能度量；本阶段先建�
 - [录屏、渲染与编辑器](07-VIDEO-CAPTURE-RENDER-AND-EDITOR.md)：DemoPlan、Remotion 合成、质量门禁
 - [安全、证据与 ATVG2](08-SECURITY-EVIDENCE-AND-ATVG2-INTEGRATION.md)：端口定义（§8）、安全验收用例（§9）
 - [实施路线与验收](09-IMPLEMENTATION-ROADMAP-AND-ACCEPTANCE.md)：WP-00 ~ WP-17、评审模板
+- [真实渲染切片](11-RENDER-SLICE.md) / [真实录屏切片](12-CAPTURE-SLICE.md) / [服务端编排切片](13-ORCHESTRATION-SLICE.md)：已执行的验收记录
 
 ---
 

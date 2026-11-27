@@ -14,6 +14,10 @@ const { app } = await buildApp({
   corsOrigins: config.corsOrigins,
   logger: { level: config.logLevel },
   github,
+  artifactDir: config.artifactDir,
+  maxAttempts: config.workerMaxAttempts,
+  leaseTtlMs: config.leaseTtlMs,
+  schedulerIntervalMs: config.schedulerIntervalMs,
 });
 
 const shutdown = async (signal: string): Promise<void> => {
@@ -35,6 +39,7 @@ try {
   app.log.info(
     {
       dbPath: config.dbPath,
+      artifactDir: config.artifactDir,
       storage: 'sqlite',
       githubConfigured: github.isConfigured(),
     },

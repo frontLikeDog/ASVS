@@ -14,6 +14,7 @@
     "github:verify": "nx run api:verify-github",
     "index:benchmark": "nx run api:index-benchmark",
     "discovery:verify": "nx run api:verify-discovery",
+    "orchestration:verify": "nx run api:verify-orchestration",
     "build": "nx build web-studio",
     "budget": "node scripts/check-bundle-budget.mjs",
     "lint": "nx run-many -t lint",

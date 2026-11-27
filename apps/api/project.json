@@ -45,6 +45,11 @@
       "executor": "nx:run-commands",
       "options": { "command": "tsx src/scripts/verify-pr-discovery.ts", "cwd": "apps/api" },
       "cache": false
+    },
+    "verify-orchestration": {
+      "executor": "nx:run-commands",
+      "options": { "command": "tsx src/scripts/verify-orchestration.ts", "cwd": "apps/api" },
+      "cache": false
     }
   }
 }

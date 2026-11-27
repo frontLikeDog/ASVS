@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { MIGRATIONS, migrateDatabase, openDatabase } from './database';
 
+const LATEST_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
+
 const ISO = '2026-11-27T10:00:00.000Z';
 
 const WORKSPACE_PAYLOAD = JSON.stringify({
@@ -65,7 +67,7 @@ function buildV3Database(): DatabaseSync {
 describe('SQLite v3 → v4 迁移（PR 候选与核验审计表）', () => {
   it('升级后既有工作区、运行记录与知识快照完全保留', () => {
     const db = buildV3Database();
-    expect(migrateDatabase(db)).toBe(4);
+    expect(migrateDatabase(db)).toBe(LATEST_VERSION);
 
     const workspaceRow = db
       .prepare('SELECT id, revision, schema_version FROM workspaces WHERE id = ?')
@@ -87,7 +89,7 @@ describe('SQLite v3 → v4 迁移（PR 候选与核验审计表）', () => {
       git_commit_sha: '1'.repeat(40),
     });
 
-    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 4 });
+    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: LATEST_VERSION });
     expect(db.prepare('SELECT COUNT(*) AS count FROM pr_change_candidates').get()).toEqual({
       count: 0,
     });
@@ -99,15 +101,15 @@ describe('SQLite v3 → v4 迁移（PR 候选与核验审计表）', () => {
 
   it('迁移可重复执行且幂等', () => {
     const db = buildV3Database();
-    expect(migrateDatabase(db)).toBe(4);
-    expect(migrateDatabase(db)).toBe(4);
+    expect(migrateDatabase(db)).toBe(LATEST_VERSION);
+    expect(migrateDatabase(db)).toBe(LATEST_VERSION);
     expect(db.prepare('SELECT COUNT(*) AS count FROM workspaces').get()).toEqual({ count: 1 });
     db.close();
   });
 
   it('全新数据库直接到 v4，并具备候选唯一索引与审计索引', () => {
     const db = openDatabase(':memory:');
-    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 4 });
+    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: LATEST_VERSION });
 
     const indexes = db
       .prepare(

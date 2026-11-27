@@ -1,18 +1,13 @@
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { bundle, type WebpackOverrideFn } from '@remotion/bundler';
-import { renderMedia, selectComposition } from '@remotion/renderer';
 import {
-  COMPOSITION_ID,
-  storyboardDurationMs,
-  totalStoryboardFrames,
+  renderJobDigest,
+  type RenderJobInputV1,
 } from '@asvs/domain';
-import { assertDecodable, probeVideo, validateProbe } from './ffprobe';
-import { buildArtifactRecords, storageRefFor } from './manifest';
-import { preparePublicDir } from './media';
-import { defaultFixture, defaultOutDir, renderEntry, workspaceRoot } from './paths';
+import { defaultFixture, defaultOutDir, workspaceRoot } from './paths';
 import { rendererVersion } from './renderer-version';
 import { loadRenderFixture } from './load-fixture';
+import { runRenderJob } from './run-render-job';
+import { artifactReceiptV1Schema, renderManifestV1Schema } from '@asvs/domain';
 
 interface CliOptions {
   fixture: string;
@@ -63,169 +58,88 @@ function parseArgs(argv: string[]): CliOptions {
   return options;
 }
 
-const webpackOverride: WebpackOverrideFn = (current) => ({
-  ...current,
-  resolve: {
-    ...current.resolve,
-    alias: {
-      ...(current.resolve?.alias ?? {}),
-      '@asvs/domain': path.join(workspaceRoot, 'libs/domain/src/index.ts'),
-    },
-  },
-});
-
-function progressLogger(label: string) {
-  let last = -10;
-  return (progress: number) => {
-    // Remotion's bundler reports 0–100 while renderMedia reports 0–1.
-    const percent = Math.floor(progress <= 1 ? progress * 100 : progress);
-    if (percent >= last + 10) {
-      last = percent;
-      console.log(`  ${label} ${percent}%`);
-    }
-  };
-}
-
+/**
+ * Golden-fixture CLI. Kept as a thin wrapper over the shared resumable engine
+ * so `pnpm render:fixture` exercises exactly the code the orchestrator runs,
+ * while staying non-resumable (a fixture rerun must always render afresh).
+ */
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   const { fixture, input } = loadRenderFixture(options.fixture);
-  const version = rendererVersion();
-  const totalFrames = totalStoryboardFrames(input.storyboard);
-  const expectedDurationMs = storyboardDurationMs(input.storyboard);
-  const fileName = `${path.basename(options.fixture, '.json')}.mp4`;
-  const outputFile = path.join(options.outDir, fileName);
-  // Artifact identity follows the fixture/output, not one hardcoded job:
-  // golden-30s keeps its historical ids, captured-30s gets its own.
   const artifactSlug = path
     .basename(options.fixture, '.json')
     .replace(/[^a-zA-Z0-9]+/g, '_')
     .toLowerCase();
   const jobId = `job_render_${artifactSlug}`;
   const artifactId = `artifact_${artifactSlug}`;
+  const outputFileName = `${path.basename(options.fixture, '.json')}.mp4`;
+  const jobDigest = await renderJobDigest({
+    jobId,
+    artifactId,
+    renderInput: input,
+    media: fixture.media,
+  });
+  const job: RenderJobInputV1 = {
+    schemaVersion: '1',
+    kind: 'asvs.render-job',
+    jobId,
+    artifactId,
+    runId: `run_fixture_${artifactSlug}`,
+    input,
+    media: fixture.media,
+    outputFileName,
+    jobDigest,
+    createdAt: new Date().toISOString(),
+  };
 
   console.log(`\n渲染样片 · ${artifactSlug}`);
   console.log('─'.repeat(64));
   console.log(`  输入        ${path.relative(workspaceRoot, options.fixture)}`);
   console.log(`  视频        ${fixture.video.title}`);
-  console.log(`  分镜        ${input.storyboard.scenes.length} 个 / ${totalFrames} 帧`);
-  console.log(`  规格        ${input.renderProfile.width}×${input.renderProfile.height} · ${input.storyboard.fps}fps · ${expectedDurationMs}ms`);
-  console.log(`  真实素材    ${fixture.media.length} 个`);
-  console.log(`  Remotion    ${version}`);
+  console.log(`  Remotion    ${rendererVersion()}`);
   console.log('─'.repeat(64));
 
-  mkdirSync(options.outDir, { recursive: true });
-  const bundleDir = path.join(options.outDir, '.bundle');
-  const publicDir = path.join(options.outDir, '.public');
-  rmSync(bundleDir, { recursive: true, force: true });
+  let lastPhase = '';
+  const outcome = await runRenderJob({
+    job,
+    outDir: options.outDir,
+    resumable: false,
+    keepWorkDirs: options.keepBundle,
+    concurrency: options.concurrency,
+    storageRefBase: workspaceRoot,
+    onEvent: (event) => {
+      if (event.type === 'progress' && event.phase !== lastPhase) {
+        lastPhase = event.phase;
+        console.log(`\n[${event.phase}]`);
+      } else if (event.type === 'progress' && event.percent % 10 < 5) {
+        process.stdout.write(`  ${event.percent}%\n`);
+      }
+    },
+  });
 
-  let realMedia: ReturnType<typeof preparePublicDir> = [];
-  try {
-    console.log('\n[0/4] 校验真实素材并准备 Remotion public 目录…');
-    realMedia = preparePublicDir({ input, media: fixture.media, publicDir });
-    for (const entry of realMedia) {
-      console.log(`  ${entry.assetId} · ${entry.sourceFile} · ${entry.sha256.slice(0, 12)}…`);
-    }
+  // Re-read from disk so the printed receipt is the persisted one, not just
+  // the in-memory object that produced it.
+  const receipt = artifactReceiptV1Schema.parse(
+    JSON.parse((await import('node:fs')).readFileSync(path.join(options.outDir, 'receipt.json'), 'utf8')),
+  );
+  const manifest = renderManifestV1Schema.parse(
+    JSON.parse((await import('node:fs')).readFileSync(path.join(options.outDir, 'manifest.json'), 'utf8')),
+  );
 
-    console.log('\n[1/4] 打包 Remotion composition…');
-    const serveUrl = await bundle({
-      entryPoint: renderEntry,
-      outDir: bundleDir,
-      publicDir,
-      webpackOverride,
-      onProgress: progressLogger('打包'),
-    });
-
-    console.log('\n[2/4] 解析 composition 并核对元数据…');
-    // The composition receives `{ input }`, not the storyboard itself. Passing
-    // the bare storyboard makes calculateMetadata see `props.input === undefined`
-    // and silently report a 1-frame composition.
-    const inputProps = { input } as unknown as Record<string, unknown>;
-    const composition = await selectComposition({
-      serveUrl,
-      id: COMPOSITION_ID,
-      inputProps,
-    });
-
-    const metadataErrors: string[] = [];
-    if (composition.durationInFrames !== totalFrames) {
-      metadataErrors.push(`时长帧数应为 ${totalFrames}，composition 报告 ${composition.durationInFrames}`);
-    }
-    if (composition.fps !== input.storyboard.fps) {
-      metadataErrors.push(`帧率应为 ${input.storyboard.fps}，composition 报告 ${composition.fps}`);
-    }
-    if (
-      composition.width !== input.renderProfile.width ||
-      composition.height !== input.renderProfile.height
-    ) {
-      metadataErrors.push(
-        `尺寸应为 ${input.renderProfile.width}×${input.renderProfile.height}，composition 报告 ${composition.width}×${composition.height}`,
-      );
-    }
-    if (metadataErrors.length > 0) {
-      throw new Error(`composition 元数据与 Storyboard 不一致：\n- ${metadataErrors.join('\n- ')}`);
-    }
-
-    console.log('\n[3/4] 渲染 MP4…');
-    const renderProgress = progressLogger('渲染');
-    await renderMedia({
-      composition,
-      serveUrl,
-      codec: 'h264',
-      outputLocation: outputFile,
-      inputProps,
-      crf: input.renderProfile.crf,
-      overwrite: true,
-      concurrency: options.concurrency ?? null,
-      onProgress: ({ progress }) => renderProgress(progress),
-    });
-
-    console.log('\n[4/4] ffprobe / 全片解码 / 回执校验…');
-    assertDecodable(outputFile);
-    const probe = probeVideo(outputFile);
-    const probeErrors = validateProbe(probe, {
-      width: input.renderProfile.width,
-      height: input.renderProfile.height,
-      fps: input.storyboard.fps,
-      durationMs: expectedDurationMs,
-      frameCount: totalFrames,
-    });
-    if (probeErrors.length > 0) {
-      throw new Error(`ffprobe 校验失败：\n- ${probeErrors.join('\n- ')}`);
-    }
-
-    const createdAt = new Date().toISOString();
-    const { receipt, manifest } = buildArtifactRecords({
-      jobId,
-      artifactId,
-      input,
-      file: outputFile,
-      storageRef: storageRefFor(outputFile),
-      probe,
-      rendererVersion: version,
-      createdAt,
-      media: realMedia,
-    });
-
-    writeFileSync(path.join(options.outDir, 'receipt.json'), `${JSON.stringify(receipt, null, 2)}\n`);
-    writeFileSync(path.join(options.outDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
-
-    console.log('\n渲染成功');
-    console.log('─'.repeat(64));
-    console.log(`  MP4        ${receipt.storageRef}`);
-    console.log(`  ffprobe    ${probe.codecName} · ${probe.width}×${probe.height} · ${probe.fps}fps · ${probe.durationMs}ms · ${probe.frameCount} 帧`);
-    console.log(`  SHA256     ${receipt.sha256}`);
-    console.log(`  大小       ${(receipt.byteSize / 1024 / 1024).toFixed(2)} MiB`);
-    console.log(`  回执       ${path.relative(workspaceRoot, path.join(options.outDir, 'receipt.json'))}`);
-    console.log(`  清单       ${path.relative(workspaceRoot, path.join(options.outDir, 'manifest.json'))}`);
-    console.log('─'.repeat(64));
-    console.log('\n回执 JSON：');
-    console.log(JSON.stringify(receipt, null, 2));
-  } finally {
-    if (!options.keepBundle) {
-      rmSync(bundleDir, { recursive: true, force: true });
-      rmSync(publicDir, { recursive: true, force: true });
-    }
-  }
+  console.log('\n渲染成功');
+  console.log('─'.repeat(64));
+  console.log(`  MP4        ${receipt.storageRef}`);
+  console.log(
+    `  ffprobe    ${manifest.ffprobe.codecName} · ${manifest.ffprobe.width}×${manifest.ffprobe.height} · ${manifest.ffprobe.fps}fps · ${manifest.ffprobe.durationMs}ms · ${manifest.ffprobe.frameCount} 帧`,
+  );
+  console.log(`  SHA256     ${receipt.sha256}`);
+  console.log(`  大小       ${(receipt.byteSize / 1024 / 1024).toFixed(2)} MiB`);
+  console.log(`  回执       ${path.relative(workspaceRoot, path.join(options.outDir, 'receipt.json'))}`);
+  console.log(`  清单       ${path.relative(workspaceRoot, path.join(options.outDir, 'manifest.json'))}`);
+  console.log('─'.repeat(64));
+  console.log('\n回执 JSON：');
+  console.log(JSON.stringify(receipt, null, 2));
+  void outcome;
 }
 
 main().catch((error: unknown) => {
