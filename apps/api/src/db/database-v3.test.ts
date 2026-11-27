@@ -67,7 +67,7 @@ function buildV2Database(): DatabaseSync {
 describe('SQLite v2 → v3 迁移（知识快照表）', () => {
   it('升级后既有工作区、修订号与运行记录完全保留', () => {
     const db = buildV2Database();
-    expect(migrateDatabase(db)).toBe(3);
+    expect(migrateDatabase(db)).toBe(4);
 
     const workspaceRow = db
       .prepare('SELECT id, revision, schema_version, payload FROM workspaces WHERE id = ?')
@@ -88,7 +88,7 @@ describe('SQLite v2 → v3 迁移（知识快照表）', () => {
     expect(record?.revision).toBe(3);
     expect(record?.workspace.runs).toHaveLength(1);
 
-    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 3 });
+    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 4 });
 
     // The new table exists and starts empty.
     expect(db.prepare('SELECT COUNT(*) AS count FROM knowledge_snapshots').get()).toEqual({
@@ -99,15 +99,15 @@ describe('SQLite v2 → v3 迁移（知识快照表）', () => {
 
   it('迁移可重复执行且幂等', () => {
     const db = buildV2Database();
-    expect(migrateDatabase(db)).toBe(3);
-    expect(migrateDatabase(db)).toBe(3);
+    expect(migrateDatabase(db)).toBe(4);
+    expect(migrateDatabase(db)).toBe(4);
     expect(db.prepare('SELECT COUNT(*) AS count FROM workspaces').get()).toEqual({ count: 1 });
     db.close();
   });
 
-  it('全新数据库直接到 v3，并保留 v1→v2 的复合主键约束', () => {
+  it('全新数据库直接到最新版本，并保留 v1→v2 的复合主键约束', () => {
     const db = openDatabase(':memory:');
-    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 3 });
+    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 4 });
 
     db.prepare(
       'INSERT INTO workspaces (id, revision, schema_version, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',

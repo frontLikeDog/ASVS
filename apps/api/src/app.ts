@@ -9,16 +9,19 @@ import {
   workspaceExportFileName,
   workspacePutRequestSchema,
 } from '@asvs/domain';
-import type { GitHubReadOnlyPort, KnowledgeIndexPort } from '@asvs/ports';
+import type { GitHubReadOnlyPort, KnowledgeIndexPort, PRDiscoveryPort } from '@asvs/ports';
 import type { DatabaseSync } from 'node:sqlite';
 import { openDatabase } from './db/database';
 import { SqliteKnowledgeSnapshotStore } from './db/knowledge-store';
+import { SqlitePRDiscoveryStore } from './db/pr-discovery-store';
 import { SqliteWorkspaceStore } from './db/workspace-store';
 import { UnconfiguredGitHubReadOnlyClient } from './github/github-app-client';
 import { GitHubApiError } from './github/redact';
 import { GitHubKnowledgeIndexer } from './knowledge/indexer';
+import { PRDiscoveryError, PRDiscoveryService } from './knowledge/pr-discovery-service';
 import { registerGitHubRoutes } from './routes/github';
 import { registerKnowledgeRoutes } from './routes/knowledge';
+import { registerPRDiscoveryRoutes } from './routes/pr-discovery';
 
 export interface BuildAppOptions {
   dbPath: string;
@@ -27,6 +30,8 @@ export interface BuildAppOptions {
   github?: GitHubReadOnlyPort;
   /** Defaults to a GitHub-backed indexer over the same SQLite file. */
   knowledgeIndexer?: KnowledgeIndexPort;
+  /** Defaults to a deterministic service over GitHub + 4B snapshots + SQLite. */
+  prDiscovery?: PRDiscoveryPort;
 }
 
 export interface BuiltApp {
@@ -35,6 +40,8 @@ export interface BuiltApp {
   store: SqliteWorkspaceStore;
   knowledgeStore: SqliteKnowledgeSnapshotStore;
   knowledgeIndexer: KnowledgeIndexPort;
+  prDiscoveryStore: SqlitePRDiscoveryStore;
+  prDiscovery: PRDiscoveryPort;
 }
 
 const workspaceIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, 'workspace id 只能包含字母、数字、_ 与 -');
@@ -60,6 +67,10 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   const knowledgeIndexer =
     options.knowledgeIndexer ??
     new GitHubKnowledgeIndexer({ github, store: knowledgeStore });
+  const prDiscoveryStore = new SqlitePRDiscoveryStore(db);
+  const prDiscovery =
+    options.prDiscovery ??
+    new PRDiscoveryService({ github, knowledgeStore, store: prDiscoveryStore });
   const app = Fastify({
     logger: options.logger ?? false,
     bodyLimit: 8 * 1024 * 1024,
@@ -82,6 +93,9 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     if (error instanceof WorkspaceImportError) {
       return reply.code(400).send(errorBody('invalid_workspace', error.message));
     }
+    if (error instanceof PRDiscoveryError) {
+      return reply.code(error.httpStatus).send(errorBody(error.code, error.message));
+    }
     if (error instanceof ZodError) {
       return reply
         .code(400)
@@ -101,6 +115,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
   registerGitHubRoutes(app, github);
   registerKnowledgeRoutes(app, knowledgeIndexer);
+  registerPRDiscoveryRoutes(app, prDiscovery);
 
   app.get<{ Params: { id: string } }>('/v1/workspaces/:id', async (request, reply) => {
     const id = parseWorkspaceId(request.params.id);
@@ -193,7 +208,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     },
   );
 
-  return { app, db, store, knowledgeStore, knowledgeIndexer };
+  return { app, db, store, knowledgeStore, knowledgeIndexer, prDiscoveryStore, prDiscovery };
 }
 
 /** Convenience for the entrypoint: build and return only the server. */
