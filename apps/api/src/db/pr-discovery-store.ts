@@ -57,7 +57,19 @@ export interface ListPRCandidatesFilter {
 export class SqlitePRDiscoveryStore {
   constructor(private readonly db: DatabaseSync) {}
 
-  upsert(candidate: PRChangeCandidateV1): PRChangeCandidateV1 {
+  runInTransaction<T>(fn: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = fn();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  upsert(candidate: PRChangeCandidateV1, updatedAt?: string): PRChangeCandidateV1 {
     const validated = prChangeCandidateV1Schema.parse(candidate);
     this.db
       .prepare(
@@ -85,7 +97,7 @@ export class SqlitePRDiscoveryStore {
         validated.mergeCommitSha,
         validated.snapshotId ?? null,
         validated.analyzedAt,
-        validated.analyzedAt,
+        updatedAt ?? validated.analyzedAt,
         JSON.stringify(validated),
       );
     return validated;
@@ -125,6 +137,22 @@ export class SqlitePRDiscoveryStore {
           LIMIT ?`,
       )
       .all(...params, limit) as unknown as CandidateRow[];
+    return rows.map(decodeCandidate);
+  }
+
+  /**
+   * Lists every stored candidate for a repository without the API page cap.
+   * Used by AC-09 staleness propagation so repositories with >100 analyzed PRs
+   * never silently skip older candidates.
+   */
+  listAll(repo: string): PRChangeCandidateV1[] {
+    const rows = this.db
+      .prepare(
+        `SELECT payload FROM pr_change_candidates
+          WHERE repo = ?
+          ORDER BY analyzed_at DESC, pull_number DESC`,
+      )
+      .all(repo) as unknown as CandidateRow[];
     return rows.map(decodeCandidate);
   }
 

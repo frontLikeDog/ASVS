@@ -309,11 +309,11 @@ pnpm discovery:verify   # 增量索引 → 发现 PR → 确定性分类 → 绑
 ```
 
 - 契约：`PRChangeCandidateV1` / `ClaimCandidateV1` / `VerificationContextV1` / `EvidenceRefV1`（`libs/domain`）+ `PRDiscoveryPort`（`libs/ports`）；发布资格只由纯函数 `evaluateClaimPublishability` 推导。
-- 路由：`POST /v1/github/repos/:owner/:repo/discover`（未配置 GitHub → 503，成功 → 201）、`GET …/candidates`、`GET …/candidates/:candidateId`、`POST …/claims/:claimId/verify`、`POST …/candidates/refresh-staleness`。
+- 路由：`POST /v1/github/repos/:owner/:repo/discover`（未配置 GitHub → 503，成功 → 201）、`GET …/candidates`、`GET …/candidates/:candidateId`、`POST …/claims/:claimId/verify`、`GET …/claims/:claimId/verifications`、`POST …/candidates/refresh-staleness`。
 - 分类（无 LLM）：Conventional 前缀 + 标签 + 文件路径分类 + 纯重命名识别 + 4B 快照路由/入口点信号；`refactor:`、纯重命名、仅测试/CI/构建/配置变更一律 `internal_non_promotable`，自由标题与纯文档变更转 `ambiguous_needs_review`，两者都**不产出 Claim**（AC-02）。
-- 发布守门（AC-03）：已合并但未命中 Release、无运行态证据 → `blocked_unverified`，明确禁止「已上线」；只有 Release → 只能表述「随 Release 发布」；非生产运行态 → 必须标注环境；生产运行态 + 人工批准才 `publishable`。人工驳回 → `blocked_rejected`。
-- 过期传播（AC-09）：新快照中引用文件的 SHA256 变化或文件被删除 → 源码证据与 Claim 自动 `stale` / `blocked_stale`；未绑定指纹的证据不会被误判。
-- 持久化：SQLite `user_version` v3→v4；`pr_change_candidates` 每 repo+PR 一行（重新分析为 upsert 并保留已录入证据），`claim_verifications` 只追加不修改。
+- 发布守门（AC-03）：已合并但未命中 Release、无运行态证据 → `blocked_unverified`，明确禁止「已上线」；只有 Release → 只能表述「随 Release 发布」；非生产运行态 → 必须标注环境；生产运行态 + 人工批准才 `publishable`。人工驳回 → `blocked_rejected`。人工核验必带 `decision`（可选 `actor`），`verifiedAt` 严格校验 ISO-8601 且禁止未来时间。
+- 过期传播（AC-09）：全量扫描仓库候选；新快照中引用文件的 SHA256 变化或文件被删除 → 源码证据与 Claim 自动 `stale` / `blocked_stale`；源码指纹变更或已过期后重新 `discover` 不会复活旧批准，必须针对新代码重新核验。
+- 持久化：SQLite `user_version` v3→v4；`pr_change_candidates` 每 repo+PR 一行（源码指纹与文案均未变时保留已录入证据），`claim_verifications` 只追加不修改，核验录入与候选更新在同一事务内提交。
 - 实测（`frontLikeDog/livenotes` @ `96f90e90`）：增量索引 `mode=incremental total=328 reused=328`（无新增下载）；3 个真实 PR 中 2 个 `feat` 判为用户可感知新功能，2 条 Claim 全部 `blocked_unverified`（未部署声明被阻断）；1 个 `refactor` 判为内部变更且 0 Claim（真实验证 AC-02）；过期扫描 0 变更（证据刚绑定到同一快照）。
 - 边界：Release 只接受 `targetCommitish` 精确匹配或正文显式 `#PR`；不解析 PR 正文、不接外部模型；Web UI 接入留给 4D；`deployed=true` 不等于生产可用。
 

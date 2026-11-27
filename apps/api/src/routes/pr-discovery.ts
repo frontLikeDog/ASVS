@@ -171,7 +171,7 @@ export function registerPRDiscoveryRoutes(
           code: 'invalid_github_request',
           httpStatus: 400,
           message:
-            '核验请求体无效：kind 需为 test / runtime / release / human；runtime 必须带 environmentId，release 必须带 releaseTag。',
+            '核验请求体无效：kind 需为 test / runtime / release / human；runtime 必须带 environmentId，release 必须带 releaseTag，human 必须带 decision，verifiedAt 需为 ISO-8601。',
           details: { issues: body.error.issues },
         });
       }
@@ -185,6 +185,29 @@ export function registerPRDiscoveryRoutes(
         );
       }
       return { claim };
+    },
+  );
+
+  app.get<{ Params: { owner: string; repo: string; claimId: string } }>(
+    '/v1/github/repos/:owner/:repo/claims/:claimId/verifications',
+    async (request) => {
+      const repo = parseRepoParams(request.params);
+      const claimId = parseClaimId(request.params.claimId);
+
+      const verifications = await discovery.listVerifications(repo, claimId);
+      if (!verifications) {
+        throw new PRDiscoveryError(
+          'claim_not_found',
+          404,
+          `Claim ${claimId} 不存在；请先发现该仓库的 PR 候选。`,
+        );
+      }
+      return {
+        repo: formatGitHubRepoRef(repo),
+        claimId,
+        count: verifications.length,
+        verifications,
+      };
     },
   );
 }

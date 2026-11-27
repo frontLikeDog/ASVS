@@ -1,6 +1,7 @@
 import type {
   ClaimCandidateV1,
   ClaimVerificationInputV1,
+  ClaimVerificationRecordV1,
   GitHubRepoRef,
   PRChangeCandidateV1,
   PRChangeClassification,
@@ -60,6 +61,14 @@ export interface PRDiscoveryPort {
     claimId: string,
     input: ClaimVerificationInputV1,
   ): Promise<ClaimCandidateV1 | null>;
+  /**
+   * Lists the append-only verification audit records for a claim in
+   * chronological order. Returns null when the claim is unknown for this repo.
+   */
+  listVerifications(
+    repo: GitHubRepoRef,
+    claimId: string,
+  ): Promise<ClaimVerificationRecordV1[] | null>;
   /**
    * AC-09 propagation: compare every digest-bound source evidence with the
    * latest snapshot and mark affected evidence / claims `stale`.

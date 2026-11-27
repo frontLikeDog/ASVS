@@ -12,6 +12,7 @@ import {
   stalenessRefreshResultV1Schema,
   type ClaimCandidateV1,
   type ClaimVerificationInputV1,
+  type ClaimVerificationRecordV1,
   type EvidenceRefV1,
   type GitHubRepoRef,
   type KnowledgeSnapshotV1,
@@ -53,6 +54,8 @@ const DEFAULT_LIST_LIMIT = 15;
 const MAX_LIST_LIMIT = 50;
 const MAX_FILES_PER_PR = 100;
 const MAX_RELEASES = 50;
+const MAX_CANDIDATE_EVIDENCE = 50;
+const MAX_FUTURE_VERIFIED_AT_SKEW_MS = 60_000;
 
 const EVIDENCE_TITLES: Record<ClaimVerificationInputV1['kind'], string> = {
   test: '测试证据',
@@ -60,6 +63,101 @@ const EVIDENCE_TITLES: Record<ClaimVerificationInputV1['kind'], string> = {
   release: '发布证据',
   human: '人工核验',
 };
+
+const ENVIRONMENT_RANK: Record<string, number> = {
+  production: 4,
+  beta: 3,
+  staging: 2,
+  preview: 1,
+};
+
+function compareTimestamps(a: string, b: string): number {
+  const ta = Date.parse(a);
+  const tb = Date.parse(b);
+  if (Number.isFinite(ta) && Number.isFinite(tb)) return ta - tb;
+  return a.localeCompare(b);
+}
+
+function rankEnvironment(environmentId: string | undefined): number {
+  if (!environmentId) return 0;
+  return ENVIRONMENT_RANK[environmentId] ?? 0;
+}
+
+/**
+ * Keeps all digest-bound source evidence plus up to `max` total items.
+ * When non-source evidence exceeds the budget, pins the active deciding items
+ * (latest human decision, highest-ranked runtime, latest release, latest test
+ * run) so noisy logs can never silently evict a rejection or production proof.
+ */
+function pruneCandidateEvidence(
+  allEvidence: EvidenceRefV1[],
+  max = MAX_CANDIDATE_EVIDENCE,
+): EvidenceRefV1[] {
+  const sourceItems = allEvidence.filter((item) => item.kind === 'source').slice(0, max);
+  const recordedItems = allEvidence.filter((item) => item.kind !== 'source');
+  const budget = Math.max(0, max - sourceItems.length);
+  if (recordedItems.length <= budget) {
+    return [...sourceItems, ...recordedItems];
+  }
+
+  const pinnedIds = new Set<string>();
+  const pin = (item: EvidenceRefV1 | undefined): void => {
+    if (item && pinnedIds.size < budget) pinnedIds.add(item.id);
+  };
+
+  const latestHuman = recordedItems
+    .filter((item) => item.kind === 'human' && item.status === 'valid' && item.decision !== undefined)
+    .sort((a, b) => compareTimestamps(a.capturedAt, b.capturedAt))
+    .at(-1);
+  const bestRuntime = recordedItems
+    .filter((item) => item.kind === 'runtime' && item.status === 'valid')
+    .sort(
+      (a, b) =>
+        rankEnvironment(b.environmentId) - rankEnvironment(a.environmentId) ||
+        compareTimestamps(b.capturedAt, a.capturedAt),
+    )[0];
+  const latestRelease = recordedItems
+    .filter((item) => item.kind === 'release' && item.status === 'valid')
+    .sort((a, b) => compareTimestamps(b.capturedAt, a.capturedAt))[0];
+  const latestTest = recordedItems
+    .filter((item) => item.kind === 'test' && item.status === 'valid' && item.testRunId)
+    .sort((a, b) => compareTimestamps(b.capturedAt, a.capturedAt))[0];
+
+  pin(latestHuman);
+  pin(bestRuntime);
+  pin(latestRelease);
+  pin(latestTest);
+
+  const keptIds = new Set(pinnedIds);
+  for (let index = recordedItems.length - 1; index >= 0 && keptIds.size < budget; index -= 1) {
+    const item = recordedItems[index];
+    if (item && !keptIds.has(item.id)) keptIds.add(item.id);
+  }
+
+  return [...sourceItems, ...recordedItems.filter((item) => keptIds.has(item.id))];
+}
+
+function sourceEvidenceFingerprint(candidate: PRChangeCandidateV1): Map<string, string | undefined> {
+  const map = new Map<string, string | undefined>();
+  for (const item of candidate.evidence) {
+    if (item.kind !== 'source' || !item.filePath) continue;
+    map.set(item.filePath, item.sourceDigest);
+  }
+  return map;
+}
+
+function isSourceUnchanged(previous: PRChangeCandidateV1, fresh: PRChangeCandidateV1): boolean {
+  if (previous.evidence.some((item) => item.kind === 'source' && item.status === 'stale')) {
+    return false;
+  }
+  const prevMap = sourceEvidenceFingerprint(previous);
+  const freshMap = sourceEvidenceFingerprint(fresh);
+  if (prevMap.size !== freshMap.size) return false;
+  for (const [filePath, digest] of prevMap) {
+    if (!freshMap.has(filePath) || freshMap.get(filePath) !== digest) return false;
+  }
+  return true;
+}
 
 function clamp(value: number | undefined, fallback: number, max: number): number {
   if (value === undefined || !Number.isFinite(value)) return fallback;
@@ -72,10 +170,16 @@ function defaultVerificationId(): string {
 
 /**
  * Re-analysis must not erase evidence recorded by humans or external
- * pipelines. Source evidence is always re-derived from the PR files, but
- * test / runtime / release / human evidence is carried over as long as the
- * claim statement is unchanged — an approval is bound to the exact text a
- * human approved, so a rewritten statement drops it.
+ * pipelines when nothing substantive changed — AND must never silently carry
+ * old approvals across a code/digest change or a stale state (AC-09 / docs/05 §9).
+ *
+ * Test / runtime / release / human evidence is carried over ONLY when:
+ * 1. Previous source evidence was not stale and every (filePath, sourceDigest)
+ *    matches the freshly analyzed candidate,
+ * 2. The claim statement and commitSha are unchanged.
+ * Otherwise old approvals are dropped from the active candidate (their full
+ * history stays intact in append-only `claim_verifications`) so the claim must
+ * be re-verified against the new code before publication.
  */
 export function carryOverRecordedEvidence(
   fresh: PRChangeCandidateV1,
@@ -83,39 +187,74 @@ export function carryOverRecordedEvidence(
   evaluatedAt: string,
 ): PRChangeCandidateV1 {
   if (!previous || fresh.claims.length === 0) return fresh;
-  const freshClaim = fresh.claims[0];
-  const previousClaim = previous.claims[0];
-  if (!freshClaim || !previousClaim || previousClaim.statement !== freshClaim.statement) {
-    return fresh;
+  if (!isSourceUnchanged(previous, fresh)) return fresh;
+
+  const previousClaimsById = new Map(previous.claims.map((claim) => [claim.id, claim]));
+  const previousEvidenceById = new Map(previous.evidence.map((item) => [item.id, item]));
+  const combinedEvidence: EvidenceRefV1[] = [...fresh.evidence];
+  const combinedIds = new Set(combinedEvidence.map((item) => item.id));
+  const claimCarriedIds = new Map<string, string[]>();
+
+  for (const freshClaim of fresh.claims) {
+    const previousClaim = previousClaimsById.get(freshClaim.id);
+    if (
+      !previousClaim ||
+      previousClaim.statement !== freshClaim.statement ||
+      previousClaim.verification.commitSha !== freshClaim.verification.commitSha
+    ) {
+      continue;
+    }
+    const recorded = previousClaim.evidenceIds
+      .map((id) => previousEvidenceById.get(id))
+      .filter((item): item is EvidenceRefV1 => item !== undefined && item.kind !== 'source');
+    if (recorded.length === 0) continue;
+
+    const carriedForClaim: string[] = [];
+    for (const item of recorded) {
+      if (!combinedIds.has(item.id)) {
+        combinedEvidence.push(item);
+        combinedIds.add(item.id);
+      }
+      carriedForClaim.push(item.id);
+    }
+    claimCarriedIds.set(freshClaim.id, carriedForClaim);
   }
 
-  const recorded = previous.evidence.filter((item) => item.kind !== 'source');
-  if (recorded.length === 0) return fresh;
+  if (claimCarriedIds.size === 0) return fresh;
 
-  const evidence: EvidenceRefV1[] = [...fresh.evidence];
-  for (const item of recorded) {
-    if (evidence.length >= 50) break;
-    if (!evidence.some((existing) => existing.id === item.id)) evidence.push(item);
-  }
+  const evidence = pruneCandidateEvidence(combinedEvidence);
+  const evidenceById = new Map(evidence.map((item) => [item.id, item]));
 
-  const evaluation = evaluateClaimPublishability({
-    classification: fresh.classification,
-    evidence,
-    commitSha: freshClaim.verification.commitSha,
-    ...(fresh.snapshotId ? { snapshotId: fresh.snapshotId } : {}),
-    evaluatedAt,
+  const claims: ClaimCandidateV1[] = fresh.claims.map((freshClaim) => {
+    const carriedIds = claimCarriedIds.get(freshClaim.id);
+    if (!carriedIds) return freshClaim;
+
+    const claimEvidenceIds = Array.from(
+      new Set([...freshClaim.evidenceIds, ...carriedIds]),
+    ).filter((id) => evidenceById.has(id));
+    const claimEvidence = claimEvidenceIds
+      .map((id) => evidenceById.get(id))
+      .filter((item): item is EvidenceRefV1 => item !== undefined);
+
+    const evaluation = evaluateClaimPublishability({
+      classification: fresh.classification,
+      evidence: claimEvidence,
+      commitSha: freshClaim.verification.commitSha,
+      ...(fresh.snapshotId ? { snapshotId: fresh.snapshotId } : {}),
+      evaluatedAt,
+    });
+    return {
+      ...freshClaim,
+      status: evaluation.status,
+      eligibility: evaluation.eligibility,
+      verification: evaluation.verification,
+      evidenceIds: claimEvidenceIds,
+      blockers: evaluation.blockers,
+      guidance: evaluation.guidance,
+    };
   });
-  const claim: ClaimCandidateV1 = {
-    ...freshClaim,
-    status: evaluation.status,
-    eligibility: evaluation.eligibility,
-    verification: evaluation.verification,
-    evidenceIds: evidence.map((item) => item.id),
-    blockers: evaluation.blockers,
-    guidance: evaluation.guidance,
-  };
 
-  return prChangeCandidateV1Schema.parse({ ...fresh, evidence, claims: [claim] });
+  return prChangeCandidateV1Schema.parse({ ...fresh, evidence, claims });
 }
 
 export interface PRDiscoveryServiceOptions {
@@ -280,71 +419,106 @@ export class PRDiscoveryService implements PRDiscoveryPort {
   ): Promise<ClaimCandidateV1 | null> {
     const parsedInput = claimVerificationInputV1Schema.parse(input);
     const fullRepo = formatGitHubRepoRef(repo);
-    const found = this.#store.findClaim(fullRepo, claimId);
-    if (!found) return null;
-
-    const { candidate, claim } = found;
     const now = this.#now();
     const recordedAt = now.toISOString();
-    const verifiedAt = parsedInput.verifiedAt ?? recordedAt;
-    const recordId = this.#newVerificationId();
-    const evidenceId = `evd_${recordId.slice(CLAIM_VERIFICATION_ID_PREFIX.length)}`;
 
-    const evidence: EvidenceRefV1 = {
-      id: evidenceId,
-      kind: parsedInput.kind,
-      status: 'valid',
-      title: EVIDENCE_TITLES[parsedInput.kind],
-      detail: parsedInput.note,
-      ...(parsedInput.environmentId ? { environmentId: parsedInput.environmentId } : {}),
-      ...(parsedInput.releaseTag ? { releaseTag: parsedInput.releaseTag } : {}),
-      ...(parsedInput.testRunId ? { testRunId: parsedInput.testRunId } : {}),
-      ...(parsedInput.decision ? { decision: parsedInput.decision } : {}),
-      commitSha: parsedInput.commitSha ?? claim.verification.commitSha,
-      capturedAt: verifiedAt,
-    };
+    let verifiedAt = recordedAt;
+    if (parsedInput.verifiedAt !== undefined) {
+      const verifiedAtMs = Date.parse(parsedInput.verifiedAt);
+      if (!Number.isFinite(verifiedAtMs) || verifiedAtMs > now.getTime() + MAX_FUTURE_VERIFIED_AT_SKEW_MS) {
+        throw new PRDiscoveryError(
+          'invalid_request',
+          400,
+          'verifiedAt 必须是合法的 ISO-8601 时间戳且不能晚于当前时间。',
+        );
+      }
+      verifiedAt = new Date(verifiedAtMs).toISOString();
+    }
 
-    this.#store.appendVerification(
-      claimVerificationRecordV1Schema.parse({
-        schemaVersion: PR_DISCOVERY_SCHEMA_VERSION,
-        id: recordId,
-        repo: fullRepo,
-        candidateId: candidate.id,
-        claimId: claim.id,
-        evidence,
-        input: parsedInput,
+    return this.#store.runInTransaction(() => {
+      const found = this.#store.findClaim(fullRepo, claimId);
+      if (!found) return null;
+
+      const { candidate, claim } = found;
+      const recordId = this.#newVerificationId();
+      const evidenceId = `evd_${recordId.slice(CLAIM_VERIFICATION_ID_PREFIX.length)}`;
+
+      const evidence: EvidenceRefV1 = {
+        id: evidenceId,
+        kind: parsedInput.kind,
+        status: 'valid',
+        title: EVIDENCE_TITLES[parsedInput.kind],
+        detail: parsedInput.note,
+        ...(parsedInput.actor ? { actor: parsedInput.actor } : {}),
+        ...(parsedInput.environmentId ? { environmentId: parsedInput.environmentId } : {}),
+        ...(parsedInput.releaseTag ? { releaseTag: parsedInput.releaseTag } : {}),
+        ...(parsedInput.testRunId ? { testRunId: parsedInput.testRunId } : {}),
+        ...(parsedInput.decision ? { decision: parsedInput.decision } : {}),
+        commitSha: parsedInput.commitSha ?? claim.verification.commitSha,
+        capturedAt: verifiedAt,
+      };
+
+      this.#store.appendVerification(
+        claimVerificationRecordV1Schema.parse({
+          schemaVersion: PR_DISCOVERY_SCHEMA_VERSION,
+          id: recordId,
+          repo: fullRepo,
+          candidateId: candidate.id,
+          claimId: claim.id,
+          evidence,
+          input: parsedInput,
+          recordedAt,
+        }),
+      );
+
+      const evidenceList = pruneCandidateEvidence([...candidate.evidence, evidence]);
+      const evidenceById = new Map(evidenceList.map((item) => [item.id, item]));
+      const claimEvidenceIds = Array.from(new Set([...claim.evidenceIds, evidence.id])).filter(
+        (id) => evidenceById.has(id),
+      );
+      const claimEvidence = claimEvidenceIds
+        .map((id) => evidenceById.get(id))
+        .filter((item): item is EvidenceRefV1 => item !== undefined);
+
+      const evaluation = evaluateClaimPublishability({
+        classification: candidate.classification,
+        evidence: claimEvidence,
+        commitSha: claim.verification.commitSha,
+        ...(claim.verification.snapshotId ? { snapshotId: claim.verification.snapshotId } : {}),
+        evaluatedAt: recordedAt,
+      });
+      const updatedClaim: ClaimCandidateV1 = {
+        ...claim,
+        status: evaluation.status,
+        eligibility: evaluation.eligibility,
+        verification: evaluation.verification,
+        evidenceIds: claimEvidenceIds,
+        blockers: evaluation.blockers,
+        guidance: evaluation.guidance,
+      };
+      const updatedClaims = candidate.claims.map((item) =>
+        item.id === claim.id
+          ? updatedClaim
+          : { ...item, evidenceIds: item.evidenceIds.filter((id) => evidenceById.has(id)) },
+      );
+
+      this.#store.upsert(
+        { ...candidate, evidence: evidenceList, claims: updatedClaims },
         recordedAt,
-      }),
-    );
-
-    // Keep every digest-bound source evidence when trimming; old recorded
-    // evidence is what may be dropped once the cap is reached.
-    const combined = [...candidate.evidence, evidence];
-    const sourceItems = combined.filter((item) => item.kind === 'source');
-    const recordedItems = combined.filter((item) => item.kind !== 'source');
-    const evidenceList = [
-      ...sourceItems,
-      ...recordedItems.slice(-Math.max(0, 50 - sourceItems.length)),
-    ];
-    const evaluation = evaluateClaimPublishability({
-      classification: candidate.classification,
-      evidence: evidenceList,
-      commitSha: claim.verification.commitSha,
-      ...(claim.verification.snapshotId ? { snapshotId: claim.verification.snapshotId } : {}),
-      evaluatedAt: recordedAt,
+      );
+      return updatedClaim;
     });
-    const updatedClaim: ClaimCandidateV1 = {
-      ...claim,
-      status: evaluation.status,
-      eligibility: evaluation.eligibility,
-      verification: evaluation.verification,
-      evidenceIds: evidenceList.map((item) => item.id),
-      blockers: evaluation.blockers,
-      guidance: evaluation.guidance,
-    };
+  }
 
-    this.#store.upsert({ ...candidate, evidence: evidenceList, claims: [updatedClaim] });
-    return updatedClaim;
+  async listVerifications(
+    repo: GitHubRepoRef,
+    claimId: string,
+  ): Promise<ClaimVerificationRecordV1[] | null> {
+    const fullRepo = formatGitHubRepoRef(repo);
+    const found = this.#store.findClaim(fullRepo, claimId);
+    const records = this.#store.listVerifications(fullRepo, claimId);
+    if (!found && records.length === 0) return null;
+    return records;
   }
 
   async refreshStaleness(
@@ -367,7 +541,7 @@ export class PRDiscoveryService implements PRDiscoveryPort {
     }
 
     const refreshedAt = this.#now().toISOString();
-    const candidates = this.#store.list(fullRepo, { limit: 100 });
+    const candidates = this.#store.listAll(fullRepo);
     let candidatesChanged = 0;
     let evidenceMarkedStale = 0;
     const claimsMarkedStale: string[] = [];
@@ -376,7 +550,7 @@ export class PRDiscoveryService implements PRDiscoveryPort {
     for (const candidate of candidates) {
       const result = propagateSnapshotStaleness(candidate, snapshot, refreshedAt);
       if (result.changed) {
-        this.#store.upsert(result.candidate);
+        this.#store.upsert(result.candidate, refreshedAt);
         candidatesChanged += 1;
       }
       evidenceMarkedStale += result.evidenceMarkedStale;

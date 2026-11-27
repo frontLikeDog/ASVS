@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  claimVerificationInputV1Schema,
   evaluateClaimPublishability,
   prChangeCandidateV1Schema,
   propagateSnapshotStaleness,
@@ -304,6 +305,121 @@ describe('Claim 发布守门（AC-03 / docs/08 §5）', () => {
       evidence: [sourceEvidence()],
     });
     expect(result.eligibility).toBe('blocked_rejected');
+  });
+
+  it('跨时区 ISO 时间戳按真实时间比较，避免字典序误判人工决定顺序', () => {
+    // 17:00+08:00 == 09:00Z（更早），但字符串字典序大于 09:30Z；真正的最新决定是 reject。
+    const result = evaluateClaimPublishability({
+      ...base,
+      evidence: [
+        sourceEvidence(),
+        {
+          id: `evd_${'7'.repeat(16)}`,
+          kind: 'runtime',
+          status: 'valid',
+          title: 'production 运行确认',
+          detail: 'ok',
+          environmentId: 'production',
+          capturedAt: '2026-11-27T08:50:00.000Z',
+        },
+        {
+          id: `evd_${'8'.repeat(16)}`,
+          kind: 'human',
+          status: 'valid',
+          title: '人工批准',
+          detail: 'approve',
+          decision: 'approve',
+          actor: 'alice',
+          capturedAt: '2026-11-27T17:00:00+08:00',
+        },
+        {
+          id: `evd_${'9'.repeat(16)}`,
+          kind: 'human',
+          status: 'valid',
+          title: '人工驳回',
+          detail: 'reject',
+          decision: 'reject',
+          actor: 'bob',
+          capturedAt: '2026-11-27T09:30:00.000Z',
+        },
+      ],
+    });
+    expect(result.eligibility).toBe('blocked_rejected');
+    expect(result.status).toBe('rejected');
+  });
+
+  it('test 证据的 testRunId 写入核验上下文，runtime 证据优先覆盖', () => {
+    const withTestOnly = evaluateClaimPublishability({
+      ...base,
+      evidence: [
+        sourceEvidence(),
+        {
+          id: `evd_${'a'.repeat(16)}`,
+          kind: 'test',
+          status: 'valid',
+          title: 'CI 测试',
+          detail: '通过',
+          testRunId: 'gha-100',
+          capturedAt: '2026-11-27T09:10:00.000Z',
+        },
+      ],
+    });
+    expect(withTestOnly.eligibility).toBe('blocked_unverified');
+    expect(withTestOnly.verification.testRunId).toBe('gha-100');
+
+    const withRuntime = evaluateClaimPublishability({
+      ...base,
+      evidence: [
+        sourceEvidence(),
+        {
+          id: `evd_${'a'.repeat(16)}`,
+          kind: 'test',
+          status: 'valid',
+          title: 'CI 测试',
+          detail: '通过',
+          testRunId: 'gha-100',
+          capturedAt: '2026-11-27T09:10:00.000Z',
+        },
+        {
+          id: `evd_${'b'.repeat(16)}`,
+          kind: 'runtime',
+          status: 'valid',
+          title: 'staging 运行态',
+          detail: 'ok',
+          environmentId: 'staging',
+          testRunId: 'demo-run-7',
+          capturedAt: '2026-11-27T09:20:00.000Z',
+        },
+      ],
+    });
+    expect(withRuntime.verification.testRunId).toBe('demo-run-7');
+  });
+
+  it('核验输入校验：human 必带 decision，verifiedAt 必须为合法 ISO-8601', () => {
+    expect(
+      claimVerificationInputV1Schema.safeParse({
+        kind: 'human',
+        note: '缺少决定',
+      }).success,
+    ).toBe(false);
+
+    expect(
+      claimVerificationInputV1Schema.safeParse({
+        kind: 'test',
+        note: '非法时间',
+        verifiedAt: 'not-a-date',
+      }).success,
+    ).toBe(false);
+
+    expect(
+      claimVerificationInputV1Schema.safeParse({
+        kind: 'human',
+        note: '批准发布',
+        actor: 'pm-chen',
+        decision: 'approve',
+        verifiedAt: '2026-11-27T17:30:00+08:00',
+      }).success,
+    ).toBe(true);
   });
 });
 

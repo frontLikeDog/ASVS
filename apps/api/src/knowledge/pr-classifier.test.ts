@@ -218,6 +218,21 @@ describe('AC-02：内部变更绝不产出新功能候选', () => {
     expect(candidate.classification).toBe('internal_non_promotable');
     expect(candidate.claims).toEqual([]);
   });
+
+  it('仅修改其他资源文件（other）时 rationale 与 diffStats.internalFiles 口径一致', () => {
+    const candidate = classifyPullRequest({
+      repo: REPO,
+      pullRequest: buildPr({ title: 'chore: update package manifest' }),
+      files: [file('package.json')],
+      releases: [],
+      snapshot: null,
+      analyzedAt: ANALYZED_AT,
+    });
+
+    expect(candidate.classification).toBe('internal_non_promotable');
+    expect(candidate.diffStats.internalFiles).toBe(1);
+    expect(candidate.rationale.join(' ')).toContain('内部文件 1 个');
+  });
 });
 
 describe('用户可感知候选', () => {

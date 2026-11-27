@@ -371,7 +371,13 @@ function decideClassification(
   const internalFiles = files.filter((file) => {
     if (isPureRename(file)) return false;
     const category = categorizeChangedFile(file.filename);
-    return category === 'test' || category === 'ci' || category === 'build' || category === 'config';
+    return (
+      category === 'test' ||
+      category === 'ci' ||
+      category === 'build' ||
+      category === 'config' ||
+      category === 'other'
+    );
   });
   const docsFiles = files.filter((file) => categorizeChangedFile(file.filename) === 'docs');
   const renamedOnlyFiles = files.filter(isPureRename);

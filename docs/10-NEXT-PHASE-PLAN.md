@@ -377,18 +377,18 @@ schema 变更一次，已有数据仍在
 **4C 边界（已实现 vs 未实现）**
 
 - 已实现：`libs/domain/src/pr-discovery.ts` 的 `PRChangeCandidateV1` / `ClaimCandidateV1` / `VerificationContextV1` / `EvidenceRefV1`，以及两条纯守门函数：`evaluateClaimPublishability`（发布资格）与 `propagateSnapshotStaleness`（AC-09 传播）。
-- 已实现：`libs/ports/src/pr-discovery.ts` 的 `PRDiscoveryPort`（analyze / list / get / recordVerification / refreshStaleness）。
-- 已实现路由：`POST /v1/github/repos/:owner/:repo/discover`（未配置 GitHub → 503；成功 → 201）、`GET …/candidates`、`GET …/candidates/:candidateId`、`POST …/claims/:claimId/verify`、`POST …/candidates/refresh-staleness`（无快照 → 404）。
+- 已实现：`libs/ports/src/pr-discovery.ts` 的 `PRDiscoveryPort`（analyze / list / get / recordVerification / listVerifications / refreshStaleness）。
+- 已实现路由：`POST /v1/github/repos/:owner/:repo/discover`（未配置 GitHub → 503；成功 → 201）、`GET …/candidates`、`GET …/candidates/:candidateId`、`POST …/claims/:claimId/verify`、`GET …/claims/:claimId/verifications`、`POST …/candidates/refresh-staleness`（无快照 → 404）。
 - 已实现：确定性规则只使用 Conventional 前缀、标签、文件路径分类（界面 / 源码 / 测试 / CI / 构建 / 配置 / 文档）、纯重命名识别、4B 快照的路由符号 / 入口点 / 文档章节，以及 Release 的两种显式关联（`targetCommitish` 恰为合并提交，或正文显式 `#<PR>`）。
 - AC-02：`internal_non_promotable` 与 `ambiguous_needs_review` 一律 `promotable=false` 且 `claims=[]`，由 Zod `superRefine` 硬性约束；夹具覆盖 refactor 前缀、纯重命名、feat 但只改测试、内部标签、自由标题。
 - AC-03：初始 Claim 只有源码证据时固定 `deployed=false` / `blocked_unverified`；随后按证据逐级放行——只有发布证据 → `needs_qualification`（只能表述「随 Release 发布」）；非生产运行态 → `needs_qualification`（必须标注环境）；生产运行态但缺人工批准 → `blocked_unverified`；生产运行态 + 人工批准 → `publishable`。人工驳回 → `blocked_rejected`，最新人工决定生效。
-- AC-09：只对绑定了 `filePath + sourceDigest` 的源码证据做比对；最新快照中文件被修改或删除即标 `stale`，同时把 Claim 置为 `stale` / `blocked_stale`。未绑定指纹的证据不会被误判。
-- 持久化：SQLite `user_version` v3→v4，新增 `pr_change_candidates`（每 repo+PR 一行，重新分析为 upsert）与 `claim_verifications`（append-only 审计）；既有 workspaces / production_runs / knowledge_snapshots 原样保留。
+- AC-09：全量扫描仓库候选（不受列表 100 条分页上限影响），只对绑定了 `filePath + sourceDigest` 的源码证据做比对；最新快照中文件被修改或删除即标 `stale`，同时把 Claim 置为 `stale` / `blocked_stale`。未绑定指纹的证据不会被误判。
+- 持久化：SQLite `user_version` v3→v4，新增 `pr_change_candidates`（每 repo+PR 一行，重新分析为 upsert）与 `claim_verifications`（append-only 审计，与候选更新在同一事务内提交）；既有 workspaces / production_runs / knowledge_snapshots 原样保留。
 - 已实现：`pnpm discovery:verify [--repo owner/name] [--branch main] [--limit N] [--no-index]`，对真实仓库索引 → 发现 → 过期传播，并打印真实样本形态覆盖率。
 - 未实现（有意）：外部 LLM / 语义理解；PR 正文/评论解析；`/commits/:sha/pulls` 关联（端口未暴露）；自动把候选写入 `libs/state` 工作区（4D）；自动批准或自动发布。
-- 未实现：候选重新分析时，只有 Claim 文案未变化才会保留此前录入的 test / runtime / release / human 证据；文案变化会丢弃旧批准（批准绑定具体文本）。
+- 未实现：候选重新分析时，只有 Claim 文案、提交与源码文件指纹均未变化且原状态未过期才会保留此前录入的 test / runtime / release / human 证据；文案、提交或任一源码指纹变化会丢弃旧批准（批准绑定具体文本与代码快照，完整历史留在 `claim_verifications`）。
 - 已知限制：`deployed=true` 只代表存在 Release 或真实环境运行态证据，不等于「生产可用」；「已上线」表述仍要求 `environmentId=production` 与人工批准同时成立。
-- 测试：`pnpm exec vitest run apps/api libs/domain` 21 个文件 / 188 个用例通过，覆盖 AC-02 / AC-03 / AC-09、v3→v4 迁移保留数据、路由 503/400/404/201/200 与 SQLite 往返。
+- 测试：`pnpm exec vitest run apps/api libs/domain` 21 个文件 / 198 个用例通过，覆盖 AC-02 / AC-03 / AC-09（含重发现防绕过、>100 候选全量过期、跨时区时间排序、未来时间拒绝、50 条证据上限保活、事务回滚）、v3→v4 迁移保留数据、路由 503/400/404/201/200 与 SQLite 往返。
 
 ### 为什么最后做
 

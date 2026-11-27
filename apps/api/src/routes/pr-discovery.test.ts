@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type {
   ClaimVerificationInputV1,
+  ClaimVerificationRecordV1,
   GitHubRepoRef,
   PRChangeCandidateV1,
   PRDiscoveryReportV1,
@@ -165,6 +166,35 @@ function createStubDiscovery(
       claimId: string,
       _input: ClaimVerificationInputV1,
     ) => (claimId === CLAIM_ID ? candidate.claims[0] ?? null : null),
+    listVerifications: async (_repo: GitHubRepoRef, claimId: string): Promise<ClaimVerificationRecordV1[] | null> =>
+      claimId === CLAIM_ID
+        ? [
+            {
+              schemaVersion: '1',
+              id: `vrf_${'1'.repeat(16)}`,
+              repo: FULL_REPO,
+              candidateId: CANDIDATE_ID,
+              claimId: CLAIM_ID,
+              evidence: {
+                id: `evd_${'1'.repeat(16)}`,
+                kind: 'human',
+                status: 'valid',
+                title: '人工核验',
+                detail: '批准发布',
+                decision: 'approve',
+                actor: 'pm-lin',
+                capturedAt: ANALYZED_AT,
+              },
+              input: {
+                kind: 'human',
+                note: '批准发布',
+                actor: 'pm-lin',
+                decision: 'approve',
+              },
+              recordedAt: ANALYZED_AT,
+            },
+          ]
+        : null,
     refreshStaleness: async () => buildStaleness(),
     ...overrides,
   };
@@ -411,6 +441,50 @@ describe('PR 发现路由', () => {
       payload: { kind: 'human', note: '批准', decision: 'approve' },
     });
     expect(invalidClaimId.statusCode).toBe(400);
+
+    const humanMissingDecision = await app.inject({
+      method: 'POST',
+      url: `/v1/github/repos/frontLikeDog/livenotes/claims/${CLAIM_ID}/verify`,
+      payload: { kind: 'human', note: '忘记填决定' },
+    });
+    expect(humanMissingDecision.statusCode).toBe(400);
+
+    const badVerifiedAt = await app.inject({
+      method: 'POST',
+      url: `/v1/github/repos/frontLikeDog/livenotes/claims/${CLAIM_ID}/verify`,
+      payload: { kind: 'test', note: '非法时间', verifiedAt: '9999-zz' },
+    });
+    expect(badVerifiedAt.statusCode).toBe(400);
+  });
+
+  it('查询 Claim 核验审计历史：200 / 400 / 404', async () => {
+    const built = await buildApp({ dbPath: ':memory:', prDiscovery: createStubDiscovery() });
+    app = built.app;
+
+    const ok = await app.inject({
+      method: 'GET',
+      url: `/v1/github/repos/frontLikeDog/livenotes/claims/${CLAIM_ID}/verifications`,
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toMatchObject({
+      repo: FULL_REPO,
+      claimId: CLAIM_ID,
+      count: 1,
+      verifications: [{ evidence: { actor: 'pm-lin', decision: 'approve' } }],
+    });
+
+    const badId = await app.inject({
+      method: 'GET',
+      url: '/v1/github/repos/frontLikeDog/livenotes/claims/not-a-claim/verifications',
+    });
+    expect(badId.statusCode).toBe(400);
+
+    const missing = await app.inject({
+      method: 'GET',
+      url: `/v1/github/repos/frontLikeDog/livenotes/claims/claim_${'f'.repeat(16)}/verifications`,
+    });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json().error.code).toBe('claim_not_found');
   });
 
   it('刷新过期状态：200 汇总，非法请求体 400', async () => {

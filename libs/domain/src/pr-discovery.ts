@@ -138,6 +138,8 @@ export const evidenceRefV1Schema = z.object({
   testRunId: z.string().min(1).max(200).optional(),
   /** 仅 human 证据使用：人工批准或驳回。 */
   decision: claimVerificationDecisionSchema.optional(),
+  /** 审核人或自动化执行主体标识（docs/08 §5–§6）。 */
+  actor: z.string().min(1).max(120).optional(),
   capturedAt: z.string().min(1),
 });
 export type EvidenceRefV1 = z.infer<typeof evidenceRefV1Schema>;
@@ -345,12 +347,17 @@ export const claimVerificationInputV1Schema = z
   .object({
     kind: claimVerificationKindSchema,
     note: z.string().trim().min(1).max(1000),
+    actor: z.string().trim().min(1).max(120).optional(),
     environmentId: verificationEnvironmentIdSchema.optional(),
     releaseTag: z.string().trim().min(1).max(120).optional(),
     testRunId: z.string().trim().min(1).max(200).optional(),
     commitSha: gitObjectShaSchema.optional(),
     decision: claimVerificationDecisionSchema.optional(),
-    verifiedAt: z.string().trim().min(1).max(64).optional(),
+    verifiedAt: z
+      .string()
+      .trim()
+      .datetime({ offset: true, message: 'verifiedAt 必须是合法的 ISO-8601 时间戳' })
+      .optional(),
   })
   .strict()
   .superRefine((input, ctx) => {
@@ -359,6 +366,13 @@ export const claimVerificationInputV1Schema = z
         code: z.ZodIssueCode.custom,
         path: ['decision'],
         message: '只有 human 证据可以携带 approve / reject 决定',
+      });
+    }
+    if (input.kind === 'human' && input.decision === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['decision'],
+        message: '人工核验必须明确指定 decision（approve 或 reject）',
       });
     }
     if (input.kind === 'runtime' && input.environmentId === undefined) {
@@ -423,10 +437,19 @@ function rankEnvironment(environmentId: string | undefined): number {
   return ENVIRONMENT_RANK[environmentId] ?? 0;
 }
 
+function compareTimestamps(a: string, b: string): number {
+  const ta = Date.parse(a);
+  const tb = Date.parse(b);
+  if (Number.isFinite(ta) && Number.isFinite(tb)) {
+    return ta - tb;
+  }
+  return a.localeCompare(b);
+}
+
 function latestHumanDecision(evidence: EvidenceRefV1[]): EvidenceRefV1 | undefined {
   const humans = evidence
-    .filter((item) => item.kind === 'human' && item.decision !== undefined)
-    .sort((a, b) => a.capturedAt.localeCompare(b.capturedAt));
+    .filter((item) => item.kind === 'human' && item.status === 'valid' && item.decision !== undefined)
+    .sort((a, b) => compareTimestamps(a.capturedAt, b.capturedAt));
   return humans[humans.length - 1];
 }
 
@@ -452,11 +475,16 @@ export function evaluateClaimPublishability(
     (item) => item.kind === 'runtime' && item.status === 'valid',
   );
   const bestRuntime = [...runtimeEvidence].sort(
-    (a, b) => rankEnvironment(b.environmentId) - rankEnvironment(a.environmentId),
+    (a, b) =>
+      rankEnvironment(b.environmentId) - rankEnvironment(a.environmentId) ||
+      compareTimestamps(b.capturedAt, a.capturedAt),
   )[0];
+  const latestTest = evidence
+    .filter((item) => item.kind === 'test' && item.status === 'valid' && item.testRunId)
+    .sort((a, b) => compareTimestamps(b.capturedAt, a.capturedAt))[0];
   const releaseEvidence = evidence
     .filter((item) => item.kind === 'release' && item.status === 'valid')
-    .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))[0];
+    .sort((a, b) => compareTimestamps(b.capturedAt, a.capturedAt))[0];
   const human = latestHumanDecision(evidence);
   const humanRejected = human?.decision === 'reject' || input.currentStatus === 'rejected';
   const humanApproved = human?.decision === 'approve';
@@ -464,16 +492,17 @@ export function evaluateClaimPublishability(
   const deployed = Boolean(releaseEvidence) || Boolean(bestRuntime);
   const environmentId = bestRuntime?.environmentId ?? UNVERIFIED_ENVIRONMENT_ID;
   const releaseTag = releaseEvidence?.releaseTag;
+  const testRunId = bestRuntime?.testRunId ?? latestTest?.testRunId;
   // `verifiedAt` 是「证据被采集的时间」，不是「本次重新计算的时间」，因此
   // 重复刷新过期状态不会无故改写核验上下文。
-  const evidenceTimes = evidence.map((item) => item.capturedAt).sort();
+  const evidenceTimes = evidence.map((item) => item.capturedAt).sort(compareTimestamps);
   const verifiedAt = evidenceTimes[evidenceTimes.length - 1] ?? evaluatedAt;
   const verification: VerificationContextV1 = {
     commitSha: input.commitSha,
     ...(input.snapshotId ? { snapshotId: input.snapshotId } : {}),
     environmentId,
     ...(releaseTag ? { releaseTag } : {}),
-    ...(bestRuntime?.testRunId ? { testRunId: bestRuntime.testRunId } : {}),
+    ...(testRunId ? { testRunId } : {}),
     verifiedAt,
     validityScope: 'unverified',
     deployed,

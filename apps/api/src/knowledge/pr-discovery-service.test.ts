@@ -330,14 +330,15 @@ describe('Claim 核验与发布守门（AC-03）', () => {
     const report = await service.analyzePullRequests(REPO, { pullNumbers: [12] });
     const claimId = report.candidates[0]!.claims[0]!.id;
 
-    // 1. Test evidence alone never proves deployment.
+    // 1. Test evidence alone never proves deployment, though testRunId is tracked.
     const afterTest = await service.recordVerification(REPO, claimId, {
       kind: 'test',
       note: 'CI 单元测试与 E2E 全部通过',
       testRunId: 'gha-run-100',
     });
     expect(afterTest?.eligibility).toBe('blocked_unverified');
-    expect(afterTest?.verification.testRunId).toBeUndefined();
+    expect(afterTest?.verification.deployed).toBe(false);
+    expect(afterTest?.verification.testRunId).toBe('gha-run-100');
     expect(afterTest?.evidenceIds).toHaveLength(3);
 
     // 2. Staging runtime: publishable only with an explicit scope qualifier.
@@ -403,8 +404,16 @@ describe('Claim 核验与发布守门（AC-03）', () => {
       await service.recordVerification(REPO, `claim_${'f'.repeat(16)}`, {
         kind: 'human',
         note: 'x',
+        decision: 'approve',
       }),
     ).toBeNull();
+
+    await expect(
+      service.recordVerification(REPO, `claim_${'f'.repeat(16)}`, {
+        kind: 'human',
+        note: '缺少 decision',
+      }),
+    ).rejects.toThrow();
 
     await expect(
       service.recordVerification(REPO, `claim_${'f'.repeat(16)}`, {
@@ -412,6 +421,152 @@ describe('Claim 核验与发布守门（AC-03）', () => {
         note: '缺少环境',
       }),
     ).rejects.toThrow();
+  });
+
+  it('拒绝未来时间的 verifiedAt，并可查询含 actor 的审计历史', async () => {
+    const { service, knowledgeStore } = buildHarness();
+    knowledgeStore.insert(buildSnapshot(SNAPSHOT_ID, BASE_DIGESTS));
+    const report = await service.analyzePullRequests(REPO, { pullNumbers: [12] });
+    const claimId = report.candidates[0]!.claims[0]!.id;
+
+    await expect(
+      service.recordVerification(REPO, claimId, {
+        kind: 'human',
+        note: '未来时间批准',
+        decision: 'approve',
+        verifiedAt: '2099-01-01T00:00:00.000Z',
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_request', httpStatus: 400 });
+
+    await service.recordVerification(REPO, claimId, {
+      kind: 'human',
+      note: 'PM 审阅批准',
+      actor: 'pm-lin',
+      decision: 'approve',
+      verifiedAt: '2026-11-27T17:59:00+08:00',
+    });
+
+    const records = await service.listVerifications(REPO, claimId);
+    expect(records).toHaveLength(1);
+    expect(records?.[0]?.evidence.actor).toBe('pm-lin');
+    expect(records?.[0]?.evidence.capturedAt).toBe('2026-11-27T09:59:00.000Z');
+    expect(await service.listVerifications(REPO, `claim_${'f'.repeat(16)}`)).toBeNull();
+  });
+
+  it('源码指纹变化或已过期后重新发现，不得复活旧的生产批准（AC-09 防绕过）', async () => {
+    const { service, knowledgeStore } = buildHarness();
+    knowledgeStore.insert(buildSnapshot(SNAPSHOT_ID, BASE_DIGESTS));
+    const first = await service.analyzePullRequests(REPO, { pullNumbers: [12] });
+    const claimId = first.candidates[0]!.claims[0]!.id;
+
+    await service.recordVerification(REPO, claimId, {
+      kind: 'runtime',
+      note: '生产验证通过',
+      environmentId: 'production',
+    });
+    const approved = await service.recordVerification(REPO, claimId, {
+      kind: 'human',
+      note: '批准发布',
+      actor: 'lead',
+      decision: 'approve',
+    });
+    expect(approved?.eligibility).toBe('publishable');
+
+    // 新快照修改了该 PR 引用的源码文件。
+    knowledgeStore.insert(
+      buildSnapshot(NEXT_SNAPSHOT_ID, {
+        ...BASE_DIGESTS,
+        'libs/features/notes/src/sync-panel.tsx': digest('sync panel v2'),
+      }),
+    );
+
+    // 路径 1：先 refreshStaleness 再重新 discover，不得悄悄变回 publishable。
+    await service.refreshStaleness(REPO);
+    const afterStaleDiscover = await service.analyzePullRequests(REPO, { pullNumbers: [12] });
+    const claimAfterStale = afterStaleDiscover.candidates[0]!.claims[0]!;
+    expect(claimAfterStale.eligibility).toBe('blocked_unverified');
+    expect(claimAfterStale.verification.deployed).toBe(false);
+    // 审计历史仍完整保留在只追加表中。
+    const audit = await service.listVerifications(REPO, claimId);
+    expect(audit).toHaveLength(2);
+
+    // 路径 2：不调用 refreshStaleness，在 S2 上重新批准后再变更到 S3 直接 discover，同样必须失效。
+    await service.recordVerification(REPO, claimId, {
+      kind: 'runtime',
+      note: 'S2 生产验证通过',
+      environmentId: 'production',
+    });
+    const reApproved = await service.recordVerification(REPO, claimId, {
+      kind: 'human',
+      note: 'S2 批准发布',
+      decision: 'approve',
+    });
+    expect(reApproved?.eligibility).toBe('publishable');
+
+    knowledgeStore.insert(
+      buildSnapshot(`snap_${'c'.repeat(32)}`, {
+        ...BASE_DIGESTS,
+        'libs/features/notes/src/sync-panel.tsx': digest('sync panel v3'),
+      }),
+    );
+    const directRediscover = await service.analyzePullRequests(REPO, { pullNumbers: [12] });
+    expect(directRediscover.candidates[0]!.claims[0]!.eligibility).toBe('blocked_unverified');
+  });
+
+  it('证据数量超过 50 条上限时仍保留关键决策证据（runtime / human 不被驱逐）', async () => {
+    const { service, knowledgeStore } = buildHarness();
+    knowledgeStore.insert(buildSnapshot(SNAPSHOT_ID, BASE_DIGESTS));
+    const report = await service.analyzePullRequests(REPO, { pullNumbers: [12] });
+    const candidateId = report.candidates[0]!.id;
+    const claimId = report.candidates[0]!.claims[0]!.id;
+
+    await service.recordVerification(REPO, claimId, {
+      kind: 'runtime',
+      note: '生产运行态通过',
+      environmentId: 'production',
+    });
+    await service.recordVerification(REPO, claimId, {
+      kind: 'human',
+      note: '人工批准',
+      decision: 'approve',
+    });
+
+    for (let index = 0; index < 52; index += 1) {
+      await service.recordVerification(REPO, claimId, {
+        kind: 'test',
+        note: `回归测试 #${index + 1}`,
+        testRunId: `ci-${index + 1}`,
+      });
+    }
+
+    const candidate = await service.getCandidate(REPO, candidateId);
+    expect(candidate?.evidence).toHaveLength(50);
+    expect(candidate?.claims[0]?.eligibility).toBe('publishable');
+    expect(candidate?.claims[0]?.status).toBe('verified');
+    const records = await service.listVerifications(REPO, claimId);
+    expect(records).toHaveLength(54);
+  });
+
+  it('recordVerification 在候选更新失败时回滚审计写入，保持事务原子性', async () => {
+    const { service, knowledgeStore, discoveryStore } = buildHarness();
+    knowledgeStore.insert(buildSnapshot(SNAPSHOT_ID, BASE_DIGESTS));
+    const report = await service.analyzePullRequests(REPO, { pullNumbers: [12] });
+    const claimId = report.candidates[0]!.claims[0]!.id;
+
+    const originalUpsert = discoveryStore.upsert.bind(discoveryStore);
+    discoveryStore.upsert = () => {
+      throw new Error('simulated disk error');
+    };
+    await expect(
+      service.recordVerification(REPO, claimId, {
+        kind: 'human',
+        note: '应当回滚',
+        decision: 'approve',
+      }),
+    ).rejects.toThrow('simulated disk error');
+    discoveryStore.upsert = originalUpsert;
+
+    expect(discoveryStore.listVerifications(FULL_REPO, claimId)).toEqual([]);
   });
 
   it('重新分析保留已录入的核验证据，不会把发布状态打回原点', async () => {
@@ -493,5 +648,40 @@ describe('AC-09 过期传播', () => {
     await expect(
       service.analyzePullRequests(REPO, { snapshotId: `snap_${'f'.repeat(32)}` }),
     ).rejects.toMatchObject({ code: 'snapshot_not_found', httpStatus: 404 });
+  });
+
+  it('超过 100 个候选时 refreshStaleness 仍全量扫描，不静默漏标', async () => {
+    const { service, knowledgeStore, discoveryStore } = buildHarness();
+    knowledgeStore.insert(buildSnapshot(SNAPSHOT_ID, BASE_DIGESTS));
+    const report = await service.analyzePullRequests(REPO, { pullNumbers: [12] });
+    const template = report.candidates[0]!;
+    const templateClaim = template.claims[0]!;
+
+    // 写入 105 个不同 PR 候选，超过普通列表 100 条上限。
+    for (let index = 1; index <= 105; index += 1) {
+      const pullNumber = 200 + index;
+      const hex = index.toString(16).padStart(16, '0');
+      const candidateId = `prc_${hex}`;
+      const claimId = `claim_${hex}`;
+      discoveryStore.upsert({
+        ...template,
+        id: candidateId,
+        pullNumber,
+        htmlUrl: `https://github.com/frontLikeDog/livenotes/pull/${pullNumber}`,
+        claims: [{ ...templateClaim, id: claimId, candidateId, pullNumber }],
+      });
+    }
+
+    knowledgeStore.insert(
+      buildSnapshot(NEXT_SNAPSHOT_ID, {
+        ...BASE_DIGESTS,
+        'libs/features/notes/src/sync-panel.tsx': digest('sync panel v2'),
+      }),
+    );
+
+    const result = await service.refreshStaleness(REPO);
+    expect(result.candidatesScanned).toBe(106);
+    expect(result.candidatesChanged).toBe(106);
+    expect(result.claimsMarkedStale).toHaveLength(106);
   });
 });
