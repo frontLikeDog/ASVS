@@ -218,6 +218,7 @@ describe('GitHubAppReadOnlyClient · 只读策略与安全边界', () => {
 
     const readme = await client.getFileContent(REPO, 'README.md');
     expect(readme?.content).toBe('# LiveNotes');
+    expect(readme?.contentBase64).toBe(Buffer.from('# LiveNotes').toString('base64'));
 
     const missing = await client.getFileContent(REPO, 'DOES_NOT_EXIST.md');
     expect(missing).toBeNull();
@@ -455,5 +456,46 @@ describe('GitHubAppReadOnlyClient · 只读策略与安全边界', () => {
       expect(apiErr.code).toBe('github_auth_error');
       expect(apiErr.message).not.toContain('ghs_shouldNeverLeak123456');
     }
+  });
+
+  it('保留非 UTF-8 文件的原始 base64 字节供二进制检测使用', async () => {
+    const rawBinary = Buffer.from([0xff, 0xfe, 0x80, 0x81, 0x41, 0x42]);
+    const expectedBase64 = rawBinary.toString('base64');
+
+    const fakeFetch: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.endsWith('/access_tokens')) {
+        return jsonResponse(
+          {
+            token: 'ghs_readonlyTokenExample123456',
+            expires_at: '2026-11-27T13:00:00.000Z',
+            permissions: { contents: 'read', metadata: 'read' },
+          },
+          201,
+        );
+      }
+      if (url.includes('/repos/frontLikeDog/livenotes/contents/raw.bin')) {
+        return jsonResponse({
+          type: 'file',
+          path: 'raw.bin',
+          sha: 'a'.repeat(40),
+          size: rawBinary.byteLength,
+          encoding: 'base64',
+          content: `${expectedBase64.slice(0, 4)}\n${expectedBase64.slice(4)}\n`,
+        });
+      }
+      return jsonResponse({ message: 'Not Found' }, 404);
+    };
+
+    const client = new GitHubAppReadOnlyClient({
+      appId: '5947613',
+      installationId: '186376455',
+      privateKeyPem: TEST_KEYS.privateKey,
+      fetchImpl: fakeFetch,
+      now: () => Date.parse('2026-11-27T12:10:00.000Z'),
+    });
+
+    const file = await client.getFileContent(REPO, 'raw.bin');
+    expect(file?.contentBase64).toBe(expectedBase64);
   });
 });

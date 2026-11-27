@@ -1,11 +1,15 @@
 // @vitest-environment node
-import { createHash } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { DatabaseSync } from 'node:sqlite';
 import type { GitHubConnectionStatus, GitHubRepoRef, KnowledgeSnapshotV1 } from '@asvs/domain';
 import type { GitHubReadOnlyPort, GitHubTreeEntry } from '@asvs/ports';
 import { openDatabase } from '../db/database';
 import { SqliteKnowledgeSnapshotStore } from '../db/knowledge-store';
+import { GitHubAppReadOnlyClient } from '../github/github-app-client';
 import { GitHubKnowledgeIndexer } from './indexer';
 import { DEFAULT_KNOWLEDGE_INDEX_LIMITS } from './policy';
 
@@ -292,6 +296,168 @@ describe('增量索引 · 冷扫描', () => {
     expect(snapshot.skipped).toEqual(
       expect.arrayContaining([expect.objectContaining({ path: 'liar.md', reason: 'too_large' })]),
     );
+  });
+
+  it('经 GitHubAppReadOnlyClient 端到端拦截不含 NUL 的非 UTF-8 二进制文件，且热扫描复用跳过结果', async () => {
+    const keys = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    });
+    const rawInvalidBytes = Buffer.from([0xff, 0xfe, 0x80, 0x81, 0x41, 0x42]);
+    const invalidBlobSha = createHash('sha1')
+      .update(Buffer.concat([Buffer.from(`blob ${rawInvalidBytes.byteLength}\0`), rawInvalidBytes]))
+      .digest('hex');
+    const readmeText = '# Notes\n';
+    const readmeBlobSha = blobSha(readmeText);
+    let contentReads = 0;
+
+    const fakeFetch: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.endsWith('/access_tokens')) {
+        return new Response(
+          JSON.stringify({
+            token: 'ghs_readonlyTokenExample123456',
+            expires_at: '2026-11-27T13:00:00.000Z',
+            permissions: { contents: 'read', metadata: 'read' },
+          }),
+          { status: 201, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (url.endsWith('/repos/frontLikeDog/livenotes')) {
+        return new Response(
+          JSON.stringify({
+            id: 1,
+            owner: { login: 'frontLikeDog' },
+            name: 'livenotes',
+            full_name: 'frontLikeDog/livenotes',
+            description: null,
+            private: true,
+            default_branch: 'main',
+            html_url: 'https://github.com/frontLikeDog/livenotes',
+            pushed_at: null,
+            updated_at: null,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (url.includes('/commits/')) {
+        return new Response(
+          JSON.stringify({ sha: COMMIT_1, commit: { tree: { sha: COMMIT_1 } } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (url.includes('/git/trees/')) {
+        return new Response(
+          JSON.stringify({
+            sha: COMMIT_1,
+            truncated: false,
+            tree: [
+              { path: 'README.md', type: 'blob', sha: readmeBlobSha, size: Buffer.byteLength(readmeText) },
+              { path: 'assets/raw.dat', type: 'blob', sha: invalidBlobSha, size: rawInvalidBytes.byteLength },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (url.includes('/contents/README.md')) {
+        contentReads += 1;
+        return new Response(
+          JSON.stringify({
+            type: 'file',
+            path: 'README.md',
+            sha: readmeBlobSha,
+            size: Buffer.byteLength(readmeText),
+            encoding: 'base64',
+            content: Buffer.from(readmeText, 'utf8').toString('base64'),
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (url.includes('/contents/assets/raw.dat')) {
+        contentReads += 1;
+        return new Response(
+          JSON.stringify({
+            type: 'file',
+            path: 'assets/raw.dat',
+            sha: invalidBlobSha,
+            size: rawInvalidBytes.byteLength,
+            encoding: 'base64',
+            content: rawInvalidBytes.toString('base64'),
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 });
+    };
+
+    const client = new GitHubAppReadOnlyClient({
+      appId: '5947613',
+      installationId: '186376455',
+      privateKeyPem: keys.privateKey,
+      fetchImpl: fakeFetch,
+      now: () => Date.parse('2026-11-27T12:10:00.000Z'),
+    });
+    const { indexer } = createIndexer(client);
+
+    const cold = await indexer.indexRepository(REPO);
+    expect(cold.files.map((file) => file.path)).toEqual(['README.md']);
+    expect(Object.keys(cold.sourceDigests)).toEqual(['README.md']);
+    expect(cold.skipped).toEqual([
+      expect.objectContaining({ path: 'assets/raw.dat', reason: 'binary', blobSha: invalidBlobSha }),
+    ]);
+    expect(contentReads).toBe(2);
+
+    const hot = await indexer.indexRepository(REPO);
+    expect(hot.stats.fetchedFiles).toBe(0);
+    expect(hot.stats.skippedFiles).toBe(1);
+    expect(contentReads).toBe(2);
+  });
+
+  it('docs/08 §3：绝不执行目标仓库 package.json 中的 preinstall / postinstall 脚本', async () => {
+    const sandboxDir = mkdtempSync(path.join(tmpdir(), 'asvs-4b-postinstall-'));
+    const markerPath = path.join(sandboxDir, 'pwned.marker');
+    try {
+      const escapedMarker = markerPath.replace(/\\/g, '\\\\');
+      const maliciousPackageJson = JSON.stringify(
+        {
+          name: 'malicious-fixture',
+          version: '1.0.0',
+          scripts: {
+            preinstall: `node -e "require('fs').writeFileSync('${escapedMarker}', 'pre')"`,
+            postinstall: `node -e "require('fs').writeFileSync('${escapedMarker}', 'post')"`,
+          },
+        },
+        null,
+        2,
+      );
+      const files: FakeFile[] = [
+        { path: 'package.json', content: maliciousPackageJson },
+        { path: 'README.md', content: '# Fixture\n' },
+      ];
+      const github = createFakeGitHub({ files, commitSha: COMMIT_1 });
+      const { indexer } = createIndexer(github);
+
+      const cold = await indexer.indexRepository(REPO);
+      expect(existsSync(markerPath)).toBe(false);
+
+      const pkgFile = cold.files.find((file) => file.path === 'package.json');
+      expect(pkgFile).toMatchObject({
+        path: 'package.json',
+        language: 'json',
+        entrypoints: [{ path: 'package.json', kind: 'manifest', rank: 1 }],
+      });
+      expect(cold.sourceDigests['package.json']).toBe(
+        createHash('sha256').update(Buffer.from(maliciousPackageJson, 'utf8')).digest('hex'),
+      );
+
+      const hot = await indexer.indexRepository(REPO);
+      expect(existsSync(markerPath)).toBe(false);
+      expect(hot.stats.fetchedFiles).toBe(0);
+      expect(hot.stats.reusedFiles).toBe(files.length);
+    } finally {
+      rmSync(sandboxDir, { recursive: true, force: true });
+    }
   });
 });
 

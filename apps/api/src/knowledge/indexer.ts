@@ -281,7 +281,7 @@ export class GitHubKnowledgeIndexer implements KnowledgeIndexPort {
         return { file: null, skip: read.skip } as const;
       }
       const extracted = extractFile(entry.path, read.content);
-      sourceDigests[entry.path] = sha256Hex(read.content);
+      sourceDigests[entry.path] = sha256Hex(read.rawBytes);
       return {
         file: {
           path: entry.path,
@@ -352,7 +352,10 @@ export class GitHubKnowledgeIndexer implements KnowledgeIndexPort {
     repo: GitHubRepoRef,
     commitSha: string,
     entry: TreeCandidate,
-  ): Promise<{ action: 'index'; content: string } | { action: 'skip'; skip: KnowledgeSkipRecord }> {
+  ): Promise<
+    | { action: 'index'; content: string; rawBytes: Uint8Array }
+    | { action: 'skip'; skip: KnowledgeSkipRecord }
+  > {
     const file = await this.#github.getFileContent(repo, entry.path, commitSha);
     if (!file) {
       throw new GitHubApiError({
@@ -362,22 +365,37 @@ export class GitHubKnowledgeIndexer implements KnowledgeIndexPort {
       });
     }
 
-    const decodedBytes = Buffer.byteLength(file.content, 'utf8');
-    if (decodedBytes > this.#limits.maxFileBytes) {
+    const rawBytes =
+      file.contentBase64 !== undefined
+        ? Buffer.from(file.contentBase64, 'base64')
+        : Buffer.from(file.content, 'utf8');
+
+    if (rawBytes.byteLength > this.#limits.maxFileBytes) {
       return {
         action: 'skip',
-        skip: { path: entry.path, reason: 'too_large', byteSize: decodedBytes, blobSha: entry.sha },
+        skip: {
+          path: entry.path,
+          reason: 'too_large',
+          byteSize: rawBytes.byteLength,
+          blobSha: entry.sha,
+        },
       };
     }
 
-    const sample = Buffer.from(file.content.slice(0, this.#limits.sniffBytes), 'utf8');
-    if (looksBinary(new Uint8Array(sample))) {
+    if (looksBinary(rawBytes, this.#limits.sniffBytes)) {
       return {
         action: 'skip',
-        skip: { path: entry.path, reason: 'binary', byteSize: file.size, blobSha: entry.sha },
+        skip: {
+          path: entry.path,
+          reason: 'binary',
+          byteSize: rawBytes.byteLength,
+          blobSha: entry.sha,
+        },
       };
     }
 
-    return { action: 'index', content: file.content };
+    const content =
+      file.contentBase64 !== undefined ? rawBytes.toString('utf8') : file.content;
+    return { action: 'index', content, rawBytes };
   }
 }

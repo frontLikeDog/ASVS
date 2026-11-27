@@ -181,6 +181,8 @@ export const githubFileContentSchema = z.object({
   size: z.number().int().min(0),
   encoding: z.literal('utf-8'),
   content: z.string(),
+  /** Raw base64 bytes from GitHub, preserved for binary sniffing and exact SHA256 digesting. */
+  contentBase64: z.string().optional(),
 });
 export type GitHubFileContent = z.infer<typeof githubFileContentSchema>;
 

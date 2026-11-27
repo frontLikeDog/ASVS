@@ -112,7 +112,11 @@ export function isSafeRepositoryPath(filePath: string): boolean {
   return segments.every((seg) => seg.length > 0 && seg !== '.' && seg !== '..');
 }
 
-export function evaluateRepositoryPath(filePath: string, byteSize: number, limits = DEFAULT_KNOWLEDGE_INDEX_LIMITS): PathPolicyDecision {
+export function evaluateRepositoryPath(
+  filePath: string,
+  byteSize: number,
+  limits = DEFAULT_KNOWLEDGE_INDEX_LIMITS,
+): PathPolicyDecision {
   if (!isSafeRepositoryPath(filePath)) {
     return { action: 'skip', reason: 'invalid_path' };
   }
@@ -142,23 +146,23 @@ export function evaluateRepositoryPath(filePath: string, byteSize: number, limit
  * and invalid UTF-8 are all signals that the file is not text. Kept separate
  * from the path policy because it needs the downloaded bytes.
  */
-export function looksBinary(sample: Uint8Array): boolean {
+export function looksBinary(
+  sample: Uint8Array,
+  sniffBytes = DEFAULT_KNOWLEDGE_INDEX_LIMITS.sniffBytes,
+): boolean {
   if (sample.length === 0) return false;
-  const probe = sample.subarray(0, DEFAULT_KNOWLEDGE_INDEX_LIMITS.sniffBytes);
+  const probe = sample.subarray(0, sniffBytes);
 
   let controlChars = 0;
   let decoded: string;
   try {
-    decoded = new TextDecoder('utf-8', { fatal: true }).decode(probe);
+    // Stream when probing a prefix so a valid multi-byte UTF-8 sequence split
+    // across the sniffBytes boundary is buffered instead of throwing.
+    decoded = new TextDecoder('utf-8', { fatal: true }).decode(probe, {
+      stream: sample.length > probe.length,
+    });
   } catch {
-    // A truncated multi-byte sequence at the sample boundary is expected; only
-    // fail when the sample as a whole cannot be decoded as UTF-8.
-    try {
-      decoded = new TextDecoder('utf-8', { fatal: false }).decode(probe);
-      if (decoded.includes('�')) return true;
-    } catch {
-      return true;
-    }
+    return true;
   }
 
   for (const char of decoded) {
@@ -168,4 +172,3 @@ export function looksBinary(sample: Uint8Array): boolean {
   }
   return controlChars / Math.max(1, decoded.length) > 0.02;
 }
-

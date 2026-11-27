@@ -716,13 +716,16 @@ export class GitHubAppReadOnlyClient implements GitHubReadOnlyPort {
       });
     }
 
-    const content = Buffer.from(raw.content.replace(/\n/g, ''), 'base64').toString('utf8');
+    const cleanedBase64 = raw.content.replace(/\s+/g, '');
+    const rawBytes = Buffer.from(cleanedBase64, 'base64');
+    const content = rawBytes.toString('utf8');
     return githubFileContentSchema.parse({
       path: raw.path ?? filePath,
       sha: raw.sha,
       size,
       encoding: 'utf-8',
       content,
+      contentBase64: cleanedBase64,
     });
   }
 
