@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   captureFailureV1Schema,
   captureReceiptV1Schema,
@@ -608,8 +609,11 @@ function finishFailure({
   };
 }
 
-async function main(): Promise<void> {
-  const options = parseArgs(process.argv.slice(2));
+/**
+ * CLI entry for `pnpm capture:demo`; never executed on import.
+ */
+export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
+  const options = parseArgs(argv);
   const parsed = loadApprovedDemoPlan(options.plan);
   const log = (line: string) => console.log(line);
 
@@ -620,14 +624,28 @@ async function main(): Promise<void> {
   });
   try {
     const result = await captureOnce({ parsed, outDir: options.outDir, log });
-    process.exitCode = result.passed ? 0 : 1;
+    return result.passed ? 0 : 1;
   } finally {
     await server.stop();
   }
 }
 
-main().catch((error: unknown) => {
-  console.error('\n录屏无法开始：');
-  console.error(errorMessage(error));
-  process.exitCode = 1;
-});
+/**
+ * Only run when this module *is* the entry point. `capture-job.ts` imports
+ * `captureOnce` from here, and a module import must never start a browser or
+ * read `process.argv`.
+ */
+const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : '';
+const modulePath = path.resolve(fileURLToPath(import.meta.url));
+if (invokedPath && modulePath === invokedPath) {
+  main().then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (error: unknown) => {
+      console.error('\n录屏无法开始：');
+      console.error(errorMessage(error));
+      process.exitCode = 1;
+    },
+  );
+}

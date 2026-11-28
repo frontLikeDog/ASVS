@@ -402,18 +402,9 @@ export function storyboardDurationMs(storyboard: StoryboardV1): number {
   return Math.round((totalStoryboardFrames(storyboard) / storyboard.fps) * 1000);
 }
 
-function normalizeForStableJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeForStableJson);
-  if (value && typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([, entry]) => entry !== undefined)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-    return Object.fromEntries(entries.map(([key, entry]) => [key, normalizeForStableJson(entry)]));
-  }
-  return value;
-}
-
-/** Deterministic JSON used for input/scene digests. */
-export function stableStringify(value: unknown): string {
-  return JSON.stringify(normalizeForStableJson(value));
-}
+/**
+ * Deterministic JSON used for input/scene digests. Defined in `canonical.ts`
+ * and re-exported here because every call site knows this name; the bytes are
+ * identical to `stableJson`.
+ */
+export { stableStringify } from './canonical';

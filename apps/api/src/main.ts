@@ -15,6 +15,8 @@ const { app } = await buildApp({
   logger: { level: config.logLevel },
   github,
   artifactDir: config.artifactDir,
+  captureConfig: config.capture,
+  captureWorkerScript: config.captureWorkerScript,
   maxAttempts: config.workerMaxAttempts,
   leaseTtlMs: config.leaseTtlMs,
   schedulerIntervalMs: config.schedulerIntervalMs,

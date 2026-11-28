@@ -4,6 +4,8 @@ import { z } from 'zod';
 import {
   MAX_SPEECH_SPEED,
   MIN_SPEECH_SPEED,
+  demoPlanTemplateIdSchema,
+  demoStepSchema,
   narrationTimingPolicySchema,
   orchestrationRunStatusSchema,
 } from '@asvs/domain';
@@ -16,6 +18,50 @@ const runLookupSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional(),
   status: orchestrationRunStatusSchema.optional(),
 });
+
+const captureRunOptionsSchema = z
+  .object({
+    enabled: z.boolean(),
+    template: demoPlanTemplateIdSchema.optional(),
+    /** Must be an http(s) URL; the server checks it against its allowlist. */
+    baseUrl: z.string().trim().url().max(500).optional(),
+    resetStrategy: z.enum(['fixture', 'none']).optional(),
+    viewport: z
+      .object({ width: z.number().int().min(320).max(3840), height: z.number().int().min(180).max(2160) })
+      .optional(),
+    capture: z
+      .object({
+        width: z.number().int().min(320).max(3840),
+        height: z.number().int().min(180).max(2160),
+        fps: z.number().int().min(1).max(60).optional(),
+        clipDurationMs: z.number().int().min(2000).max(60_000).optional(),
+      })
+      .optional(),
+    customSteps: z.array(demoStepSchema).min(1).max(60).optional(),
+  })
+  .strict();
+
+const updateDemoPlanBodySchema = z
+  .object({
+    expectedPlanDigest: z.string().regex(/^[a-f0-9]{64}$/, '需要 64 位小写十六进制 SHA256'),
+    patch: z
+      .object({
+        template: demoPlanTemplateIdSchema.optional(),
+        baseUrl: z.string().trim().url().max(500).optional(),
+        resetStrategy: z.enum(['fixture', 'none']).optional(),
+        customSteps: z.array(demoStepSchema).min(1).max(60).optional(),
+      })
+      .strict(),
+    note: z.string().trim().max(500).optional(),
+  })
+  .strict();
+
+const rejectBodySchema = z
+  .object({
+    approvalId: z.string().trim().min(1).max(200),
+    reason: z.string().trim().max(500).optional(),
+  })
+  .strict();
 
 const createRunBodySchema = z.object({
   videoId: z.string().trim().min(1).max(200),
@@ -37,6 +83,10 @@ const createRunBodySchema = z.object({
       timingPolicy: narrationTimingPolicySchema.optional(),
     })
     .optional(),
+  // 5C: omitted means no capture (`plan_demo` / `capture_demo` are skipped).
+  // The orchestrator — not this schema — enforces the origin allowlist and the
+  // real_demo requirement, so every caller sees the same structured errors.
+  capture: captureRunOptionsSchema.optional(),
 });
 
 const createExportBodySchema = z.object({
@@ -50,12 +100,17 @@ const exportLookupSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional(),
 });
 
+// `note` and `decidedBy` are audit fields: they land in the approval ledger
+// next to the decision. Gate 2 additionally requires `subjectDigest` — the
+// orchestrator, not this schema, decides whether the gate type needs it.
 const approveBodySchema = z.object({
   approvalId: z.string().trim().min(1).max(200),
   subjectDigest: z
     .string()
     .regex(/^[a-f0-9]{64}$/)
     .optional(),
+  decidedBy: z.string().trim().min(1).max(120).optional(),
+  note: z.string().trim().max(500).optional(),
 });
 
 function errorBody(code: string, message: string, details?: unknown) {
@@ -169,14 +224,82 @@ export function registerOrchestrationRoutes(
   );
 
   /**
+   * Gate 2 rejection. Terminal for the run; the plan must be edited and
+   * re-approved through a fresh run rather than retried blindly.
+   */
+  app.post<{ Params: { workspaceId: string; runId: string } }>(
+    `${base}/runs/:runId/reject`,
+    async (request, reply) => {
+      const body = rejectBodySchema.safeParse(request.body);
+      if (!body.success) {
+        return reply
+          .code(400)
+          .send(errorBody('invalid_request', '拒绝审批需要 approvalId。', body.error.issues));
+      }
+      try {
+        const approval = await service.rejectRun(
+          request.params.workspaceId,
+          request.params.runId,
+          body.data,
+        );
+        return { approval };
+      } catch (error) {
+        return sendOrchestrationError(reply, error);
+      }
+    },
+  );
+
+  /**
+   * Edits the waiting Gate 2 draft. `expectedPlanDigest` is the caller's
+   * optimistic-concurrency token: a stale value is a 409, never a silent
+   * overwrite of somebody else's edit.
+   */
+  app.put<{ Params: { workspaceId: string; runId: string } }>(
+    `${base}/runs/:runId/demo-plan`,
+    async (request, reply) => {
+      const body = updateDemoPlanBodySchema.safeParse(request.body);
+      if (!body.success) {
+        return reply
+          .code(400)
+          .send(
+            errorBody(
+              'invalid_request',
+              '修改演示计划需要 expectedPlanDigest 与 patch。',
+              body.error.issues,
+            ),
+          );
+      }
+      try {
+        const approval = await service.updateDemoPlan(
+          request.params.workspaceId,
+          request.params.runId,
+          body.data,
+        );
+        const detail = await service.getRun(request.params.workspaceId, request.params.runId);
+        return { approval, run: detail?.run ?? null };
+      } catch (error) {
+        return sendOrchestrationError(reply, error);
+      }
+    },
+  );
+
+  /**
    * Artifact download. `storageRef` is re-resolved under the artifact root and
    * traversal is refused; the ETag is the stored SHA256, so a client can
    * verify the bytes it received against the receipt. `.srt` keeps its exact
    * `application/x-subrip; charset=utf-8` type so players and editors open it
    * as subtitles rather than as a generic text download.
+   *
+   * `?inline=1` renders **only PNG capture screenshots** inline (for the Gate 2
+   * evidence panel) and always sends `X-Content-Type-Options: nosniff`, so an
+   * SVG/HTML payload renamed `.png` cannot execute in the page's origin.
    */
   const downloadHandler = async (
-    request: { params: { workspaceId: string; artifactId: string }; headers: Record<string, unknown> },
+    request: {
+      params: { workspaceId: string; artifactId: string };
+      headers: Record<string, unknown>;
+      query?: unknown;
+    },
     reply: FastifyReply,
   ) => {
     const resolved = await service.resolveArtifactFile(
@@ -193,17 +316,32 @@ export function registerOrchestrationRoutes(
     if (request.headers['if-none-match'] === etag) {
       return reply.code(304).send();
     }
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const inlineRequested = query.inline === '1' || query.inline === 'true' || query.inline === 1;
+    const isPng =
+      artifact.kind === 'capture_screenshot' &&
+      artifact.mimeType === 'image/png' &&
+      /\.png$/i.test(artifact.fileName);
+    const inline = inlineRequested && isPng;
     const mimeType =
       artifact.kind === 'subtitles_srt'
         ? 'application/x-subrip; charset=utf-8'
-        : artifact.mimeType;
+        : isPng
+          ? 'image/png'
+          : artifact.mimeType;
     reply.header('etag', etag);
     reply.header('x-content-sha256', artifact.sha256);
     reply.header('content-type', mimeType);
     reply.header('content-length', String(fileSize(file)));
+    // Applies to every artifact, inline or not: a browser must never sniff a
+    // JSON/PNG response into something executable.
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('cache-control', 'private, max-age=0, must-revalidate');
     reply.header(
       'content-disposition',
-      `attachment; filename="${artifact.fileName.replace(/["\\]/g, '_')}"`,
+      inline
+        ? `inline; filename="${artifact.fileName.replace(/["\\]/g, '_')}"`
+        : `attachment; filename="${artifact.fileName.replace(/["\\]/g, '_')}"`,
     );
     return reply.send(createReadStream(file));
   };

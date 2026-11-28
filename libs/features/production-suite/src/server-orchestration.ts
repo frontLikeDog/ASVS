@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  DemoPlanTemplateId,
   OrchestrationEventV1,
   OrchestrationJobV1,
   OrchestrationRunDetailV1,
@@ -33,7 +34,7 @@ export interface ServerStepView {
   errorMessage?: string;
 }
 
-/** A UI row per DAG step — always all seven, even before the server reports them. */
+/** A UI row per DAG step — always all nine, even before the server reports them. */
 export function buildServerStepViews(
   run: OrchestrationRunV1 | null,
   jobs: OrchestrationJobV1[] = [],
@@ -41,6 +42,8 @@ export function buildServerStepViews(
   const definitions: Array<{ stepKey: OrchestrationStepKey; name: string; description: string }> = [
     { stepKey: 'freeze_input', name: '冻结渲染输入', description: '冻结 RenderInputV1 并计算 digest' },
     { stepKey: 'verify_claims', name: '核验功能声明', description: '按 4D 规则阻断未核验/过期/驳回的 Claim' },
+    { stepKey: 'plan_demo', name: '生成演示计划', description: '按模板生成 DemoPlanDraftV1 与 digest，挂起 Gate 2 审批' },
+    { stepKey: 'capture_demo', name: '受控真实录屏', description: '已批准的 DemoPlan 驱动 browser-worker；断言全过才回填' },
     { stepKey: 'prepare_media', name: '准备真实素材', description: '校验录屏文件与 SHA256，缺失时明确标记占位' },
     { stepKey: 'synthesize_voice', name: '合成旁白音频', description: '按镜头合成 48kHz 旁白；内容哈希命中缓存时不重复计费' },
     { stepKey: 'generate_subtitles', name: '生成并校验 SRT', description: '按冻结帧时间轴生成 SRT，并独立校验序号/单调/无重叠' },
@@ -67,6 +70,16 @@ export function checkpointLabel(phase: string): string {
   switch (phase) {
     case 'step_done':
       return '步骤完成';
+    case 'plan_ready':
+      return '计划已生成';
+    case 'plan_verified':
+      return '计划摘要已复检';
+    case 'capture_started':
+      return '浏览器已启动';
+    case 'capture_recorded':
+      return '录屏已录制';
+    case 'clip_transcoded':
+      return '片段已转码';
     case 'narration_ready':
       return '旁白已就绪';
     case 'subtitles_ready':
@@ -82,54 +95,15 @@ export function checkpointLabel(phase: string): string {
   }
 }
 
-export function formatArtifactSize(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-export function formatDurationMs(ms: number): string {
-  const totalSeconds = Math.max(0, ms) / 1000;
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = Math.round(totalSeconds % 60);
-  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-}
-
-export function shortSha(sha: string, length = 12): string {
-  return sha.length > length ? `${sha.slice(0, length)}…` : sha;
-}
-
-/**
- * Downloads an artifact and verifies its bytes against the registered SHA256
- * before the browser saves it. A mismatch is treated as a failure, never as a
- * warning: a tampered MP4 must not reach the user's disk silently.
- */
-export async function downloadVerifiedArtifact(
-  url: string,
-  artifact: { fileName: string; mimeType: string; sha256: string },
-): Promise<void> {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`下载失败（HTTP ${response.status}）`);
-  const buffer = await response.arrayBuffer();
-  const digest = await crypto.subtle.digest('SHA-256', buffer);
-  const hex = Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('');
-  if (hex !== artifact.sha256) {
-    throw new Error(
-      `下载内容 SHA256 不匹配（${hex.slice(0, 12)}… vs ${artifact.sha256.slice(0, 12)}…）`,
-    );
-  }
-  const objectUrl = URL.createObjectURL(new Blob([buffer], { type: artifact.mimeType }));
-  const anchor = document.createElement('a');
-  anchor.href = objectUrl;
-  anchor.download = artifact.fileName;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1200);
-}
+// Formatting and verified downloads live in `orchestration-format.ts` so the
+// lazily loaded Gate 2 panel can share them without pulling this hook module
+// (and React state) into its chunk. Re-exported here for existing callers.
+export {
+  downloadVerifiedArtifact,
+  formatArtifactSize,
+  formatDurationMs,
+  shortSha,
+} from './orchestration-format';
 
 interface ServerOrchestrationState {
   availability: ServerModeAvailability;
@@ -164,6 +138,30 @@ export interface SpeechHealthView {
   license: string;
 }
 
+/** 5C capture options surfaced on the production page (Gate 2 input form). */
+export interface CaptureOptions {
+  enabled: boolean;
+  template: DemoPlanTemplateId;
+  baseUrl: string;
+  resetStrategy: 'fixture' | 'none';
+}
+
+export const DEFAULT_CAPTURE_OPTIONS: CaptureOptions = {
+  enabled: false,
+  template: 'web_studio_knowledge_claim',
+  baseUrl: '',
+  resetStrategy: 'fixture',
+};
+
+/** Server-reported capture capability; absent means the server predates 5C. */
+export interface CaptureHealthView {
+  enabled: boolean;
+  allowedOrigins: string[];
+  defaultBaseUrl: string;
+  allowAutoServe: boolean;
+  policyVersion: string;
+}
+
 export interface ServerOrchestrationApi extends ServerOrchestrationState {
   steps: ServerStepView[];
   events: OrchestrationEventV1[];
@@ -171,10 +169,24 @@ export interface ServerOrchestrationApi extends ServerOrchestrationState {
   speech: SpeechHealthView | null;
   narration: NarrationOptions;
   setNarration: (options: NarrationOptions) => void;
+  capture: CaptureOptions;
+  setCapture: (options: CaptureOptions) => void;
+  captureHealth: CaptureHealthView | null;
   start: () => Promise<void>;
   cancel: () => Promise<void>;
   retry: () => Promise<void>;
-  approve: () => Promise<void>;
+  /**
+   * Gate 2 approve. The digest is required: it is what the reviewer saw, and
+   * the server refuses anything else (a plan edited mid-review). `note` is
+   * persisted in the approval ledger as `decisionNote`.
+   */
+  approve: (note?: string) => Promise<void>;
+  reject: (reason?: string) => Promise<void>;
+  editDemoPlan: (patch: {
+    template?: DemoPlanTemplateId;
+    baseUrl?: string;
+    resetStrategy?: 'fixture' | 'none';
+  }) => Promise<void>;
   refresh: () => Promise<void>;
 }
 
@@ -195,6 +207,8 @@ export function useServerOrchestration(videoId: string): ServerOrchestrationApi 
   const [busy, setBusy] = useState(false);
   const [speech, setSpeech] = useState<SpeechHealthView | null>(null);
   const [narration, setNarration] = useState<NarrationOptions>(DEFAULT_NARRATION_OPTIONS);
+  const [capture, setCapture] = useState<CaptureOptions>(DEFAULT_CAPTURE_OPTIONS);
+  const [captureHealth, setCaptureHealth] = useState<CaptureHealthView | null>(null);
   // Keeps the idempotency key stable across a double click.
   const pendingKey = useRef<string | null>(null);
   const mounted = useRef(true);
@@ -226,7 +240,16 @@ export function useServerOrchestration(videoId: string): ServerOrchestrationApi 
         setAvailability('ready');
         void client.getHealth().then(
           (health) => {
-            if (!cancelled) setSpeech(health);
+            if (cancelled) return;
+            setSpeech(health);
+            if (health.capture) {
+              setCaptureHealth(health.capture);
+              // Pre-fill the form with the server's own default so the
+              // reviewer never types an origin the allowlist will refuse.
+              setCapture((current) =>
+                current.baseUrl ? current : { ...current, baseUrl: health.capture!.defaultBaseUrl },
+              );
+            }
           },
           () => undefined,
         );
@@ -295,6 +318,16 @@ export function useServerOrchestration(videoId: string): ServerOrchestrationApi 
           speed: narration.speed,
           timingPolicy: narration.timingPolicy,
         },
+        capture: capture.enabled
+          ? {
+              enabled: true,
+              template: capture.template,
+              ...(capture.baseUrl ? { baseUrl: capture.baseUrl } : {}),
+              resetStrategy: capture.resetStrategy,
+            }
+          : // Explicit `enabled: false` (not an omitted key): the server then
+            // records the two capture steps as skipped instead of guessing.
+            { enabled: false },
       });
       pendingKey.current = null;
       if (!mounted.current) return;
@@ -302,7 +335,7 @@ export function useServerOrchestration(videoId: string): ServerOrchestrationApi 
       const loaded = await client.getRun(workspaceId, created.run.id);
       if (mounted.current) setDetail(loaded);
     });
-  }, [guarded, syncConfig.baseUrl, workspaceId, videoId, narration]);
+  }, [guarded, syncConfig.baseUrl, workspaceId, videoId, narration, capture]);
 
   const cancel = useCallback(async () => {
     if (!run) return;
@@ -326,15 +359,78 @@ export function useServerOrchestration(videoId: string): ServerOrchestrationApi 
     });
   }, [guarded, run, syncConfig.baseUrl, workspaceId]);
 
-  const approve = useCallback(async () => {
-    if (!run?.approval) return;
-    await guarded(async () => {
-      const client = await getOrchestrationClient(syncConfig.baseUrl);
-      await client.approveRun(workspaceId, run.id, { approvalId: run.approval!.approvalId });
-      if (!mounted.current) return;
-      setDetail(await client.getRun(workspaceId, run.id));
-    });
-  }, [guarded, run, syncConfig.baseUrl, workspaceId]);
+  const approve = useCallback(
+    async (note?: string) => {
+      if (!run?.approval) return;
+      // Gate 2 binds the plan digest the reviewer saw. A generic gate has no
+      // plan, so there is nothing to prove beyond the approval id.
+      const subjectDigest = run.demoPlan?.planDigest ?? run.approval.subjectDigest ?? '';
+      const approvalId = run.approval.approvalId;
+      await guarded(async () => {
+        const client = await getOrchestrationClient(syncConfig.baseUrl);
+        await client.approveRun(workspaceId, run.id, {
+          approvalId,
+          subjectDigest,
+          ...(note?.trim() ? { note: note.trim() } : {}),
+        });
+        if (!mounted.current) return;
+        // The run resumes on the server; take its own row back so polling
+        // continues from the real status instead of a guessed one.
+        const loaded = await client.getRun(workspaceId, run.id);
+        if (!mounted.current) return;
+        setDetail(loaded);
+        if (loaded) setRun(loaded.run);
+      });
+    },
+    [guarded, run, syncConfig.baseUrl, workspaceId],
+  );
+
+  const reject = useCallback(
+    async (reason?: string) => {
+      if (!run?.approval) return;
+      await guarded(async () => {
+        const client = await getOrchestrationClient(syncConfig.baseUrl);
+        await client.rejectRun(workspaceId, run.id, {
+          approvalId: run.approval!.approvalId,
+          ...(reason ? { reason } : {}),
+        });
+        if (!mounted.current) return;
+        setDetail(await client.getRun(workspaceId, run.id));
+      });
+    },
+    [guarded, run, syncConfig.baseUrl, workspaceId],
+  );
+
+  const editDemoPlan = useCallback(
+    async (patch: {
+      template?: DemoPlanTemplateId;
+      baseUrl?: string;
+      resetStrategy?: 'fixture' | 'none';
+    }) => {
+      if (!run?.demoPlan) return;
+      await guarded(async () => {
+        const client = await getOrchestrationClient(syncConfig.baseUrl);
+        await client.updateDemoPlan(workspaceId, run.id, {
+          patch,
+          expectedPlanDigest: run.demoPlan!.planDigest,
+        });
+        if (!mounted.current) return;
+        // The server issued a new approvalId + digest; refetch so the panel
+        // never displays the superseded plan next to the new one.
+        const loaded = await client.getRun(workspaceId, run.id);
+        if (!mounted.current) return;
+        setDetail(loaded);
+        if (loaded) setRun(loaded.run);
+        setCapture((current) => ({
+          ...current,
+          ...(patch.template ? { template: patch.template } : {}),
+          ...(patch.baseUrl ? { baseUrl: patch.baseUrl } : {}),
+          ...(patch.resetStrategy ? { resetStrategy: patch.resetStrategy } : {}),
+        }));
+      });
+    },
+    [guarded, run, syncConfig.baseUrl, workspaceId],
+  );
 
   const steps = useMemo(() => buildServerStepViews(run, detail?.jobs ?? []), [run, detail]);
   const events = useMemo(() => detail?.events ?? [], [detail]);
@@ -352,10 +448,15 @@ export function useServerOrchestration(videoId: string): ServerOrchestrationApi 
     speech,
     narration,
     setNarration,
+    capture,
+    setCapture,
+    captureHealth,
     start,
     cancel,
     retry,
     approve,
+    reject,
+    editDemoPlan,
     refresh,
   };
 }

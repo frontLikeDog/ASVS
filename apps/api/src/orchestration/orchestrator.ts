@@ -1,5 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -16,6 +22,7 @@ import {
   canTransitionRun,
   evaluateClaimGate,
   isRealCaptureAsset,
+  isRetryableCaptureCode,
   orchestrationStepDefinition,
   parseAndValidateSrt,
   renderJobDigest,
@@ -24,11 +31,24 @@ import {
   reconcileStoryboardWithNarration,
   speechLanguageSchema,
   speechVoiceProfileSchema,
+  captureJobDigest,
+  computeDemoPlanDigest,
+  withDemoPlanApproval,
   stableJson,
   storyboardDurationMs,
   totalStoryboardFrames,
+  DEMO_PLAN_TEMPLATE_IDS,
+  captureJobInputV1Schema,
+  captureReceiptV1Schema,
   type Asset,
+  type CaptureJobInputV1,
+  type CaptureJobResultV1,
+  type CaptureReceiptV1,
   type Claim,
+  type DemoPlanDraftV1,
+  type DemoPlanSummaryV1,
+  type DemoPlanTemplateId,
+  type CaptureFailureSummaryV1,
   type ExportBundleDetailV1,
   type ExportBundleFileV1,
   type NarrationClipV1,
@@ -54,18 +74,32 @@ import {
   type VideoProject,
 } from '@asvs/domain';
 import type {
+  CaptureHealth,
+  CaptureJobExecutionResult,
+  CaptureJobExecutorPort,
   CreateExportBundleInput,
   CreateOrchestrationRunInput,
   CreateOrchestrationRunResult,
   ExportBundleListOptions,
   ListOrchestrationRunsOptions,
   OrchestrationServicePort,
+  RejectGateInput,
   RenderJobExecutionResult,
   RenderJobExecutorPort,
   SpeechHealth,
+  UpdateDemoPlanInput,
 } from '@asvs/ports';
 import type { ExportBundleStore } from '../db/export-bundle-store';
+import { OrchestrationApprovalStore } from '../db/orchestration-approval-store';
 import { SqliteOrchestrationStore } from '../db/orchestration-store';
+import {
+  DEFAULT_CAPTURE_CONFIG,
+  DemoPlannerService,
+  realDemoScenes,
+  type CaptureServiceConfig,
+  type PlannedCapture,
+  type ResolvedCaptureOptions,
+} from './demo-planner-service';
 import type { SpeechService } from '../speech/speech-service';
 import {
   fileExists,
@@ -103,6 +137,16 @@ export interface OrchestratorOptions {
   speech?: SpeechService | null;
   /** Gate-3 bundle persistence; required for `createExportBundle`. */
   exportStore?: ExportBundleStore | null;
+  /**
+   * 5C · capture executor. Omitted means real capture is unavailable and the
+   * `capture_demo` step fails closed (`capture_not_configured`) rather than
+   * pretending a capture happened.
+   */
+  captureExecutor?: CaptureJobExecutorPort | null;
+  /** 5C · server origin allowlist + planner defaults. */
+  captureConfig?: CaptureServiceConfig;
+  /** Test hook: reuse a planner instead of building one from `captureConfig`. */
+  capturePlanner?: DemoPlannerService;
   maxAttempts?: number;
   leaseTtlMs?: number;
   schedulerIntervalMs?: number;
@@ -110,6 +154,22 @@ export interface OrchestratorOptions {
   instanceId?: string;
   now?: () => Date;
   logger?: OrchestratorLogger;
+}
+
+/**
+ * Provenance envelope `capture_demo` writes next to the frozen input: which
+ * approved plan produced the real clip now bound into `input.json`. It is not
+ * part of the render IR (so it never enters the digest), but it must survive
+ * every later rewrite of the file — the run view, the manifest and the
+ * acceptance script all read it back to prove the render used real footage.
+ */
+interface FrozenCaptureProvenance {
+  planId: string;
+  planDigest: string;
+  assetId: string;
+  clipSha256: string;
+  clipDurationMs: number;
+  assertions: { total: number; passed: number };
 }
 
 function newId(prefix: string): string {
@@ -154,6 +214,9 @@ export class Orchestrator implements OrchestrationServicePort {
   private readonly mediaRoot: string;
   private readonly loadWorkspace: (workspaceId: string) => StudioSnapshot | null;
   private readonly executor: RenderJobExecutorPort | null;
+  private readonly captureExecutor: CaptureJobExecutorPort | null;
+  private readonly planner: DemoPlannerService;
+  private readonly approvals: OrchestrationApprovalStore;
   private readonly speech: SpeechService | null;
   private readonly exportStore: ExportBundleStore | null;
   private readonly maxAttempts: number;
@@ -167,6 +230,8 @@ export class Orchestrator implements OrchestrationServicePort {
   private pumping = false;
   private stopped = true;
   private activeRunId: string | null = null;
+  /** Run whose capture subprocess is alive right now (cancel routing). */
+  private activeCaptureRunId: string | null = null;
   private readonly abortRequested = new Set<string>();
 
   constructor(options: OrchestratorOptions) {
@@ -175,6 +240,11 @@ export class Orchestrator implements OrchestrationServicePort {
     this.mediaRoot = path.resolve(options.mediaRoot ?? defaultMediaRoot());
     this.loadWorkspace = options.loadWorkspace;
     this.executor = options.executor ?? null;
+    this.captureExecutor = options.captureExecutor ?? null;
+    this.planner =
+      options.capturePlanner ??
+      new DemoPlannerService({ config: options.captureConfig ?? DEFAULT_CAPTURE_CONFIG });
+    this.approvals = new OrchestrationApprovalStore(options.store.database);
     this.speech = options.speech ?? null;
     this.exportStore = options.exportStore ?? null;
     this.maxAttempts = options.maxAttempts ?? 3;
@@ -246,6 +316,18 @@ export class Orchestrator implements OrchestrationServicePort {
         '未配置 TTS 服务（ASVS_TTS_PROVIDER / ASVS_TTS_API_URL / ASVS_TTS_API_KEY），无法生成旁白音频。请配置后重试，或显式关闭旁白。',
       );
     }
+    // 5C: validate the capture request before any row exists, so a refused
+    // request (`no_real_demo_scenes`, origin not allowed, capture disabled)
+    // leaves no half-created run behind. `enabled: true` never silently skips.
+    const capture = this.planner.validateCreateOptions(video, input.capture);
+    if (capture.enabled && !this.captureExecutor) {
+      throw new OrchestrationHttpError(
+        503,
+        'capture_not_configured',
+        '服务端未接入 browser-worker 录屏执行器；无法执行真实录屏。请显式关闭 capture 选项，或在具备录屏环境时重试。',
+      );
+    }
+    const captureSceneCount = realDemoScenes(video).length;
     const run: OrchestrationRunV1 = {
       schemaVersion: '1',
       id: runId,
@@ -271,6 +353,14 @@ export class Orchestrator implements OrchestrationServicePort {
           timingPolicy: narration.timingPolicy,
           adjustments: 0,
         },
+        // Always present, even when capture is off: the difference between
+        // "not requested" and "skipped" must be visible in the run itself.
+        capture: {
+          enabled: capture.enabled,
+          ...(capture.resolved ? { template: capture.resolved.template } : {}),
+          ...(capture.resolved ? { baseUrl: capture.resolved.baseUrl } : {}),
+          realDemoSceneCount: captureSceneCount,
+        },
       },
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -287,13 +377,20 @@ export class Orchestrator implements OrchestrationServicePort {
       timingPolicy: narration.timingPolicy,
       requestedAt: timestamp,
     } satisfies PersistedNarrationRequest);
+    if (capture.resolved) {
+      writeJsonFile(path.join(runDirFor(this.artifactDir, workspaceId, runId), CAPTURE_REQUEST_FILE), {
+        schemaVersion: '1',
+        ...capture.resolved,
+        requestedAt: timestamp,
+      } satisfies PersistedCaptureRequest);
+    }
 
     const created = this.store.insertRun({
       run,
       jobs: ORCHESTRATION_STEPS.map((step) => ({
         id: newId('orchjob'),
         stepKey: step.stepKey,
-        type: step.executor === 'worker' ? 'render' : 'inline',
+        type: step.executor === 'worker' ? 'render' : step.executor === 'capture' ? 'capture' : 'inline',
         inputDigest: '0'.repeat(64),
         maxAttempts: this.maxAttempts,
         createdAt: timestamp,
@@ -305,10 +402,17 @@ export class Orchestrator implements OrchestrationServicePort {
       // they are recorded as skipped so the DAG view stays honest.
       this.markNarrationStepsSkipped(runId);
     }
+    if (!capture.enabled) {
+      // Same contract for capture: an unrequested capture is recorded as
+      // skipped, never silently absent from the DAG.
+      this.markCaptureStepsSkipped(runId);
+    }
 
     this.appendEvent(runId, null, 'info', 'state_change', `运行已入队 · 视频 ${video.id}`);
     this.pumpSoon();
-    return { run: created.run, created: true };
+    // Return the post-marking row so the caller sees `skipped` immediately
+    // rather than a stale `pending` for a step that will never run.
+    return { run: this.store.getRun(runId) ?? created.run, created: true };
   }
 
   async listRuns(
@@ -362,6 +466,7 @@ export class Orchestrator implements OrchestrationServicePort {
       }
     }
     if (this.activeRunId === runId) this.executor?.abort();
+    if (this.activeCaptureRunId === runId) this.captureExecutor?.abort();
     this.appendEvent(runId, null, 'warn', 'cancel', '运行已被用户取消；活跃渲染进程已终止。');
     return next;
   }
@@ -409,10 +514,128 @@ export class Orchestrator implements OrchestrationServicePort {
     return next;
   }
 
+  /**
+   * Gate 2 approval (docs/06 §3, docs/08 §9 case 7).
+   *
+   * Four checks, all independent:
+   *   1. the approval id names the *current* pending gate;
+   *   2. the caller supplies the digest it reviewed — omitting it is never
+   *      "approve anyway", it is a refusal;
+   *   3. the stored subject digest equals the caller's;
+   *   4. re-canonicalizing the stored draft still yields that digest, so a plan
+   *      edited behind the API's back invalidates itself here (layer 1 of 3).
+   *
+   * The ledger write is conditional on `status = 'pending'`, so two browser
+   * tabs approving at once cannot both win.
+   */
   async approveRun(
     workspaceId: string,
     runId: string,
-    input: { approvalId: string; subjectDigest?: string },
+    input: { approvalId: string; subjectDigest?: string; decidedBy?: string; note?: string },
+  ): Promise<OrchestrationApprovalV1> {
+    const run = this.requireRun(workspaceId, runId);
+    if (run.status !== 'awaiting_approval' || !run.approval) {
+      throw new OrchestrationHttpError(409, 'invalid_transition', '当前运行没有待审批的 Gate。');
+    }
+    if (run.approval.status !== 'pending') {
+      throw new OrchestrationHttpError(
+        409,
+        'approval_already_decided',
+        `当前 Gate 已处于 ${run.approval.status}；不能重复决策。`,
+      );
+    }
+    if (run.approval.approvalId !== input.approvalId) {
+      throw new OrchestrationHttpError(409, 'approval_mismatch', '审批 ID 与当前 Gate 不匹配。');
+    }
+    if (!input.subjectDigest) {
+      throw new OrchestrationHttpError(
+        409,
+        'approval_subject_missing',
+        '审批必须携带 subjectDigest（计划摘要）；请重新载入计划后再批准。',
+      );
+    }
+    if (run.approval.subjectDigest && run.approval.subjectDigest !== input.subjectDigest) {
+      throw new OrchestrationHttpError(
+        409,
+        'approval_subject_mismatch',
+        '审批对象摘要已变化；请基于最新计划重新审批。',
+      );
+    }
+    const isGate2 = run.approval.gateType === 'gate2_demo_capture';
+    if (isGate2) {
+      if (!run.demoPlan) {
+        throw new OrchestrationHttpError(
+          409,
+          'invalid_transition',
+          'Gate 2 审批缺少待审批的演示计划；请重新创建运行。',
+        );
+      }
+      if (run.demoPlan.planDigest !== input.subjectDigest) {
+        throw new OrchestrationHttpError(
+          409,
+          'approval_subject_mismatch',
+          '提交的计划摘要与待审批计划不一致；请刷新后重新审阅。',
+        );
+      }
+      const recomputed = await this.recomputePlanDigest(run.demoPlan.draft);
+      if (recomputed !== input.subjectDigest) {
+        throw new OrchestrationHttpError(
+          409,
+          'approval_subject_mismatch',
+          '服务端重新计算出的计划摘要与提交值不一致：计划在审批期间被修改，旧审批失效。',
+        );
+      }
+      if (run.demoPlan.policyVersion !== this.planner.policyVersion) {
+        throw new OrchestrationHttpError(
+          409,
+          'approval_policy_changed',
+          `审批基于 ${run.demoPlan.policyVersion}，当前策略为 ${this.planner.policyVersion}；请重新生成计划。`,
+        );
+      }
+    }
+    const timestamp = this.now().toISOString();
+    const decidedBy = input.decidedBy?.trim() || 'local';
+    const ledger = this.approvals.markApproved(runId, run.approval.approvalId, {
+      at: timestamp,
+      decidedBy,
+      ...(input.note ? { note: input.note } : {}),
+    });
+    if (!ledger) {
+      throw new OrchestrationHttpError(
+        409,
+        'approval_already_decided',
+        '审批已被其他请求处理；请刷新运行状态。',
+      );
+    }
+    this.store.updateRun({
+      ...run,
+      status: 'running',
+      approval: ledger,
+      updatedAt: timestamp,
+    });
+    this.writeCheckpoint(run, run.approval.stepKey, 'step_done', {
+      approved: true,
+      approvalId: ledger.approvalId,
+      subjectDigest: ledger.subjectDigest ?? null,
+      decidedBy,
+    });
+    this.appendEvent(runId, run.approval.stepKey, 'success', 'approval', 'Gate 已批准，运行继续。', {
+      approvalId: ledger.approvalId,
+      ...(ledger.subjectDigest ? { subjectDigest: ledger.subjectDigest } : {}),
+      decidedBy,
+    });
+    this.pumpSoon();
+    return ledger;
+  }
+
+  /**
+   * Gate 2 rejection. Terminal by design: a rejected plan must be re-planned
+   * (or the run recreated), never approved by editing the row afterwards.
+   */
+  async rejectRun(
+    workspaceId: string,
+    runId: string,
+    input: RejectGateInput,
   ): Promise<OrchestrationApprovalV1> {
     const run = this.requireRun(workspaceId, runId);
     if (run.status !== 'awaiting_approval' || !run.approval) {
@@ -421,32 +644,139 @@ export class Orchestrator implements OrchestrationServicePort {
     if (run.approval.approvalId !== input.approvalId) {
       throw new OrchestrationHttpError(409, 'approval_mismatch', '审批 ID 与当前 Gate 不匹配。');
     }
-    if (
-      run.approval.subjectDigest &&
-      input.subjectDigest &&
-      run.approval.subjectDigest !== input.subjectDigest
-    ) {
+    if (run.approval.status !== 'pending') {
       throw new OrchestrationHttpError(
         409,
-        'approval_subject_mismatch',
-        '审批对象摘要已变化；请基于最新计划重新审批。',
+        'approval_already_decided',
+        `当前 Gate 已处于 ${run.approval.status}；不能重复决策。`,
       );
     }
     const timestamp = this.now().toISOString();
-    const approval: OrchestrationApprovalV1 = {
-      ...run.approval,
-      status: 'approved',
-      approvedAt: timestamp,
+    const ledger = this.approvals.markRejected(runId, run.approval.approvalId, {
+      at: timestamp,
+      decidedBy: 'local',
+      ...(input.reason ? { note: input.reason } : {}),
+    });
+    if (!ledger) {
+      throw new OrchestrationHttpError(
+        409,
+        'approval_already_decided',
+        '审批已被其他请求处理；请刷新运行状态。',
+      );
+    }
+    this.store.updateRun({ ...run, approval: ledger, updatedAt: timestamp });
+    this.appendEvent(
+      runId,
+      run.approval.stepKey,
+      'warn',
+      'approval',
+      `Gate 被拒绝：${input.reason ?? '未填写原因'}`,
+      { approvalId: ledger.approvalId },
+    );
+    this.failRun(
+      run,
+      run.approval.stepKey,
+      'approval_rejected',
+      input.reason
+        ? `演示计划被拒绝：${input.reason}`
+        : '演示计划被拒绝；请修改计划后重新运行。',
+      false,
+    );
+    return ledger;
+  }
+
+  /**
+   * Edits the waiting Gate 2 draft. The edit supersedes the previous approval
+   * and issues a fresh `approvalId` + digest in one transaction, so a decision
+   * taken against the earlier plan can never be reused (docs/08 §9 case 8).
+   */
+  async updateDemoPlan(
+    workspaceId: string,
+    runId: string,
+    input: UpdateDemoPlanInput,
+  ): Promise<OrchestrationApprovalV1> {
+    const run = this.requireRun(workspaceId, runId);
+    if (run.status !== 'awaiting_approval' || !run.demoPlan || !run.approval) {
+      throw new OrchestrationHttpError(
+        409,
+        'invalid_transition',
+        '当前运行没有等待审批的演示计划。',
+      );
+    }
+    if (run.demoPlan.planDigest !== input.expectedPlanDigest) {
+      throw new OrchestrationHttpError(
+        409,
+        'plan_digest_stale',
+        '计划已被修改；请刷新后基于最新版本编辑。',
+      );
+    }
+    const snapshot = this.requireWorkspace(run.workspaceId);
+    const video = this.requireVideo(snapshot, run.videoId);
+    const previous = this.readCaptureOptions(run);
+    if (!previous) {
+      throw new OrchestrationHttpError(409, 'invalid_transition', '当前运行没有 capture 配置。');
+    }
+    const template = input.patch.template ?? previous.template;
+    if (!DEMO_PLAN_TEMPLATE_IDS.includes(template)) {
+      throw new OrchestrationHttpError(400, 'capture_invalid_plan', `未知模板：${template}`);
+    }
+    const merged: ResolvedCaptureOptions = {
+      template,
+      baseUrl: input.patch.baseUrl ?? previous.baseUrl,
+      resetStrategy: input.patch.resetStrategy ?? previous.resetStrategy,
+      ...(previous.viewport ? { viewport: previous.viewport } : {}),
+      ...(previous.capture ? { capture: previous.capture } : {}),
+      ...(input.patch.customSteps
+        ? { customSteps: input.patch.customSteps }
+        : previous.customSteps
+          ? { customSteps: previous.customSteps }
+          : {}),
     };
+    const planned = await this.planner.plan(snapshot, video, merged);
+    const timestamp = this.now().toISOString();
+    const approval: OrchestrationApprovalV1 = {
+      approvalId: newId('appr'),
+      stepKey: 'capture_demo',
+      status: 'pending',
+      gateType: 'gate2_demo_capture',
+      subjectDigest: planned.digest,
+      planId: planned.draft.id,
+      policyVersion: planned.policyVersion,
+      requestedAt: timestamp,
+    };
+    this.approvals.createPending(runId, {
+      workspaceId,
+      approval,
+      planDigest: planned.digest,
+      riskLevel: planned.risk.level,
+      supersedes: run.approval.approvalId,
+    });
+    this.writeDemoPlanFiles(run, planned, merged);
     this.store.updateRun({
       ...run,
-      status: 'running',
       approval,
+      demoPlan: this.summarizePlan(planned, timestamp),
+      input: {
+        ...run.input,
+        ...(run.input.capture
+          ? { capture: { ...run.input.capture, planDigest: planned.digest } }
+          : {}),
+      },
       updatedAt: timestamp,
     });
-    this.appendEvent(runId, run.approval.stepKey, 'success', 'approval', 'Gate 已批准，运行继续。');
-    this.pumpSoon();
+    this.appendEvent(
+      runId,
+      'capture_demo',
+      'info',
+      'approval',
+      '演示计划已更新：旧审批作废，等待新的 Gate 2 决策。',
+      { approvalId: approval.approvalId, planDigest: planned.digest, supersedes: run.approval.approvalId },
+    );
     return approval;
+  }
+
+  captureHealth(): CaptureHealth {
+    return this.planner.health();
   }
 
   async getArtifact(workspaceId: string, artifactId: string): Promise<OrchestrationArtifactV1 | null> {
@@ -747,10 +1077,16 @@ export class Orchestrator implements OrchestrationServicePort {
       clearInterval(this.timer);
       this.timer = null;
     }
-    // Killing the child makes any in-flight `execute()` resolve promptly.
+    // Killing the children makes any in-flight `execute()` resolve promptly.
+    // Both executors are separate OS processes; a capture can be the live one.
     this.executor?.abort();
+    this.captureExecutor?.abort();
     // Give the child a moment to exit so onClose does not orphan it.
-    for (let i = 0; i < 40 && this.executor?.isRunning(); i += 1) {
+    for (
+      let i = 0;
+      i < 40 && (this.executor?.isRunning() || this.captureExecutor?.isRunning());
+      i += 1
+    ) {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     // A pump already inside `advanceRun` keeps writing after abort; let it
@@ -881,6 +1217,8 @@ export class Orchestrator implements OrchestrationServicePort {
     try {
       if (definition.executor === 'worker') {
         await this.executeRenderStep(startedRun, stepKey, leased.attempt);
+      } else if (definition.executor === 'capture') {
+        await this.executeCaptureStep(startedRun, stepKey, leased.attempt);
       } else {
         await this.executeInlineStep(startedRun, stepKey, leased.attempt);
       }
@@ -952,6 +1290,10 @@ export class Orchestrator implements OrchestrationServicePort {
         });
         return;
       }
+      case 'plan_demo': {
+        await this.planDemoStep(run, stepKey, attempt);
+        return;
+      }
       case 'prepare_media': {
         const prepared = this.prepareMedia(run);
         this.writeCheckpoint(run, stepKey, 'step_done', {
@@ -991,6 +1333,132 @@ export class Orchestrator implements OrchestrationServicePort {
    * before the render replays `narration_ready` from disk, and the cache means
    * the replay makes zero provider calls.
    */
+  /**
+   * `plan_demo` (Gate 2, layer 1/3).
+   *
+   * Builds the deterministic draft, persists it, opens a pending approval and
+   * parks the run in `awaiting_approval`. It never proceeds to capture on its
+   * own: the only exit from `awaiting_approval` is an explicit approve (or a
+   * reject / cancel).
+   *
+   * Re-running (after a crash) is idempotent: the draft is a pure function of
+   * the workspace + options, so a replay reproduces the same digest and the
+   * same plan id. The ledger keeps the previous attempts as history.
+   */
+  private async planDemoStep(
+    run: OrchestrationRunV1,
+    stepKey: OrchestrationStepKey,
+    attempt: number,
+  ): Promise<void> {
+    const options = this.readCaptureOptions(run);
+    if (!options) {
+      // Reached only if the step was not marked skipped at creation; fail
+      // loudly rather than inventing a plan nobody asked for.
+      throw new StepFailure('capture_not_configured', '运行没有 capture 配置，无法生成演示计划。', false);
+    }
+    const snapshot = this.requireWorkspace(run.workspaceId);
+    const video = this.requireVideo(snapshot, run.videoId);
+    let planned;
+    try {
+      planned = await this.planner.plan(snapshot, video, options);
+    } catch (error) {
+      if (error instanceof OrchestrationHttpError) {
+        throw new StepFailure(
+          error.code === 'no_real_demo_scenes' ? 'no_real_demo_scenes' : 'demo_plan_invalid',
+          error.message,
+          false,
+        );
+      }
+      throw error;
+    }
+
+    const timestamp = this.now().toISOString();
+    this.writeDemoPlanFiles(run, planned, options);
+    // The gate belongs to the step it blocks: a later re-plan (or a crash
+    // replay during `plan_demo`) supersedes the previous gate with the same
+    // stepKey, so the DAG keeps pointing at the approval that actually gates it.
+    const gateStepKey: OrchestrationStepKey = 'capture_demo';
+    const approval: OrchestrationApprovalV1 = {
+      approvalId: newId('appr'),
+      stepKey: gateStepKey,
+      status: 'pending',
+      gateType: 'gate2_demo_capture',
+      subjectDigest: planned.digest,
+      planId: planned.draft.id,
+      policyVersion: planned.policyVersion,
+      requestedAt: timestamp,
+    };
+    this.approvals.createPending(run.id, {
+      workspaceId: run.workspaceId,
+      approval,
+      planDigest: planned.digest,
+      riskLevel: planned.risk.level,
+      supersedes: run.approval?.approvalId ?? null,
+    });
+
+    this.writeCheckpoint(run, stepKey, 'plan_ready', {
+      planId: planned.draft.id,
+      planDigest: planned.digest,
+      stepCount: planned.draft.steps.length,
+      assertionCount: planned.risk.assertionCount,
+      riskLevel: planned.risk.level,
+      approvalId: approval.approvalId,
+    });
+
+    const latest = this.store.getRun(run.id) ?? run;
+    if (latest.status !== 'running' && latest.status !== 'queued') return;
+    const now = this.now().toISOString();
+    this.store.updateRun({
+      ...latest,
+      status: 'awaiting_approval',
+      steps: latest.steps.map((step) =>
+        step.stepKey === stepKey
+          ? { ...step, status: 'succeeded' as const, attempt, finishedAt: now }
+          : step,
+      ),
+      currentStepKey: null,
+      approval,
+      demoPlan: this.summarizePlan(planned, timestamp),
+      input: {
+        ...latest.input,
+        ...(latest.input.capture
+          ? {
+              capture: {
+                ...latest.input.capture,
+                template: planned.template,
+                baseUrl: planned.baseUrl,
+                planDigest: planned.digest,
+              },
+            }
+          : {}),
+      },
+      updatedAt: now,
+    });
+    const job = this.store.getJobForStep(run.id, stepKey);
+    if (job) {
+      this.store.updateJob({
+        ...job,
+        status: 'succeeded',
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        updatedAt: now,
+      });
+    }
+    this.appendEvent(
+      run.id,
+      stepKey,
+      'info',
+      'approval',
+      `演示计划已生成：${planned.draft.steps.length} 步、${planned.risk.assertionCount} 个断言、风险 ${planned.risk.level}；等待 Gate 2 审批。`,
+      {
+        approvalId: approval.approvalId,
+        planId: planned.draft.id,
+        planDigest: planned.digest,
+        riskLevel: planned.risk.level,
+      },
+    );
+  }
+
   private async synthesizeVoice(
     run: OrchestrationRunV1,
     stepKey: OrchestrationStepKey,
@@ -1112,6 +1580,11 @@ export class Orchestrator implements OrchestrationServicePort {
       durationMs: storyboardDurationMs(updatedInput.storyboard),
       frozenAt: this.now().toISOString(),
       narrationAppliedAt: this.now().toISOString(),
+      // `capture_demo` ran before this step and wrote the clip provenance next
+      // to the input; this rewrite must carry it forward. Dropping it would
+      // make the finished film unprovable: nothing would tie the rendered
+      // footage back to the approved plan and its SHA256.
+      ...(frozen.capture ? { capture: frozen.capture } : {}),
     });
     const latestRun = this.store.getRun(run.id) ?? run;
     this.store.updateRun({ ...latestRun, inputDigest: digest, updatedAt: this.now().toISOString() });
@@ -1203,6 +1676,93 @@ export class Orchestrator implements OrchestrationServicePort {
     });
   }
 
+  /**
+   * The capture options this run was created with, read back from disk. The
+   * request body is not part of the run row, and `plan_demo` must replay
+   * identically after a crash — the same contract as `narration-request.json`.
+   */
+  private readCaptureOptions(run: OrchestrationRunV1): ResolvedCaptureOptions | null {
+    const file = path.join(runDirFor(this.artifactDir, run.workspaceId, run.id), CAPTURE_REQUEST_FILE);
+    if (!fileExists(file)) return null;
+    try {
+      const raw = readJsonFile<ResolvedCaptureOptions>(file);
+      if (!raw.template || !raw.baseUrl) return null;
+      return raw;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Persists the draft + its digest next to the other frozen run inputs. */
+  private writeDemoPlanFiles(
+    run: OrchestrationRunV1,
+    planned: PlannedCapture,
+    options: ResolvedCaptureOptions,
+  ): void {
+    const runDir = runDirFor(this.artifactDir, run.workspaceId, run.id);
+    writeJsonFile(path.join(runDir, 'demo-plan.json'), {
+      schemaVersion: '1',
+      planDigest: planned.digest,
+      policyVersion: planned.policyVersion,
+      template: planned.template,
+      risk: planned.risk,
+      draft: planned.draft,
+      writtenAt: this.now().toISOString(),
+    });
+    writeJsonFile(path.join(runDir, CAPTURE_REQUEST_FILE), {
+      schemaVersion: '1',
+      ...options,
+      requestedAt: this.now().toISOString(),
+    } satisfies PersistedCaptureRequest);
+  }
+
+  private summarizePlan(planned: PlannedCapture, requestedAt: string): DemoPlanSummaryV1 {
+    return {
+      planId: planned.draft.id,
+      template: planned.template,
+      templateLabel: planned.templateLabel,
+      baseUrl: planned.baseUrl,
+      allowedOrigins: planned.allowedOrigins,
+      planDigest: planned.digest,
+      policyVersion: planned.policyVersion,
+      requestedAt,
+      risk: planned.risk,
+      draft: planned.draft,
+    };
+  }
+
+  /** Recomputes the digest from the stored draft (digest excludes approval). */
+  private async recomputePlanDigest(draft: DemoPlanDraftV1): Promise<string> {
+    return computeDemoPlanDigest(draft);
+  }
+
+  /** Marks the Gate 2 steps skipped at creation time when capture is off. */
+  private markCaptureStepsSkipped(runId: string): void {
+    const run = this.store.getRun(runId);
+    if (!run) return;
+    const timestamp = this.now().toISOString();
+    const keys = ['plan_demo', 'capture_demo'] as const;
+    const steps = run.steps.map((step) =>
+      keys.includes(step.stepKey as (typeof keys)[number])
+        ? { ...step, status: 'skipped' as const, finishedAt: timestamp }
+        : step,
+    );
+    this.store.updateRun({ ...run, steps, updatedAt: timestamp });
+    for (const stepKey of keys) {
+      const job = this.store.getJobForStep(run.id, stepKey);
+      if (job) {
+        this.store.updateJob({
+          ...job,
+          status: 'succeeded',
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          updatedAt: timestamp,
+        });
+      }
+    }
+    this.appendEvent(runId, null, 'info', 'state_change', '未请求真实录屏：plan_demo / capture_demo 已标记为 skipped。');
+  }
+
   private readNarrationRequest(run: OrchestrationRunV1): PersistedNarrationRequest {
     const file = path.join(runDirFor(this.artifactDir, run.workspaceId, run.id), NARRATION_REQUEST_FILE);
     if (!fileExists(file)) {
@@ -1226,12 +1786,20 @@ export class Orchestrator implements OrchestrationServicePort {
     };
   }
 
-  private readFrozenInput(run: OrchestrationRunV1): { input: RenderInputV1; digest: string } {
+  private readFrozenInput(run: OrchestrationRunV1): {
+    input: RenderInputV1;
+    digest: string;
+    capture?: FrozenCaptureProvenance;
+  } {
     const file = path.join(runDirFor(this.artifactDir, run.workspaceId, run.id), 'input.json');
     if (!fileExists(file)) {
       throw new StepFailure('invalid_input', '缺少冻结输入 input.json。', false);
     }
-    return readJsonFile<{ input: RenderInputV1; digest: string }>(file);
+    return readJsonFile<{
+      input: RenderInputV1;
+      digest: string;
+      capture?: FrozenCaptureProvenance;
+    }>(file);
   }
 
   private completeSkippedNarrationStep(
@@ -1449,6 +2017,564 @@ export class Orchestrator implements OrchestrationServicePort {
       retryable: isRetryableRenderCode(result.code, result.crashed),
       checkpoints: result.checkpoints,
     });
+  }
+
+  /**
+   * `capture_demo` (Gate 2, layer 2/3).
+   *
+   * The run only gets here after an approval was persisted. Immediately before
+   * spawning the worker the approval is re-read **from the ledger** (not from
+   * the denormalized run row) and the plan digest is recomputed from the exact
+   * bytes that will be written to `capture-job-input.json`. Any mismatch
+   * refuses to spawn at all — the third check (inside the worker) then covers
+   * tampering of that file after it was written.
+   *
+   * On success the clip is *backfilled* into the frozen render input: the
+   * asset replaces the placeholder and `inputDigest` is recomputed, which is
+   * what makes the later narration/SRT/render steps produce a real-capture
+   * film. On failure every piece of evidence (report, screenshots, trace) is
+   * registered as a downloadable artifact and the run carries a structured
+   * `captureFailure`; a receipt is never fabricated.
+   */
+  private async executeCaptureStep(
+    run: OrchestrationRunV1,
+    stepKey: OrchestrationStepKey,
+    attempt: number,
+  ): Promise<void> {
+    if (!this.captureExecutor) {
+      throw new StepFailure('capture_not_configured', '未配置 browser-worker 录屏执行器。', false);
+    }
+    if (this.abortRequested.has(run.id)) return;
+    const latest = this.store.getRun(run.id) ?? run;
+    if (latest.status === 'cancelled' || latest.status === 'failed') return;
+
+    const demoPlan = latest.demoPlan;
+    const approval = latest.approval;
+    if (!demoPlan || !approval || approval.gateType !== 'gate2_demo_capture') {
+      throw new StepFailure('capture_not_configured', '运行没有待执行的 Gate 2 演示计划。', false);
+    }
+    // Layer 2: the ledger row — not the run's denormalized copy — decides.
+    const ledger = this.approvals.getById(run.id, approval.approvalId);
+    if (!ledger || ledger.status !== 'approved') {
+      throw new StepFailure(
+        'approval_rejected',
+        `Gate 2 审批 ${approval.approvalId} 未处于 approved（${ledger?.status ?? 'missing'}）；拒绝启动浏览器。`,
+        false,
+      );
+    }
+    const planDigest = await this.recomputePlanDigest(demoPlan.draft);
+    if (planDigest !== demoPlan.planDigest || planDigest !== ledger.subjectDigest) {
+      this.appendEvent(run.id, stepKey, 'error', 'approval', '演示计划摘要在审批后发生变化，拒绝录屏。', {
+        expected: demoPlan.planDigest,
+        recomputed: planDigest,
+        approved: ledger.subjectDigest ?? null,
+      });
+      throw new StepFailure(
+        'capture_plan_tampered',
+        '演示计划在审批后被修改（摘要不一致）；拒绝启动 Chromium。',
+        false,
+      );
+    }
+
+    const job = this.store.getJobForStep(run.id, stepKey);
+    if (!job) throw new StepFailure('unexpected_error', '缺少 capture_demo 任务记录。', false);
+
+    const runDir = runDirFor(this.artifactDir, run.workspaceId, run.id);
+    const outDir = path.join(runDir, 'capture');
+    mkdirSync(outDir, { recursive: true });
+    const plan = withDemoPlanApproval(demoPlan.draft, {
+      approvalId: ledger.approvalId,
+      approvedPlanDigest: planDigest,
+      ...(ledger.approvedAt ? { approvedAt: ledger.approvedAt } : {}),
+    });
+    const jobDigest = await captureJobDigest({
+      jobId: job.jobId,
+      runId: run.id,
+      workspaceId: run.workspaceId,
+      plan,
+      planDigest,
+      allowedOrigins: this.planner.config.allowedOrigins,
+      policyVersion: demoPlan.policyVersion,
+    });
+    const captureJob: CaptureJobInputV1 = captureJobInputV1Schema.parse({
+      schemaVersion: '1',
+      kind: 'asvs.capture-job',
+      jobId: job.jobId,
+      runId: run.id,
+      workspaceId: run.workspaceId,
+      outDir,
+      checkpointFile: path.join(runDir, 'capture-checkpoint.json'),
+      // Must be the base the worker itself uses for `storageRefFor` refs. The
+      // worker writes `media.sourceFile` / `screenshot.file` relative to the
+      // repository root, and it re-resolves those refs against this value
+      // before emitting `completed`. Pointing it at the artifact dir made the
+      // worker fail to find the clip it had just produced.
+      storageRefBase: this.mediaRoot,
+      serve: this.shouldAutoServe(demoPlan.baseUrl),
+      serveMode: 'preview',
+      allowedOrigins: this.planner.config.allowedOrigins,
+      plan,
+      planDigest,
+      policyVersion: demoPlan.policyVersion,
+      jobDigest,
+      createdAt: this.now().toISOString(),
+    });
+    const inputFile = path.join(runDir, 'capture-job-input.json');
+    writeJsonFile(inputFile, captureJob);
+    const checkpointFile = captureJob.checkpointFile;
+
+    // A cancel may have landed while the digests were being computed.
+    if (this.abortRequested.has(run.id)) return;
+    this.activeCaptureRunId = run.id;
+    const startedAt = Date.now();
+    let timedOut = false;
+    const timeoutMs = this.captureTimeoutMs(demoPlan);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      this.captureExecutor?.abort();
+    }, timeoutMs);
+    timer.unref?.();
+    let result: CaptureJobExecutionResult;
+    try {
+      result = await this.captureExecutor.execute(captureJob, inputFile, outDir, checkpointFile, {
+        onHeartbeat: (pid: number) => {
+          const at = this.now().toISOString();
+          this.touchJob(job.jobId, (current) => ({
+            ...current,
+            status: 'running',
+            workerPid: pid,
+            heartbeatAt: at,
+            leaseExpiresAt: new Date(this.now().getTime() + this.leaseTtlMs).toISOString(),
+            updatedAt: at,
+          }));
+        },
+        onCheckpoint: (phase: string, payload: Record<string, unknown>) => {
+          this.writeCheckpoint(run, stepKey, phase, payload);
+          const at = this.now().toISOString();
+          this.touchJob(job.jobId, (current) => ({
+            ...current,
+            lastCheckpointPhase: phase,
+            heartbeatAt: at,
+            updatedAt: at,
+          }));
+        },
+        onProgress: () => undefined,
+        onLog: (level: 'info' | 'warn' | 'error', message: string) => {
+          this.appendEvent(
+            run.id,
+            stepKey,
+            level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info',
+            'capture',
+            message,
+          );
+        },
+        onSpawn: (pid: number) => {
+          this.touchJob(job.jobId, (current) => ({
+            ...current,
+            workerPid: pid,
+            updatedAt: this.now().toISOString(),
+          }));
+        },
+      });
+    } finally {
+      clearTimeout(timer);
+      this.activeCaptureRunId = null;
+    }
+    const durationMs = Date.now() - startedAt;
+
+    if (this.abortRequested.has(run.id) || (!result.ok && result.code === 'cancelled')) return;
+
+    if (result.ok && result.result.passed && result.result.completed) {
+      try {
+        const completed = result.result.completed;
+        if (timedOut) throw new StepFailure('capture_timeout', '录屏超时', true);
+        const backfilled = this.backfillCapture(run, outDir, completed, demoPlan, planDigest, job.jobId);
+        this.writeCheckpoint(run, stepKey, 'step_done', {
+          assetId: backfilled.assetId,
+          clipSha256: completed.clipSha256,
+          clipDurationMs: completed.clipDurationMs,
+          assertions: completed.assertions,
+          planDigest,
+        });
+        this.completeStep(run, stepKey, attempt, {
+          assetId: backfilled.assetId,
+          clipSha256: completed.clipSha256,
+          clipDurationMs: completed.clipDurationMs,
+          assertions: completed.assertions,
+          planDigest,
+          clipWidth: completed.clipWidth,
+          clipHeight: completed.clipHeight,
+          workerPid: result.workerPid,
+        });
+      } catch (error) {
+        this.handleStepFailure(run, stepKey, attempt, {
+          crashed: false,
+          code: error instanceof StepFailure ? error.code : 'capture_artifact_mismatch',
+          message: error instanceof Error ? error.message : String(error),
+          retryable: !(error instanceof StepFailure) || error.retryable,
+          checkpoints: [],
+        });
+      }
+      return;
+    }
+
+    // Failure: keep the evidence, never invent a receipt.
+    const failure = timedOut
+      ? {
+          crashed: false,
+          code: 'capture_timeout',
+          message: `录屏超过 ${Math.round(timeoutMs / 1000)}s 未完成，已终止浏览器进程。`,
+          retryable: true,
+          result: null,
+        }
+      : result.ok
+        ? {
+            crashed: false,
+            code: 'capture_artifact_mismatch',
+            message: '录屏报告声称通过但缺少完成事件；按产物不一致处理。',
+            retryable: true,
+            result: null,
+          }
+        : {
+            crashed: result.crashed,
+            code: result.code,
+            message: result.message,
+            retryable: isRetryableCaptureCode(result.code) || result.crashed,
+            result: result.result ?? null,
+          };
+    const evidence = this.registerCaptureEvidence(run, stepKey, outDir, job.jobId, failure);
+    const code =
+      failure.crashed && attempt >= job.maxAttempts && !failure.code.startsWith('capture_')
+        ? 'worker_crash_exhausted'
+        : failure.code;
+    const latestRun = this.store.getRun(run.id) ?? run;
+    if (latestRun.status === 'cancelled' || latestRun.status === 'failed') return;
+    this.store.updateRun({
+      ...latestRun,
+      captureFailure: evidence,
+      updatedAt: this.now().toISOString(),
+    });
+    this.touchJob(job.jobId, (current) => ({
+      ...current,
+      errorCode: code,
+      errorMessage: failure.message,
+      updatedAt: this.now().toISOString(),
+    }));
+    this.handleStepFailure(run, stepKey, attempt, {
+      crashed: failure.crashed,
+      code,
+      message: failure.message,
+      retryable: failure.retryable,
+      checkpoints: result.checkpoints,
+    });
+    this.appendEvent(run.id, stepKey, 'warn', 'capture', `录屏尝试耗时 ${(durationMs / 1000).toFixed(1)}s。`, {
+      code,
+    });
+  }
+
+  private touchJob(
+    jobId: string,
+    mutate: (current: NonNullable<ReturnType<SqliteOrchestrationStore['getJob']>>) => NonNullable<
+      ReturnType<SqliteOrchestrationStore['getJob']>
+    >,
+  ): void {
+    const current = this.store.getJob(jobId);
+    if (current) this.store.updateJob(mutate(current));
+  }
+
+  /** Hard ceiling for one capture attempt; the worker has no own deadline. */
+  private captureTimeoutMs(plan: DemoPlanSummaryV1): number {
+    const steps = plan.draft.steps.length;
+    const dwell = plan.draft.steps.reduce((sum, step) => sum + (step.dwellMs ?? 0), 0);
+    // Generous but finite: 6s browser start + 12s per step + dwell + slack.
+    return Math.min(15 * 60_000, 30_000 + steps * 12_000 + dwell + plan.draft.capture.clipDurationMs);
+  }
+
+  private shouldAutoServe(baseUrl: string): boolean {
+    return (
+      this.planner.config.allowAutoServe && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(baseUrl)
+    );
+  }
+
+  /**
+   * Replaces the placeholder asset with the real clip inside the frozen render
+   * input. The storyboard is re-derived from the snapshot because the run's
+   * scenes were frozen before the capture existed; `freeze_input` never knew
+   * the asset id. Everything else (storyboard text, render profile) is kept
+   * byte-identical, and `inputDigest` is rewritten so downstream steps and the
+   * render worker see one consistent input.
+   */
+  private backfillCapture(
+    run: OrchestrationRunV1,
+    outDir: string,
+    completed: NonNullable<CaptureJobResultV1['completed']>,
+    demoPlan: DemoPlanSummaryV1,
+    planDigest: string,
+    jobId: string,
+  ): { assetId: string } {
+    const receiptFile = path.join(outDir, 'capture-receipt.json');
+    if (!fileExists(receiptFile)) {
+      throw new StepFailure('capture_artifact_mismatch', '录屏通过但缺少 capture-receipt.json。', true);
+    }
+    const receipt = captureReceiptV1Schema.parse(readJsonFile(receiptFile)) as CaptureReceiptV1;
+    if (receipt.planId !== demoPlan.planId || receipt.planDigest !== planDigest) {
+      throw new StepFailure(
+        'capture_artifact_mismatch',
+        `回执绑定的计划（${receipt.planId} / ${receipt.planDigest.slice(0, 12)}…）与审批通过的计划不一致。`,
+        true,
+      );
+    }
+    if (receipt.assertions.total < 1 || receipt.assertions.passed !== receipt.assertions.total) {
+      throw new StepFailure(
+        'capture_assertion_failed',
+        `回执记录 ${receipt.assertions.passed}/${receipt.assertions.total} 个断言通过；未全部通过不得回填。`,
+        true,
+      );
+    }
+    if (receipt.clip.sha256 !== completed.clipSha256) {
+      throw new StepFailure('capture_artifact_mismatch', '回执与完成事件的片段 SHA256 不一致。', true);
+    }
+    const clipFile = this.resolveAllowedPath(receipt.media.sourceFile);
+    if (!clipFile) {
+      throw new StepFailure(
+        'capture_artifact_mismatch',
+        `回执指向的片段不在允许的根目录内：${receipt.media.sourceFile}`,
+        true,
+      );
+    }
+    const actualSha = sha256File(clipFile);
+    if (actualSha !== receipt.clip.sha256) {
+      throw new StepFailure('capture_artifact_mismatch', '磁盘上的片段 SHA256 与回执不一致。', true);
+    }
+
+    const snapshot = this.requireWorkspace(run.workspaceId);
+    const video = this.requireVideo(snapshot, run.videoId);
+    const project = snapshot.projects.find((item) => item.id === video.projectId);
+    if (!project) throw new StepFailure('invalid_input', `项目 ${video.projectId} 不存在。`, false);
+    const asset = receipt.asset;
+    const videoWithAsset = {
+      ...video,
+      scenes: video.scenes.map((scene) =>
+        scene.visualType === 'real_demo' || scene.visual?.type === 'real_demo'
+          ? { ...scene, assetId: asset.id }
+          : scene,
+      ),
+    };
+    const features = snapshot.features.filter((feature) =>
+      video.brief.featureIds.includes(feature.id),
+    );
+    const input = buildRenderInput({
+      video: videoWithAsset,
+      project,
+      features,
+      assets: [...snapshot.assets.filter((item) => item.id !== asset.id), asset],
+      renderProfile: run.renderProfile as RenderProfile,
+    });
+    const digest = sha256OfJson({ renderInput: input });
+    const runDir = runDirFor(this.artifactDir, run.workspaceId, run.id);
+    writeJsonFile(path.join(runDir, 'input.json'), {
+      schemaVersion: '1',
+      input,
+      digest,
+      storyboardFrames: totalStoryboardFrames(input.storyboard),
+      durationMs: storyboardDurationMs(input.storyboard),
+      frozenAt: this.now().toISOString(),
+      // Provenance: which approved plan produced the real clip in this input.
+      capture: {
+        planId: demoPlan.planId,
+        planDigest,
+        assetId: asset.id,
+        clipSha256: actualSha,
+        clipDurationMs: receipt.clip.durationMs,
+        assertions: receipt.assertions,
+      },
+    });
+    this.registerCaptureArtifacts(run, 'capture_demo', outDir, jobId, [
+      {
+        kind: 'capture_clip',
+        file: clipFile,
+        mimeType: 'video/mp4',
+        metadata: {
+          width: receipt.clip.width,
+          height: receipt.clip.height,
+          durationMs: receipt.clip.durationMs,
+          fps: receipt.clip.fps,
+          planId: demoPlan.planId,
+          planDigest,
+        },
+      },
+      {
+        kind: 'capture_receipt',
+        file: receiptFile,
+        mimeType: 'application/json',
+        metadata: {
+          planId: demoPlan.planId,
+          planDigest,
+          approvalId: receipt.approvalId,
+          assertions: receipt.assertions,
+        },
+      },
+      ...receipt.screenshots.map((shot, index) => ({
+        kind: 'capture_screenshot' as const,
+        file: path.join(outDir, shot.file),
+        mimeType: 'image/png',
+        metadata: { index, assertions: receipt.assertions },
+      })),
+    ]);
+
+    const latest = this.store.getRun(run.id) ?? run;
+    this.store.updateRun({
+      ...latest,
+      inputDigest: digest,
+      captureFailure: undefined,
+      input: {
+        ...latest.input,
+        ...(latest.input.capture
+          ? {
+              capture: {
+                ...latest.input.capture,
+                planDigest,
+                capturedAssetId: asset.id,
+                clipSha256: actualSha,
+                clipDurationMs: receipt.clip.durationMs,
+                assertions: {
+                  total: receipt.assertions.total,
+                  passed: receipt.assertions.passed,
+                },
+              },
+            }
+          : {}),
+      },
+      updatedAt: this.now().toISOString(),
+    });
+    return { assetId: asset.id };
+  }
+
+  /** Registers whatever a failed attempt left behind; missing files are fine. */
+  private registerCaptureEvidence(
+    run: OrchestrationRunV1,
+    stepKey: OrchestrationStepKey,
+    outDir: string,
+    jobId: string,
+    failure: { code: string; message: string; result: CaptureJobResultV1 | null },
+  ): CaptureFailureSummaryV1 {
+    const result = failure.result;
+    const reportFile = path.join(outDir, 'failure-report.json');
+    const traceFile = path.join(outDir, 'trace.zip');
+    const screenshotDir = path.join(outDir, 'screenshots');
+    const screenshotFiles: string[] = [];
+    try {
+      for (const name of readdirSync(screenshotDir)) {
+        if (name.toLowerCase().endsWith('.png')) screenshotFiles.push(path.join(screenshotDir, name));
+      }
+    } catch {
+      // No screenshots dir: the capture failed before the first assertion.
+    }
+    const registered = this.registerCaptureArtifacts(run, stepKey, outDir, jobId, [
+      ...(fileExists(reportFile)
+        ? [
+            {
+              kind: 'capture_failure_report' as const,
+              file: reportFile,
+              mimeType: 'application/json',
+              metadata: { code: failure.code },
+            },
+          ]
+        : []),
+      ...(fileExists(traceFile)
+        ? [
+            {
+              kind: 'capture_trace' as const,
+              file: traceFile,
+              mimeType: 'application/zip',
+              metadata: { code: failure.code },
+            },
+          ]
+        : []),
+      ...screenshotFiles.map((file, index) => ({
+        kind: 'capture_screenshot' as const,
+        file,
+        mimeType: 'image/png',
+        metadata: { index, code: failure.code },
+      })),
+    ]);
+    const byKind = (kind: string) => registered.filter((item) => item.kind === kind).map((item) => item.id);
+    let blockedRequests: string[] = [];
+    if (fileExists(reportFile)) {
+      try {
+        const raw = readJsonFile<{ blockedRequests?: string[] }>(reportFile);
+        blockedRequests = raw.blockedRequests ?? [];
+      } catch {
+        blockedRequests = [];
+      }
+    }
+    return {
+      code: failure.code,
+      message: failure.message,
+      ...(result?.failed?.failedStepId ? { failedStepId: result.failed.failedStepId } : {}),
+      assertionFailures: result?.failed?.assertionFailures ?? 0,
+      ...(byKind('capture_failure_report')[0]
+        ? { failureReportArtifactId: byKind('capture_failure_report')[0]! }
+        : {}),
+      ...(byKind('capture_trace')[0] ? { traceArtifactId: byKind('capture_trace')[0]! } : {}),
+      screenshotArtifactIds: byKind('capture_screenshot'),
+      blockedRequests,
+      retryable: isRetryableCaptureCode(failure.code),
+      failedAt: this.now().toISOString(),
+    };
+  }
+
+  /**
+   * Inserts artifact rows for capture evidence. Files outside the artifact
+   * root (the worker writes under `<runDir>/capture`, which is inside it) are
+   * copied in first, so `storageRef` is always resolvable by the download
+   * route and never escapes the root.
+   */
+  private registerCaptureArtifacts(
+    run: OrchestrationRunV1,
+    stepKey: OrchestrationStepKey,
+    outDir: string,
+    jobId: string,
+    entries: Array<{ kind: OrchestrationArtifactV1['kind']; file: string; mimeType: string; metadata: Record<string, unknown> }>,
+  ): OrchestrationArtifactV1[] {
+    const timestamp = this.now().toISOString();
+    const inserted: OrchestrationArtifactV1[] = [];
+    for (const [index, entry] of entries.entries()) {
+      if (!fileExists(entry.file)) continue;
+      let file = entry.file;
+      const within = path.resolve(file).startsWith(`${path.resolve(this.artifactDir)}${path.sep}`);
+      if (!within) {
+        const copied = path.join(outDir, path.basename(file));
+        copyFileSync(file, copied);
+        file = copied;
+      }
+      const relative = path.relative(this.artifactDir, file).split(path.sep).join('/');
+      const publicRef = path.posix.isAbsolute(relative) ? relative.slice(1) : relative;
+      try {
+        resolveArtifactPath(this.artifactDir, publicRef);
+      } catch {
+        this.logger.warn(`跳过无法安全引用的 capture 产物：${entry.file}`);
+        continue;
+      }
+      const artifact: OrchestrationArtifactV1 = {
+        schemaVersion: '1',
+        id: `artifact_${jobId.replace(/^orchjob_/, '')}_${entry.kind}${index === 0 ? '' : `_${index}`}`,
+        runId: run.id,
+        workspaceId: run.workspaceId,
+        jobId,
+        kind: entry.kind,
+        fileName: path.basename(file),
+        mimeType: entry.mimeType,
+        byteSize: fileSize(file),
+        sha256: sha256File(file),
+        storageRef: publicRef,
+        metadata: { ...entry.metadata, stepKey },
+        createdAt: timestamp,
+      };
+      this.store.insertArtifact(artifact);
+      inserted.push(artifact);
+    }
+    return inserted;
   }
 
   private handleStepFailure(
@@ -2135,6 +3261,14 @@ export interface PersistedNarrationRequest extends ResolvedNarrationRequest {
 }
 
 const NARRATION_REQUEST_FILE = 'narration-request.json';
+
+/** File contract for `<runDir>/capture-request.json` (Step 5C). */
+export interface PersistedCaptureRequest extends ResolvedCaptureOptions {
+  schemaVersion: '1';
+  requestedAt: string;
+}
+
+const CAPTURE_REQUEST_FILE = 'capture-request.json';
 
 /** Normalizes the optional body fields; absent means "narration on, defaults". */
 export function resolveNarrationRequest(input?: {

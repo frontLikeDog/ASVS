@@ -1,4 +1,5 @@
 import type {
+  DemoPlanTemplateId,
   ExportBundleDetailV1,
   OrchestrationApprovalV1,
   OrchestrationArtifactKind,
@@ -7,7 +8,11 @@ import type {
   OrchestrationRunV1,
   RenderProfile,
 } from '@asvs/domain';
-import type { CreateExportBundleInput, ExportBundleListOptions } from './orchestration';
+import type {
+  CaptureHealth,
+  CreateExportBundleInput,
+  ExportBundleListOptions,
+} from './orchestration';
 
 export interface CreateOrchestrationRunRequest {
   videoId: string;
@@ -19,6 +24,26 @@ export interface CreateOrchestrationRunRequest {
     speed?: number;
     timingPolicy?: 'extend_scene' | 'fail_on_overflow';
   };
+  /** 5C Gate 2 capture; omitted means the capture steps are skipped. */
+  capture?: {
+    enabled: boolean;
+    template?: DemoPlanTemplateId;
+    baseUrl?: string;
+    resetStrategy?: 'fixture' | 'none';
+    viewport?: { width: number; height: number };
+    capture?: { width: number; height: number; fps?: number; clipDurationMs?: number };
+  };
+}
+
+/** Body of `PUT .../runs/:runId/demo-plan`; the digest guards a stale editor. */
+export interface UpdateDemoPlanRequest {
+  patch: {
+    template?: DemoPlanTemplateId;
+    baseUrl?: string;
+    resetStrategy?: 'fixture' | 'none';
+  };
+  expectedPlanDigest: string;
+  note?: string;
 }
 
 export interface CreateOrchestrationRunResponse {
@@ -50,7 +75,18 @@ export interface OrchestrationClientPort {
   approveRun(
     workspaceId: string,
     runId: string,
-    input: { approvalId: string; subjectDigest?: string },
+    input: { approvalId: string; subjectDigest: string; note?: string },
+  ): Promise<OrchestrationApprovalV1>;
+  rejectRun(
+    workspaceId: string,
+    runId: string,
+    input: { approvalId: string; reason?: string },
+  ): Promise<OrchestrationApprovalV1>;
+  /** Edits a waiting Gate 2 draft; supersedes the previous approval. */
+  updateDemoPlan(
+    workspaceId: string,
+    runId: string,
+    input: UpdateDemoPlanRequest,
   ): Promise<OrchestrationApprovalV1>;
   /**
    * Latest succeeded run's MP4 for a video, with a ready-made download URL.
@@ -71,6 +107,12 @@ export interface OrchestrationClientPort {
     artifactId: string,
     kind?: OrchestrationArtifactKind,
   ): string;
+  /**
+   * Inline preview URL (`?inline=1`). The route only serves PNG bytes inline;
+   * anything else is still `attachment`, so this can never become a
+   * content-type sniffing hole.
+   */
+  artifactInlineUrl(workspaceId: string, artifactId: string): string;
   /** Gate 3 bound export; 409 when the video is not approved for this run. */
   createExportBundle(
     workspaceId: string,
@@ -86,6 +128,8 @@ export interface OrchestrationClientPort {
     provider: string;
     synthetic: boolean;
     license: string;
+    /** 5C capture capability; absent when the server predates Step 5C. */
+    capture?: CaptureHealth;
   }>;
   /** Cheap reachability probe; resolves false instead of throwing. */
   isReachable(): Promise<boolean>;

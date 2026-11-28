@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type {
+  CaptureJobInputV1,
   GitHubCommitSummary,
   GitHubConnectionStatus,
   GitHubFileContent,
@@ -13,8 +14,17 @@ import type {
   GitHubRepositoryMetadata,
   GitHubWriteProbeResult,
 } from '@asvs/domain';
-import { formatGitHubRepoRef } from '@asvs/domain';
-import type { GitHubReadOnlyPort, GitHubTreeEntry } from '@asvs/ports';
+import { captureReceiptV1Schema, formatGitHubRepoRef } from '@asvs/domain';
+import type {
+  CaptureJobExecutionResult,
+  CaptureJobExecutorCallbacks,
+  CaptureJobExecutorPort,
+  GitHubReadOnlyPort,
+  GitHubTreeEntry,
+  RenderJobExecutionResult,
+  RenderJobExecutorCallbacks,
+  RenderJobExecutorPort,
+} from '@asvs/ports';
 import { buildApp } from '../app';
 
 /** apps/api/src/scripts → repository root */
@@ -251,6 +261,417 @@ class FixtureGitHubReadOnlyPort implements GitHubReadOnlyPort {
       writePermissions: [],
       checkedAt: new Date().toISOString(),
     };
+  }
+}
+
+// ── Gate 2 capture double (browser E2E only; this API is test-only) ────────
+
+/**
+ * Fast stand-ins for the two worker subprocesses, installed only when asked.
+ *
+ * The E2E suite drives the production page through Gate 2 in a few seconds, so
+ * it cannot pay for a real Chromium recording plus a Remotion render. These
+ * doubles keep every *server-side* guarantee intact — the orchestrator still
+ * validates the approval ledger, recomputes the plan digest, re-hashes every
+ * file and refuses stray artifacts — and only replace "run the browser" and
+ * "run Remotion" with files that are internally consistent. What they do NOT
+ * prove is that a real capture/render works; that is `pnpm gate2:verify` and
+ * `pnpm capture:demo` / `pnpm render:captured`.
+ */
+
+/** Deterministic fake clip bytes; the receipt and backfill hash these exactly. */
+const FAKE_CLIP_BODY = 'e2e-gate2-double-clip';
+
+function writeGate2Clip(outDir: string, fileName: string): { file: string; sha256: string } {
+  const file = path.join(outDir, fileName);
+  writeFileSync(file, FAKE_CLIP_BODY);
+  return { file, sha256: createHash('sha256').update(FAKE_CLIP_BODY).digest('hex') };
+}
+
+class Gate2CaptureDouble implements CaptureJobExecutorPort {
+  private running = false;
+  constructor(private readonly options: { fail: boolean; message: string }) {}
+  isRunning(): boolean {
+    return this.running;
+  }
+  abort(): void {
+    /* instantaneous double: nothing to kill */
+  }
+  async execute(
+    job: CaptureJobInputV1,
+    _inputFile: string,
+    outDir: string,
+    _checkpointFile: string,
+    callbacks: CaptureJobExecutorCallbacks,
+  ): Promise<CaptureJobExecutionResult> {
+    this.running = true;
+    try {
+      callbacks.onSpawn?.(4_242);
+      callbacks.onHeartbeat?.(4_242);
+      // The same phases the real worker emits, in the same order.
+      callbacks.onCheckpoint?.('plan_verified', { planId: job.plan.id });
+      const checkpoints: Array<{ phase: string; payload: Record<string, unknown> }> = [
+        { phase: 'plan_verified', payload: { planId: job.plan.id } },
+      ];
+      if (this.options.fail) {
+        mkdirSync(path.join(outDir, 'screenshots'), { recursive: true });
+        writeFileSync(path.join(outDir, 'screenshots', '01-failure.png'), FAILURE_PNG_BYTES);
+        writeFileSync(
+          path.join(outDir, 'failure-report.json'),
+          JSON.stringify(
+            {
+              schemaVersion: '1',
+              kind: 'asvs.capture-failure',
+              jobId: job.jobId,
+              planId: job.plan.id,
+              planDigest: job.planDigest,
+              error: this.options.message,
+              blockedRequests: [],
+              screenshots: ['screenshots/01-failure.png'],
+            },
+            null,
+            2,
+          ),
+        );
+        writeFileSync(path.join(outDir, 'trace.zip'), 'e2e-trace');
+        const failedAt = new Date().toISOString();
+        const result = {
+          schemaVersion: '1' as const,
+          kind: 'asvs.capture-job-result' as const,
+          jobId: job.jobId,
+          planId: job.plan.id,
+          planDigest: job.planDigest,
+          policyVersion: job.policyVersion,
+          passed: false,
+          failed: {
+            kind: 'asvs.capture-job-failed' as const,
+            jobId: job.jobId,
+            code: 'capture_assertion_failed' as const,
+            message: this.options.message,
+            failedStepId: job.plan.steps.find((step) => step.action === 'assert')?.id ?? 'assert',
+            failureReportRef: 'failure-report.json',
+            // `traceRef` is deliberately omitted: this failure path leaves no
+            // trace, and naming a file that is not on disk would be a lie the
+            // UI would repeat back to the reviewer.
+            screenshotRefs: ['screenshots/01-failure.png'],
+            assertionFailures: 1,
+            retryable: false,
+            failedAt,
+          },
+          durationMs: 15,
+          writtenAt: failedAt,
+        };
+        writeFileSync(path.join(outDir, 'job-result.json'), JSON.stringify(result, null, 2));
+        return {
+          ok: false,
+          workerPid: 4_242,
+          exitCode: 1,
+          signal: null,
+          crashed: false,
+          code: 'capture_assertion_failed',
+          message: this.options.message,
+          checkpoints,
+          result,
+        };
+      }
+
+      callbacks.onCheckpoint?.('capture_started', { baseUrl: job.plan.baseUrl });
+      callbacks.onCheckpoint?.('capture_recorded', {});
+      callbacks.onCheckpoint?.('clip_transcoded', {});
+      checkpoints.push(
+        { phase: 'capture_started', payload: { baseUrl: job.plan.baseUrl } },
+        { phase: 'capture_recorded', payload: {} },
+        { phase: 'clip_transcoded', payload: {} },
+      );
+      const plannedAsset = job.plan.asset;
+      if (!plannedAsset) {
+        // A receipt must carry the asset it produced; without one there is
+        // nothing honest to record, so fail instead of inventing it.
+        throw new Error('Gate 2 double: 计划缺少 asset，无法生成回执');
+      }
+      const slug = plannedAsset.id;
+      const clip = writeGate2Clip(outDir, `${slug}.mp4`);
+      mkdirSync(path.join(outDir, 'screenshots'), { recursive: true });
+      writeFileSync(path.join(outDir, 'screenshots', '01-dashboard.png'), FAILURE_PNG_BYTES);
+      writeFileSync(path.join(outDir, 'trace.zip'), 'e2e-trace');
+      const durationMs = job.plan.capture.clipDurationMs;
+      const rel = (file: string) => path.relative(job.storageRefBase, file).split(path.sep).join('/');
+      const receipt = captureReceiptV1Schema.parse({
+        schemaVersion: '1',
+        kind: 'asvs.capture-receipt',
+        jobId: job.jobId,
+        planId: job.plan.id,
+        planFile: 'capture-job-input.json',
+        planDigest: job.planDigest,
+        approvalId: job.plan.approval?.approvalId ?? 'appr_e2e',
+        createdAt: new Date().toISOString(),
+        environment: {
+          baseUrl: job.plan.baseUrl,
+          browser: 'Chromium · E2E double',
+          viewport: job.plan.viewport,
+          locale: job.plan.locale,
+          timezoneId: job.plan.timezoneId,
+          colorScheme: job.plan.colorScheme,
+          reducedMotion: job.plan.reducedMotion,
+        },
+        assertions: { total: 1, passed: 1, failed: 0 },
+        steps: [
+          {
+            id: job.plan.steps.find((step) => step.action === 'assert')?.id ?? 'assert',
+            action: 'assert',
+            status: 'passed',
+            startedAtMs: 0,
+            durationMs: 10,
+            assertion: { kind: 'visible', passed: true },
+          },
+        ],
+        rawVideo: {
+          file: rel(clip.file),
+          sha256: clip.sha256,
+          byteSize: Buffer.byteLength(FAKE_CLIP_BODY),
+          mimeType: 'video/webm',
+          width: job.plan.capture.width,
+          height: job.plan.capture.height,
+          fps: job.plan.capture.fps,
+          durationMs,
+          codecName: 'vp8',
+        },
+        clip: {
+          file: rel(clip.file),
+          sha256: clip.sha256,
+          byteSize: Buffer.byteLength(FAKE_CLIP_BODY),
+          mimeType: 'video/mp4',
+          width: job.plan.capture.width,
+          height: job.plan.capture.height,
+          fps: job.plan.capture.fps,
+          durationMs,
+          codecName: 'h264',
+        },
+        trace: {
+          file: 'trace.zip',
+          sha256: createHash('sha256').update('e2e-trace').digest('hex'),
+          byteSize: 9,
+          mimeType: 'application/zip',
+        },
+        screenshots: [
+          {
+            file: 'screenshots/01-dashboard.png',
+            sha256: createHash('sha256').update(FAILURE_PNG_BYTES).digest('hex'),
+            byteSize: FAILURE_PNG_BYTES.length,
+            mimeType: 'image/png',
+          },
+        ],
+        // The asset the planner proposed, flipped to a real capture: mock:false,
+        // media pointing at the clip we just wrote, hashes matching exactly.
+        asset: {
+          id: plannedAsset.id,
+          projectId: job.plan.projectId,
+          name: plannedAsset.name,
+          kind: 'capture',
+          durationSec: Math.max(1, Math.round(durationMs / 1000)),
+          description: plannedAsset.description,
+          palette: plannedAsset.palette,
+          mock: false,
+          media: {
+            src: rel(clip.file),
+            mimeType: 'video/mp4',
+            width: job.plan.capture.width,
+            height: job.plan.capture.height,
+            durationMs,
+            sha256: clip.sha256,
+            capturePlanId: job.plan.id,
+            // Resolved by the orchestrator against the artifact root, which is
+            // where this double wrote it; `rel` keeps it in the same
+            // storageRefBase-relative form as `media.sourceFile`.
+            captureReceiptRef: rel(path.join(outDir, 'capture-receipt.json')),
+          },
+        },
+        media: {
+          assetId: plannedAsset.id,
+          sourceFile: rel(clip.file),
+          sha256: clip.sha256,
+          mimeType: 'video/mp4',
+          width: job.plan.capture.width,
+          height: job.plan.capture.height,
+          durationMs,
+        },
+        renderFixture: { file: 'captured-30s.json', sha256: 'f'.repeat(64) },
+      });
+      writeFileSync(path.join(outDir, 'capture-receipt.json'), JSON.stringify(receipt, null, 2));
+      const completedAt = new Date().toISOString();
+      const result = {
+        schemaVersion: '1' as const,
+        kind: 'asvs.capture-job-result' as const,
+        jobId: job.jobId,
+        planId: job.plan.id,
+        planDigest: job.planDigest,
+        policyVersion: job.policyVersion,
+        passed: true,
+        completed: {
+          kind: 'asvs.capture-job-completed' as const,
+          jobId: job.jobId,
+          planId: job.plan.id,
+          planDigest: job.planDigest,
+          receiptFile: 'capture-receipt.json',
+          receiptSha256: createHash('sha256')
+            .update(readFileSync(path.join(outDir, 'capture-receipt.json')))
+            .digest('hex'),
+          clipFile: rel(clip.file),
+          clipSha256: clip.sha256,
+          clipDurationMs: durationMs,
+          clipWidth: job.plan.capture.width,
+          clipHeight: job.plan.capture.height,
+          assertions: { total: 1, passed: 1, failed: 0 as const },
+          screenshotCount: 1,
+          completedAt,
+        },
+        durationMs: 20,
+        writtenAt: completedAt,
+      };
+      writeFileSync(path.join(outDir, 'job-result.json'), JSON.stringify(result, null, 2));
+      return { ok: true, workerPid: 4_242, exitCode: 0, checkpoints, result };
+    } finally {
+      this.running = false;
+    }
+  }
+}
+
+/** 1×1 PNG; a real image so the inline `nosniff` preview path is exercised. */
+const FAILURE_PNG_BYTES = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+class Gate2RenderDouble implements RenderJobExecutorPort {
+  private running = false;
+  abort(): void {
+    /* instantaneous double */
+  }
+  isRunning(): boolean {
+    return this.running;
+  }
+  async execute(
+    job: unknown,
+    _inputFile: string,
+    outDir: string,
+    _checkpointFile: string,
+    callbacks: RenderJobExecutorCallbacks,
+  ): Promise<RenderJobExecutionResult> {
+    this.running = true;
+    try {
+      const typed = job as {
+        jobId: string;
+        runId: string;
+        audio: unknown[];
+        subtitlesPath?: string;
+      };
+      callbacks.onSpawn?.(4_243);
+      callbacks.onHeartbeat?.(4_243);
+      callbacks.onCheckpoint?.('verified_receipt', {});
+      mkdirSync(outDir, { recursive: true });
+      const mp4 = path.join(outDir, `${typed.runId}.mp4`);
+      writeFileSync(mp4, 'e2e-gate2-double-film');
+      const digest = createHash('sha256').update('e2e-gate2-double-film').digest('hex');
+      const bytes = Buffer.byteLength('e2e-gate2-double-film');
+      const srtFile = path.join(path.dirname(outDir), 'subtitles.srt');
+      const srtContent =
+        typed.subtitlesPath && existsSync(srtFile) ? readFileSync(srtFile, 'utf8') : '';
+      const narrationEnabled = typed.audio.length > 0;
+      writeFileSync(
+        path.join(outDir, 'receipt.json'),
+        JSON.stringify({
+          schemaVersion: '1',
+          jobId: typed.jobId,
+          artifactId: typed.jobId.replace(/^orchjob/, 'artifact'),
+          sha256: digest,
+          mimeType: 'video/mp4',
+          byteSize: bytes,
+          storageRef: path.basename(mp4),
+          durationMs: 6000,
+          width: 1920,
+          height: 1080,
+          fps: 30,
+          rendererVersion: 'e2e-gate2-double',
+          compositionId: 'AsvsVideo',
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      writeFileSync(
+        path.join(outDir, 'manifest.json'),
+        JSON.stringify({
+          schemaVersion: '1',
+          jobId: typed.jobId,
+          artifactId: typed.jobId.replace(/^orchjob/, 'artifact'),
+          compositionId: 'AsvsVideo',
+          rendererVersion: 'e2e-gate2-double',
+          renderInputDigest: 'b'.repeat(64),
+          storyboardDigest: 'c'.repeat(64),
+          sceneDigests: [],
+          assetHashes: [],
+          renderProfile: { width: 1920, height: 1080, codec: 'h264', crf: 18 },
+          output: { fileName: path.basename(mp4), mimeType: 'video/mp4', byteSize: bytes, sha256: digest },
+          ffprobe: {
+            codecName: 'h264',
+            durationMs: 6000,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            frameCount: 180,
+            ...(narrationEnabled
+              ? {
+                  audio: {
+                    codecName: 'aac',
+                    sampleRate: 48_000,
+                    channels: 1,
+                    durationMs: 6000,
+                    meanVolumeDb: -20,
+                  },
+                }
+              : {}),
+          },
+          ...(narrationEnabled
+            ? {
+                narration: {
+                  provider: 'deterministic_test',
+                  model: 'tone-v1',
+                  voiceId: 'test-voice-zh',
+                  language: 'zh-CN',
+                  license: 'internal-deterministic-test-only',
+                  synthetic: true,
+                  timingPolicy: 'extend_scene',
+                  adjustments: [],
+                  clips: [],
+                },
+                subtitles: {
+                  fileName: 'subtitles.srt',
+                  mimeType: 'application/x-subrip',
+                  byteSize: Buffer.byteLength(srtContent),
+                  sha256: createHash('sha256').update(srtContent).digest('hex'),
+                  cueCount: Math.max(1, srtContent.split('\n\n').filter((b) => b.trim()).length),
+                  durationMs: 6000,
+                },
+              }
+            : {}),
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      return {
+        ok: true,
+        workerPid: 4_243,
+        exitCode: 0,
+        checkpoints: [{ phase: 'verified_receipt', payload: {} }],
+        completed: {
+          type: 'completed',
+          receiptPath: path.join('artifacts', 'receipt.json'),
+          manifestPath: path.join('artifacts', 'manifest.json'),
+          outputPath: mp4,
+          outputSha256: digest,
+          byteSize: bytes,
+        },
+      };
+    } finally {
+      this.running = false;
+    }
   }
 }
 
@@ -667,12 +1088,39 @@ async function main(): Promise<void> {
   const artifactDir =
     process.env.ASVS_E2E_ARTIFACT_DIR?.trim() || path.resolve(workspaceRoot, 'dist/e2e/artifacts');
   const fixtureGitHub = new FixtureGitHubReadOnlyPort();
+  // Gate 2 browser specs opt in per call (`/__test/gate2-doubles`), because a
+  // double must never be the default for a spec that proves real behaviour.
+  const gate2 = { captureFail: false, captureMessage: '' };
   const built = await buildApp({
     dbPath,
     artifactDir,
+    // The orchestrator hands the worker `storageRefBase = mediaRoot`, and the
+    // worker writes receipt refs relative to it. The fixture's artifacts live
+    // in a temp dir (not under the repo), so the media root must be that temp
+    // dir's parent or the refs it writes back would resolve nowhere.
+    mediaRoot: path.dirname(artifactDir),
     corsOrigins: ['http://localhost:4200', 'http://127.0.0.1:4200'],
     logger: false,
     github: fixtureGitHub,
+    // One attempt per step: a capture failure must reach the terminal state the
+    // spec asserts on, not spend three retries proving the same thing.
+    maxAttempts: 1,
+    // The real browser-worker downloads Chromium and records for ~20s; the UI
+    // spec only needs the server-side Gate 2 guarantees, which these doubles
+    // preserve exactly. `pnpm gate2:verify` proves the real worker.
+    captureExecutor: {
+      isRunning: () => false,
+      abort: () => undefined,
+      execute: (...args) => new Gate2CaptureDouble({
+        fail: gate2.captureFail,
+        message: gate2.captureMessage,
+      }).execute(...args),
+    },
+    renderExecutor: {
+      isRunning: () => false,
+      abort: () => undefined,
+      execute: (...args) => new Gate2RenderDouble().execute(...args),
+    },
     // The E2E suite runs offline: the deterministic test voice is labelled
     // `synthetic: true` everywhere, so the UI assertions stay honest.
     speechConfig: {
@@ -694,6 +1142,31 @@ async function main(): Promise<void> {
   };
 
   app.post('/__test/advance-commit', async (request, reply) => localOnly(request, reply) ?? fixtureGitHub.advanceCommit());
+
+  /**
+   * Chooses what the Gate 2 double does. `mode: 'capture_failure'` makes the
+   * recording reject an assertion, so a spec can assert the failure evidence
+   * (report + PNG + trace, `captureFailure`, no backfill) without a real
+   * Chromium run. Anything other than this endpoint's default is opt-in.
+   */
+  app.post<{ Body: { mode?: string; message?: string } }>(
+    '/__test/gate2-doubles',
+    async (request, reply) => {
+      const denied = localOnly(request, reply);
+      if (denied) return denied;
+      const mode = request.body?.mode ?? 'capture_success';
+      if (mode !== 'capture_success' && mode !== 'capture_failure') {
+        return reply
+          .code(400)
+          .send({ error: { code: 'bad_request', message: `未知的 gate2 模式：${mode}` } });
+      }
+      gate2.captureFail = mode === 'capture_failure';
+      gate2.captureMessage =
+        request.body?.message?.trim() ||
+        '断言失败 [visible] heading=声明与证据：超时仍不可见（4000ms）';
+      return reply.code(200).send({ mode });
+    },
+  );
 
   /**
    * Seeds a succeeded narrated run (MP4 + SRT + manifest + receipt) for an

@@ -222,6 +222,165 @@ describe('HttpOrchestrationClient', () => {
     ).rejects.toMatchObject({ status: 409, code: 'export_not_approved' });
   });
 
+  it('approveRun 发送 approvalId + subjectDigest + note（Gate 2 绑定摘要）', async () => {
+    const approval = {
+      approvalId: 'appr_0123456789abcdef',
+      stepKey: 'capture_demo' as const,
+      status: 'approved' as const,
+      gateType: 'gate2_demo_capture' as const,
+      subjectDigest: 'd'.repeat(64),
+      policyVersion: 'gate2-v1',
+      requestedAt: ISO,
+      approvedAt: ISO,
+      decidedBy: 'local',
+      decisionNote: '只读计划',
+    };
+    const fetchImpl = vi.fn(async () => response({ approval }));
+    const result = await client(fetchImpl).approveRun(WORKSPACE_ID, DETAIL.run.id, {
+      approvalId: approval.approvalId,
+      subjectDigest: approval.subjectDigest,
+      note: '只读计划',
+    });
+    expect(result.status).toBe('approved');
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(
+      `/api/v1/workspaces/${WORKSPACE_ID}/orchestration/runs/${DETAIL.run.id}/approve`,
+    );
+    expect(JSON.parse(String(init.body))).toEqual({
+      approvalId: approval.approvalId,
+      subjectDigest: approval.subjectDigest,
+      note: '只读计划',
+    });
+  });
+
+  it('409 approval_subject_mismatch 原样透出（不重试、不静默改摘要）', async () => {
+    const fetchImpl = vi.fn(async () =>
+      response({ error: { code: 'approval_subject_mismatch', message: '摘要不一致' } }, 409),
+    );
+    await expect(
+      client(fetchImpl).approveRun(WORKSPACE_ID, DETAIL.run.id, {
+        approvalId: 'appr_x',
+        subjectDigest: 'e'.repeat(64),
+      }),
+    ).rejects.toMatchObject({ status: 409, code: 'approval_subject_mismatch' });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejectRun 发送 approvalId + reason，并解析被驳回的审批', async () => {
+    const approval = {
+      approvalId: 'appr_x',
+      stepKey: 'capture_demo' as const,
+      status: 'rejected' as const,
+      gateType: 'gate2_demo_capture' as const,
+      requestedAt: ISO,
+      rejectedAt: ISO,
+      decidedBy: 'local',
+      decisionNote: '包含未审计写操作',
+    };
+    const fetchImpl = vi.fn(async () => response({ approval }));
+    const result = await client(fetchImpl).rejectRun(WORKSPACE_ID, DETAIL.run.id, {
+      approvalId: 'appr_x',
+      reason: '包含未审计写操作',
+    });
+    expect(result.status).toBe('rejected');
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(
+      `/api/v1/workspaces/${WORKSPACE_ID}/orchestration/runs/${DETAIL.run.id}/reject`,
+    );
+    expect(JSON.parse(String(init.body))).toEqual({
+      approvalId: 'appr_x',
+      reason: '包含未审计写操作',
+    });
+  });
+
+  it('updateDemoPlan 走 PUT，并把新审批（新摘要）返回给调用方', async () => {
+    const approval = {
+      approvalId: 'appr_new',
+      stepKey: 'capture_demo' as const,
+      status: 'pending' as const,
+      gateType: 'gate2_demo_capture' as const,
+      subjectDigest: 'f'.repeat(64),
+      requestedAt: ISO,
+    };
+    const fetchImpl = vi.fn(async () => response({ approval, run: null }));
+    const result = await client(fetchImpl).updateDemoPlan(WORKSPACE_ID, DETAIL.run.id, {
+      expectedPlanDigest: 'a'.repeat(64),
+      patch: { template: 'web_studio_tour' },
+    });
+    expect(result.approvalId).toBe('appr_new');
+    expect(result.subjectDigest).toBe('f'.repeat(64));
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(init.method).toBe('PUT');
+    expect(url).toBe(
+      `/api/v1/workspaces/${WORKSPACE_ID}/orchestration/runs/${DETAIL.run.id}/demo-plan`,
+    );
+    expect(JSON.parse(String(init.body))).toEqual({
+      expectedPlanDigest: 'a'.repeat(64),
+      patch: { template: 'web_studio_tour' },
+    });
+  });
+
+  it('updateDemoPlan 对过期摘要的 409 plan_digest_stale 抛出而不是覆盖', async () => {
+    const fetchImpl = vi.fn(async () =>
+      response({ error: { code: 'plan_digest_stale', message: '摘要已过期' } }, 409),
+    );
+    await expect(
+      client(fetchImpl).updateDemoPlan(WORKSPACE_ID, DETAIL.run.id, {
+        expectedPlanDigest: 'a'.repeat(64),
+        patch: { resetStrategy: 'none' },
+      }),
+    ).rejects.toMatchObject({ status: 409, code: 'plan_digest_stale' });
+  });
+
+  it('artifactInlineUrl 生成 ?inline=1，download 与 inline 命中同一路由', () => {
+    const instance = client(vi.fn());
+    expect(instance.artifactInlineUrl(WORKSPACE_ID, 'artifact shot')).toBe(
+      `/api/v1/workspaces/${WORKSPACE_ID}/orchestration/artifacts/artifact%20shot?inline=1`,
+    );
+    expect(instance.artifactDownloadUrl(WORKSPACE_ID, 'artifact shot')).toBe(
+      `/api/v1/workspaces/${WORKSPACE_ID}/orchestration/artifacts/artifact%20shot/download`,
+    );
+  });
+
+  it('getHealth 解析可选 capture 块；旧服务端缺失时不伪造能力', async () => {
+    const withCapture = vi.fn(async () =>
+      response({
+        ok: true,
+        orchestrationReady: true,
+        tts: { configured: true, provider: 'p', synthetic: true, license: 'l' },
+        capture: {
+          enabled: true,
+          allowedOrigins: ['http://localhost:4200'],
+          defaultBaseUrl: 'http://localhost:4200',
+          allowAutoServe: false,
+          policyVersion: 'gate2-v1',
+        },
+      }),
+    );
+    const health = await client(withCapture).getHealth();
+    expect(health.capture).toEqual({
+      enabled: true,
+      allowedOrigins: ['http://localhost:4200'],
+      defaultBaseUrl: 'http://localhost:4200',
+      allowAutoServe: false,
+      policyVersion: 'gate2-v1',
+    });
+
+    const legacy = vi.fn(async () =>
+      response({
+        ok: true,
+        orchestrationReady: true,
+        tts: { configured: true, provider: 'p', synthetic: true, license: 'l' },
+      }),
+    );
+    await expect(client(legacy).getHealth()).resolves.toEqual({
+      configured: true,
+      provider: 'p',
+      synthetic: true,
+      license: 'l',
+    });
+  });
+
   it('listExportBundles 传递 videoId/limit 并解析 bundles 数组', async () => {
     const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       response({ bundles: [exportDetail()] }),

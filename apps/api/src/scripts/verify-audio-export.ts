@@ -15,6 +15,7 @@ import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import {
   exportBundleDetailV1Schema,
+  type OrchestrationStepKey,
   type StoryboardV1,
   type StudioSnapshot,
 } from '@asvs/domain';
@@ -55,6 +56,12 @@ const WORKSPACE_ID = 'ws_audio_export_verify';
 const VIDEO_ID = 'vid_audio_export';
 const UNAPPROVED_VIDEO_ID = 'vid_audio_unapproved';
 const ISO = '2026-11-27T10:00:00.000Z';
+/**
+ * 5C Gate 2 steps; `skipped` here means "capture was never requested". Typed as
+ * `OrchestrationStepKey[]` (not a bare literal array) so it can index the
+ * step-keyed Map without widening to `string`.
+ */
+const CAPTURE_STEP_KEYS: OrchestrationStepKey[] = ['plan_demo', 'capture_demo'];
 
 /**
  * ~150 characters of Chinese. The deterministic adapter estimates 4.2 chars/s,
@@ -439,10 +446,19 @@ async function main(): Promise<void> {
         `运行未成功：${finished?.run.status ?? 'n/a'} ${finished?.run.failure?.code ?? ''} ${finished?.run.failure?.message ?? ''}`,
       );
     }
+    // 5C widened the DAG to nine steps. This script never requests capture, so
+    // `plan_demo` / `capture_demo` must be `skipped` — not failed, not silently
+    // absent — and every other step must have succeeded.
+    const stepStatus = new Map(finished.run.steps.map((step) => [step.stepKey, step.status]));
     record(
-      '七个步骤全部完成（含 synthesize_voice / generate_subtitles）',
-      finished.run.steps.every((step) => step.status === 'succeeded') &&
-        finished.run.steps.length === 7,
+      '九个步骤全部到达终态（5C 未请求录屏时两步 skipped）',
+      finished.run.steps.length === 9 &&
+        finished.run.steps.every(
+          (step) =>
+            step.status === 'succeeded' ||
+            (CAPTURE_STEP_KEYS.includes(step.stepKey) && step.status === 'skipped'),
+        ) &&
+        CAPTURE_STEP_KEYS.every((key) => stepStatus.get(key) === 'skipped'),
       finished.run.steps.map((step) => `${step.stepKey}:${step.status}`).join(' · '),
     );
 

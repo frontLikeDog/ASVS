@@ -17,6 +17,7 @@ import type {
   ExportBundleListOptions,
   ListOrchestrationRunsQuery,
   OrchestrationClientPort,
+  UpdateDemoPlanRequest,
 } from '@asvs/ports';
 
 export interface HttpOrchestrationClientOptions {
@@ -52,6 +53,11 @@ const runEnvelopeSchema = z.object({ run: orchestrationRunV1Schema });
 
 const approvalEnvelopeSchema = z.object({ approval: orchestrationApprovalV1Schema });
 
+const updateDemoPlanResponseSchema = z.object({
+  approval: orchestrationApprovalV1Schema,
+  run: orchestrationRunV1Schema.nullable().optional(),
+});
+
 const latestArtifactResponseSchema = z.object({
   run: orchestrationRunV1Schema,
   artifact: orchestrationArtifactV1Schema,
@@ -74,6 +80,17 @@ const healthResponseSchema = z.object({
     synthetic: z.boolean(),
     license: z.string(),
   }),
+  // Absent on a pre-5C server; the UI then treats capture as unavailable
+  // rather than assuming it works (fail closed).
+  capture: z
+    .object({
+      enabled: z.boolean(),
+      allowedOrigins: z.array(z.string()),
+      defaultBaseUrl: z.string(),
+      allowAutoServe: z.boolean(),
+      policyVersion: z.string(),
+    })
+    .optional(),
 });
 
 function trimTrailingSlash(value: string): string {
@@ -212,7 +229,7 @@ export class HttpOrchestrationClient implements OrchestrationClientPort {
   async approveRun(
     workspaceId: string,
     runId: string,
-    input: { approvalId: string; subjectDigest?: string },
+    input: { approvalId: string; subjectDigest: string; note?: string },
   ) {
     const response = await this.request(
       this.url(workspaceId, `/runs/${encodeURIComponent(runId)}/approve`),
@@ -222,6 +239,32 @@ export class HttpOrchestrationClient implements OrchestrationClientPort {
     return approvalEnvelopeSchema.parse(await response.json()).approval;
   }
 
+  async rejectRun(
+    workspaceId: string,
+    runId: string,
+    input: { approvalId: string; reason?: string },
+  ) {
+    const response = await this.request(
+      this.url(workspaceId, `/runs/${encodeURIComponent(runId)}/reject`),
+      { method: 'POST', body: JSON.stringify(input) },
+    );
+    if (!response.ok) throw await readError(response);
+    return approvalEnvelopeSchema.parse(await response.json()).approval;
+  }
+
+  async updateDemoPlan(
+    workspaceId: string,
+    runId: string,
+    input: UpdateDemoPlanRequest,
+  ) {
+    const response = await this.request(
+      this.url(workspaceId, `/runs/${encodeURIComponent(runId)}/demo-plan`),
+      { method: 'PUT', body: JSON.stringify(input) },
+    );
+    if (!response.ok) throw await readError(response);
+    return updateDemoPlanResponseSchema.parse(await response.json()).approval;
+  }
+
   artifactDownloadUrl(
     workspaceId: string,
     artifactId: string,
@@ -229,6 +272,10 @@ export class HttpOrchestrationClient implements OrchestrationClientPort {
   ): string {
     void _kind;
     return this.url(workspaceId, `/artifacts/${encodeURIComponent(artifactId)}/download`);
+  }
+
+  artifactInlineUrl(workspaceId: string, artifactId: string): string {
+    return this.url(workspaceId, `/artifacts/${encodeURIComponent(artifactId)}?inline=1`);
   }
 
   async createExportBundle(
@@ -276,6 +323,13 @@ export class HttpOrchestrationClient implements OrchestrationClientPort {
     provider: string;
     synthetic: boolean;
     license: string;
+    capture?: {
+      enabled: boolean;
+      allowedOrigins: string[];
+      defaultBaseUrl: string;
+      allowAutoServe: boolean;
+      policyVersion: string;
+    };
   }> {
     const response = await this.fetchImpl(`${this.baseUrl}/v1/health`, {
       signal: AbortSignal.timeout(5_000),
@@ -287,6 +341,7 @@ export class HttpOrchestrationClient implements OrchestrationClientPort {
       provider: body.tts.provider,
       synthetic: body.tts.synthetic,
       license: body.tts.license,
+      ...(body.capture ? { capture: body.capture } : {}),
     };
   }
 

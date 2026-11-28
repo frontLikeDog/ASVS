@@ -241,7 +241,10 @@ export function ProductionPage() {
 
       <div className="mt-4 grid grid-cols-[minmax(0,1fr)] gap-4 xl:grid-cols-[minmax(0,1fr)_330px]">
         <div className="space-y-4">
-          <ServerOrchestrationPanel api={serverApi} />
+          <ServerOrchestrationPanel
+            api={serverApi}
+            realDemoSceneCount={video.scenes.filter((scene) => scene.visualType === 'real_demo').length}
+          />
           {!selectedRun ? (
             <Panel>
               <div className="p-6">

@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { parseGitHubRepoRef, type GitHubRepoRef } from '@asvs/domain';
 import type { GitHubReadOnlyPort, SpeechRuntimeConfig } from '@asvs/ports';
+import type { CaptureServiceConfig } from './orchestration/demo-planner-service';
 import {
   GitHubAppReadOnlyClient,
   UnconfiguredGitHubReadOnlyClient,
@@ -36,6 +37,66 @@ export interface ApiConfig {
   schedulerIntervalMs: number;
   /** Explicit worker script path; defaults to the in-repo tsx entry. */
   workerScript?: string;
+  /** Step 5C · Gate 2 capture. `enabled: false` fails creation with 503. */
+  capture: CaptureServiceConfig;
+  /** Explicit browser-worker script path; defaults to the in-repo tsx entry. */
+  captureWorkerScript?: string;
+}
+
+const DEFAULT_CAPTURE_ORIGINS = ['http://localhost:4200', 'http://127.0.0.1:4200'];
+
+function readBoolean(env: NodeJS.ProcessEnv, key: string, fallback: boolean): boolean {
+  const raw = env[key]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  if (raw === 'true' || raw === '1' || raw === 'yes') return true;
+  if (raw === 'false' || raw === '0' || raw === 'no') return false;
+  throw new Error(`${key} 无效：${raw}（需要 true / false）`);
+}
+
+function readOrigins(env: NodeJS.ProcessEnv, key: string, fallback: string[]): string[] {
+  const raw = env[key]?.trim();
+  const values = (raw ? raw.split(',') : fallback).map((item) => item.trim()).filter(Boolean);
+  const origins: string[] = [];
+  for (const value of values) {
+    let origin: string;
+    try {
+      const url = new URL(value);
+      origin = url.origin;
+    } catch {
+      throw new Error(`${key} 中的 origin 无效：${value}（需要形如 http://localhost:4200）`);
+    }
+    if (!isExactOrigin(value)) {
+      throw new Error(`${key} 只接受精确 origin（不含路径）：${value}`);
+    }
+    if (!origins.includes(origin)) origins.push(origin);
+  }
+  if (origins.length === 0) throw new Error(`${key} 至少需要一个 origin`);
+  return origins;
+}
+
+function isExactOrigin(value: string): boolean {
+  try {
+    return new URL(value).origin === value.replace(/\/+$/, '');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Reads the capture settings. Nothing here is a secret: the allowlist is
+ * public information and is surfaced through `/v1/health` so the UI can show
+ * the exact origins a capture may target.
+ */
+export function loadCaptureConfig(env: NodeJS.ProcessEnv = process.env): CaptureServiceConfig {
+  const allowedOrigins = readOrigins(env, 'ASVS_CAPTURE_ALLOWED_ORIGINS', DEFAULT_CAPTURE_ORIGINS);
+  const defaultBaseUrl =
+    env.ASVS_CAPTURE_DEFAULT_BASE_URL?.trim() || allowedOrigins[0] || DEFAULT_CAPTURE_ORIGINS[0]!;
+  return {
+    enabled: readBoolean(env, 'ASVS_CAPTURE_ENABLED', true),
+    allowedOrigins,
+    defaultBaseUrl,
+    allowAutoServe: readBoolean(env, 'ASVS_CAPTURE_ALLOW_AUTO_SERVE', false),
+  };
 }
 
 const SPEECH_PROVIDERS = ['unconfigured', 'openai_compatible', 'deterministic_test'] as const;
@@ -128,6 +189,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
       max: 60_000,
     }),
     workerScript: env.ASVS_RENDER_WORKER_SCRIPT?.trim() || undefined,
+    capture: loadCaptureConfig(env),
+    captureWorkerScript: env.ASVS_CAPTURE_WORKER_SCRIPT?.trim() || undefined,
   };
 }
 

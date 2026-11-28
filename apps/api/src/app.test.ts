@@ -282,4 +282,23 @@ describe('ASVS API · 工作区', () => {
     const response = await app!.inject({ method: 'GET', url: '/v1/workspaces/bad%20id' });
     expect(response.statusCode).toBe(400);
   });
+
+  it('CORS 预检允许 PUT：同步保存与 Gate 2 计划编辑都是浏览器写入', async () => {
+    await start();
+    // `@fastify/cors` defaults to `GET,HEAD,POST`. A preflight that omits PUT
+    // makes the browser refuse the request before it is ever sent, so the
+    // workspace save and the Gate 2 plan edit would silently die in the tab.
+    const preflight = await app!.inject({
+      method: 'OPTIONS',
+      url: '/v1/workspaces/ws_cors/orchestration/runs/run_1/demo-plan',
+      headers: {
+        origin: 'http://localhost:4200',
+        'access-control-request-method': 'PUT',
+        'access-control-request-headers': 'content-type',
+      },
+    });
+    expect(preflight.statusCode).toBeLessThan(300);
+    expect(preflight.headers['access-control-allow-origin']).toBe('http://localhost:4200');
+    expect(String(preflight.headers['access-control-allow-methods'])).toContain('PUT');
+  });
 });

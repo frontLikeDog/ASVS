@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { Suspense, lazy, useEffect, useRef, useState, type ReactNode } from 'react';
 import type {
   OrchestrationArtifactV1,
   OrchestrationRunV1,
@@ -40,10 +40,21 @@ import {
   formatDurationMs,
   isActiveServerRun,
   shortSha,
+  type CaptureHealthView,
+  type CaptureOptions,
   type NarrationOptions,
   type ServerOrchestrationApi,
   type ServerStepView,
 } from './server-orchestration';
+
+/**
+ * Gate 2 approval + capture evidence, in its own chunk.
+ *
+ * `production` has a 24 kB gzip route budget; the plan table and evidence
+ * viewer are the biggest thing on the page and are only needed once a run
+ * exists, so they must not enter the route's static import closure.
+ */
+const Gate2ApprovalPanel = lazy(() => import('./gate2-approval-panel'));
 
 /** UI-bounded speed range; the domain allows 0.75–1.35 but 0.85–1.2 is sane. */
 const SPEED_OPTIONS = [0.85, 0.9, 1, 1.1, 1.2] as const;
@@ -87,7 +98,14 @@ function runProgressPercent(run: OrchestrationRunV1 | null): number {
  * not in this tab). The audio metadata shown here comes from the worker's own
  * ffprobe result in the manifest — never from the requested narration options.
  */
-export function ServerOrchestrationPanel({ api }: { api: ServerOrchestrationApi }) {
+export function ServerOrchestrationPanel({
+  api,
+  realDemoSceneCount = 0,
+}: {
+  api: ServerOrchestrationApi;
+  /** Scenes the video marks `real_demo`; the capture toggle is pointless at 0. */
+  realDemoSceneCount?: number;
+}) {
   const pushToast = useUiStore((state) => state.pushToast);
   const { availability, run, detail, error, busy, steps, events } = api;
   const [downloading, setDownloading] = useState(false);
@@ -108,6 +126,8 @@ export function ServerOrchestrationPanel({ api }: { api: ServerOrchestrationApi 
     : api.speech?.synthetic === true;
   const narrationEnabled = run?.input.narration?.enabled ?? api.narration.enabled;
   const speechUnavailable = api.speech !== null && !api.speech.configured;
+  // The server fails closed here; disabling the button just saves a round trip.
+  const captureBlocked = api.capture.enabled && realDemoSceneCount === 0;
 
   const download = async (artifact: OrchestrationArtifactV1) => {
     setDownloading(true);
@@ -181,6 +201,14 @@ export function ServerOrchestrationPanel({ api }: { api: ServerOrchestrationApi 
               disabled={busy}
             />
 
+            <CaptureOptionsPanel
+              options={api.capture}
+              onChange={api.setCapture}
+              health={api.captureHealth}
+              realDemoSceneCount={realDemoSceneCount}
+              disabled={busy}
+            />
+
             {api.error ? (
               <div className="flex items-start gap-1.5 text-[9.5px] leading-4 text-danger">
                 <AlertTriangle size={11} className="mt-0.5 shrink-0" />
@@ -193,15 +221,19 @@ export function ServerOrchestrationPanel({ api }: { api: ServerOrchestrationApi 
                 variant="primary"
                 size="sm"
                 icon={<Server size={12} />}
-                disabled={busy || (narrationEnabled && speechUnavailable)}
+                disabled={busy || (narrationEnabled && speechUnavailable) || captureBlocked}
                 onClick={() => void api.start()}
               >
                 {busy ? '正在创建…' : '启动服务端渲染'}
               </Button>
               <span className="text-[9px] text-faint">
-                {narrationEnabled && speechUnavailable
-                  ? '未配置 TTS：旁白已启用时服务端会拒绝创建运行（503），不会静默降级为无声。'
-                  : '真实的 16:9 MP4 会写入服务器产物目录；不依赖浏览器定时器。'}
+                {captureBlocked
+                  ? '已启用真实录屏但没有 real_demo 镜头：服务端会以 400 no_real_demo_scenes 拒绝创建，不会静默跳过。'
+                  : narrationEnabled && speechUnavailable
+                    ? '未配置 TTS：旁白已启用时服务端会拒绝创建运行（503），不会静默降级为无声。'
+                    : api.capture.enabled
+                      ? '运行会先停在上报计划等待 Gate 2 审批；批准后才启动浏览器录制。'
+                      : '真实的 16:9 MP4 会写入服务器产物目录；不依赖浏览器定时器。'}
               </span>
             </div>
           </>
@@ -261,7 +293,19 @@ export function ServerOrchestrationPanel({ api }: { api: ServerOrchestrationApi 
               </Callout>
             ) : null}
 
-            {run.approval && run.approval.status === 'pending' ? (
+            {run.demoPlan || run.captureFailure ? (
+              <Suspense
+                fallback={
+                  <div className="flex items-center gap-1.5 rounded-sm border border-line px-3 py-2 text-[9.5px] text-faint">
+                    <Loader2 size={11} className="animate-spin" /> 正在载入 Gate 2 审批与录屏证据…
+                  </div>
+                }
+              >
+                <Gate2ApprovalPanel api={api} />
+              </Suspense>
+            ) : null}
+
+            {run.approval && run.approval.status === 'pending' && !run.demoPlan ? (
               <Callout
                 tone="warning"
                 size="sm"
@@ -607,6 +651,116 @@ function NarrationOptionsPanel({
   );
 }
 
+/**
+ * Capture controls for a new run (Gate 2 input).
+ *
+ * The toggle is the opt-in: leaving it off records `plan_demo`/`capture_demo`
+ * as skipped at creation. Turning it on without a `real_demo` scene is a
+ * server-side 400, so the button says why instead of letting the create fail.
+ */
+function CaptureOptionsPanel({
+  options,
+  onChange,
+  health,
+  realDemoSceneCount,
+  disabled,
+}: {
+  options: CaptureOptions;
+  onChange: (options: CaptureOptions) => void;
+  health: CaptureHealthView | null;
+  realDemoSceneCount: number;
+  disabled: boolean;
+}) {
+  const set = (patch: Partial<CaptureOptions>) => onChange({ ...options, ...patch });
+  const serverOff = health !== null && !health.enabled;
+  const noRealDemo = realDemoSceneCount === 0;
+  return (
+    <div className="rounded-sm border border-line bg-raised/20 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Switch
+            checked={options.enabled}
+            onCheckedChange={(checked) => set({ enabled: checked })}
+            disabled={disabled || serverOff}
+            label="真实录屏（Gate 2）"
+          />
+          <div>
+            <div className="text-[10.5px] font-medium text-fg">真实录屏（Gate 2 审批）</div>
+            <div className="text-[8.5px] text-faint">
+              生成受控 DemoPlan → 人工审批 → 独立子进程驱动 Chromium 录制；断言全过才回填渲染输入。
+            </div>
+          </div>
+        </div>
+        {serverOff ? (
+          <Badge tone="danger" dot={false}>服务端未启用</Badge>
+        ) : health ? (
+          <Badge tone="success" dot={false}>已配置 · 策略 {health.policyVersion}</Badge>
+        ) : (
+          <Badge tone="outline" dot={false}>状态未知</Badge>
+        )}
+      </div>
+
+      {options.enabled ? (
+        <div className="mt-3 grid gap-2 sm:grid-cols-3">
+          <Field label="计划模板">
+            <Select
+              value={options.template}
+              disabled={disabled}
+              onChange={(event) => set({ template: event.target.value as CaptureOptions['template'] })}
+            >
+              <option value="web_studio_knowledge_claim">4D 知识与声明验证</option>
+              <option value="web_studio_tour">web-studio 巡览</option>
+              <option value="web_studio_route_focus">按路由聚焦</option>
+              <option value="custom">自定义计划</option>
+            </Select>
+          </Field>
+          <Field label="目标 baseUrl" hint="必须命中服务端 origin 白名单">
+            <Input
+              value={options.baseUrl}
+              placeholder={health?.defaultBaseUrl || 'http://localhost:4200'}
+              disabled={disabled}
+              onChange={(event) => set({ baseUrl: event.target.value })}
+            />
+          </Field>
+          <Field label="重置策略">
+            <Select
+              value={options.resetStrategy}
+              disabled={disabled}
+              onChange={(event) => set({ resetStrategy: event.target.value as CaptureOptions['resetStrategy'] })}
+            >
+              <option value="fixture">fixture（清空存储并重载种子）</option>
+              <option value="none">none（不重置）</option>
+            </Select>
+          </Field>
+        </div>
+      ) : null}
+
+      {serverOff ? (
+        <div className="mt-2 flex items-start gap-1.5 rounded-sm border border-warn/25 bg-warn-soft/20 px-2.5 py-2 text-[9px] leading-5 text-warn">
+          <AlertTriangle size={10} className="mt-0.5 shrink-0" />
+          服务端未启用真实录屏（ASVS_CAPTURE_ENABLED）。开启后创建运行会返回 503 capture_not_configured；
+          不会静默降级为模拟画面。
+        </div>
+      ) : options.enabled && noRealDemo ? (
+        <div className="mt-2 flex items-start gap-1.5 rounded-sm border border-warn/25 bg-warn-soft/20 px-2.5 py-2 text-[9px] leading-5 text-warn">
+          <AlertTriangle size={10} className="mt-0.5 shrink-0" />
+          本视频没有 <span className="font-mono">real_demo</span> 镜头。服务端以 400 no_real_demo_scenes
+          拒绝创建（fail-closed），请先在分镜中把某个镜头改为真实录屏。
+        </div>
+      ) : options.enabled ? (
+        <p className="mt-2 text-[9px] leading-4 text-faint">
+          白名单 origin：{health?.allowedOrigins.join(' · ') ?? '（启动后由服务端下发）'}。计划只允许语义
+          selector，任何 CSS / XPath / 脚本都会在浏览器启动前被拒绝。
+        </p>
+      ) : (
+        <p className="mt-2 text-[9px] leading-4 text-faint">
+          未启用时 plan_demo / capture_demo 会在创建运行时记为 skipped，DAG 仍完整展示这两步。
+        </p>
+      )}
+    </div>
+  );
+}
+
 function FactCard({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-sm border border-line bg-raised/20 px-2.5 py-2">
@@ -641,6 +795,10 @@ function stepName(stepKey: OrchestrationStepKey): string {
       return '冻结输入';
     case 'verify_claims':
       return '核验声明';
+    case 'plan_demo':
+      return '生成计划';
+    case 'capture_demo':
+      return '真实录屏';
     case 'prepare_media':
       return '准备素材';
     case 'synthesize_voice':

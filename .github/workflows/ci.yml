@@ -106,8 +106,11 @@ jobs:
           RENDER_PROJECTS="domain|render|render-worker|mock-data|api|ports|adapters-http"
           # The DemoPlan drives the shipped UI, so any page, store or contract
           # change can invalidate its assertions. Capture is also the only gate
-          # that proves the real-footage → render handoff.
-          CAPTURE_PROJECTS="browser-worker|domain|render|render-worker|mock-data|mock-services|state|ui|web-studio|project-hub|video-studio|production-suite"
+          # that proves the real-footage → render handoff. `api` is included
+          # because `pnpm gate2:verify` (5C) lives there: it drives Gate 2,
+          # the browser worker and the render worker through the real server
+          # orchestration code, so an API change is exactly what it must cover.
+          CAPTURE_PROJECTS="browser-worker|domain|render|render-worker|mock-data|mock-services|state|ui|web-studio|project-hub|video-studio|production-suite|api|ports|adapters-http"
 
           if printf '%s' "$WRAPPED" | grep -qE ",($E2E_PROJECTS),"; then
             E2E=true
@@ -409,6 +412,17 @@ jobs:
       - name: Verify rendered MP4, receipt and real-media hashes
         run: pnpm verify:render:captured
 
+      # Step 5C / WP-14: Gate 2 through the real server orchestration — planner,
+      # approval binding, API restart, both tamper layers, real Chromium capture
+      # of the build above, backfill, narration, SRT and a real Remotion render.
+      # api/src is inside the CAPTURE_PROJECTS set, so an API change runs it.
+      - name: Verify Gate 2 capture orchestration (5C)
+        run: pnpm gate2:verify
+        env:
+          # Absolute so the upload step resolves it from the repo root, not the
+          # nx target's cwd (apps/api).
+          ASVS_VERIFY_CAPTURE_DIR: ${{ github.workspace }}/dist/gate2-verify
+
       - name: Upload capture and render evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -428,6 +442,7 @@ jobs:
             dist/render-worker/captured-30s/captured-30s.mp4
             dist/render-worker/captured-30s/manifest.json
             dist/render-worker/captured-30s/receipt.json
+            dist/gate2-verify/**
           retention-days: 7
           if-no-files-found: warn
 
@@ -456,6 +471,17 @@ jobs:
 
       - name: Install Chromium
         run: pnpm exec playwright install --with-deps chromium
+
+      # The Gate 2 capture spec approves a real run, and `synthesize_voice`
+      # shells out to ffmpeg to normalize every narration clip — without it the
+      # run fails at step 6 with `spawnSync ffmpeg ENOENT` and the "clip was
+      # backfilled" assertion never gets a chance to pass. Same reason the
+      # validate job installs it.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 ffmpeg
+          ffmpeg -version
 
       - name: Run Playwright
         run: pnpm test:e2e
