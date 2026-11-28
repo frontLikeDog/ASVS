@@ -140,6 +140,20 @@ async function main(): Promise<void> {
       )
     : null;
 
+  // The orchestrator records this probe summary on the artifact row; it is the
+  // worker's own measurement, not the server's optimistic input. A fully silent
+  // track probes as -Infinity and is never emitted as a usable audio summary.
+  const probedAudio = outcome.manifest.ffprobe.audio;
+  const audioSummary =
+    probedAudio && probedAudio.meanVolumeDb !== undefined && Number.isFinite(probedAudio.meanVolumeDb)
+      ? {
+          codecName: probedAudio.codecName,
+          sampleRate: probedAudio.sampleRate,
+          channels: probedAudio.channels,
+          durationMs: probedAudio.durationMs,
+          meanVolumeDb: probedAudio.meanVolumeDb,
+        }
+      : undefined;
   emit({
     type: 'completed',
     receiptPath: path.join(options.outDir, 'receipt.json'),
@@ -147,6 +161,7 @@ async function main(): Promise<void> {
     outputPath: outcome.outputFile,
     outputSha256: outcome.receipt.sha256,
     byteSize: outcome.receipt.byteSize,
+    ...(audioSummary ? { audio: audioSummary } : {}),
     at: new Date().toISOString(),
   });
   logError(

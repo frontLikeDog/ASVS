@@ -1,7 +1,12 @@
 import { createReadStream } from 'node:fs';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { orchestrationRunStatusSchema } from '@asvs/domain';
+import {
+  MAX_SPEECH_SPEED,
+  MIN_SPEECH_SPEED,
+  narrationTimingPolicySchema,
+  orchestrationRunStatusSchema,
+} from '@asvs/domain';
 import type { OrchestrationServicePort } from '@asvs/ports';
 import { fileSize } from '../orchestration/artifacts';
 import { OrchestrationHttpError } from '../orchestration/errors';
@@ -22,6 +27,27 @@ const createRunBodySchema = z.object({
       crf: z.number().int().min(0).max(51).optional(),
     })
     .optional(),
+  // 5B: omitted means "narration on with server defaults". An explicit
+  // `enabled: false` is the only way to request a silent render.
+  narration: z
+    .object({
+      enabled: z.boolean().optional(),
+      voiceId: z.string().trim().min(1).max(200).optional(),
+      speed: z.number().min(MIN_SPEECH_SPEED).max(MAX_SPEECH_SPEED).optional(),
+      timingPolicy: narrationTimingPolicySchema.optional(),
+    })
+    .optional(),
+});
+
+const createExportBodySchema = z.object({
+  videoId: z.string().trim().min(1).max(200),
+  runId: z.string().trim().min(1).max(200).optional(),
+  approvalNote: z.string().trim().max(500).optional(),
+});
+
+const exportLookupSchema = z.object({
+  videoId: z.string().trim().min(1).max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
 });
 
 const approveBodySchema = z.object({
@@ -145,36 +171,83 @@ export function registerOrchestrationRoutes(
   /**
    * Artifact download. `storageRef` is re-resolved under the artifact root and
    * traversal is refused; the ETag is the stored SHA256, so a client can
-   * verify the bytes it received against the receipt.
+   * verify the bytes it received against the receipt. `.srt` keeps its exact
+   * `application/x-subrip; charset=utf-8` type so players and editors open it
+   * as subtitles rather than as a generic text download.
    */
+  const downloadHandler = async (
+    request: { params: { workspaceId: string; artifactId: string }; headers: Record<string, unknown> },
+    reply: FastifyReply,
+  ) => {
+    const resolved = await service.resolveArtifactFile(
+      request.params.workspaceId,
+      request.params.artifactId,
+    );
+    if (!resolved) {
+      return reply
+        .code(404)
+        .send(errorBody('not_found', `产物 ${request.params.artifactId} 不存在或文件已被清理。`));
+    }
+    const { artifact, file } = resolved;
+    const etag = `"${artifact.sha256}"`;
+    if (request.headers['if-none-match'] === etag) {
+      return reply.code(304).send();
+    }
+    const mimeType =
+      artifact.kind === 'subtitles_srt'
+        ? 'application/x-subrip; charset=utf-8'
+        : artifact.mimeType;
+    reply.header('etag', etag);
+    reply.header('x-content-sha256', artifact.sha256);
+    reply.header('content-type', mimeType);
+    reply.header('content-length', String(fileSize(file)));
+    reply.header(
+      'content-disposition',
+      `attachment; filename="${artifact.fileName.replace(/["\\]/g, '_')}"`,
+    );
+    return reply.send(createReadStream(file));
+  };
+
   app.get<{ Params: { workspaceId: string; artifactId: string } }>(
     `${base}/artifacts/:artifactId`,
-    async (request, reply) => {
-      const resolved = await service.resolveArtifactFile(
-        request.params.workspaceId,
-        request.params.artifactId,
-      );
-      if (!resolved) {
-        return reply
-          .code(404)
-          .send(errorBody('not_found', `产物 ${request.params.artifactId} 不存在或文件已被清理。`));
-      }
-      const { artifact, file } = resolved;
-      const etag = `"sha256-${artifact.sha256}"`;
-      if (request.headers['if-none-match'] === etag) {
-        return reply.code(304).send();
-      }
-      reply.header('etag', etag);
-      reply.header('x-content-sha256', artifact.sha256);
-      reply.header('content-type', artifact.mimeType);
-      reply.header('content-length', String(fileSize(file)));
-      reply.header(
-        'content-disposition',
-        `attachment; filename="${artifact.fileName.replace(/["\\]/g, '_')}"`,
-      );
-      return reply.send(createReadStream(file));
-    },
+    downloadHandler,
   );
+  // Export bundles carry `downloadUrl`s with an explicit `/download` suffix so
+  // the browser never guesses between JSON detail and binary download.
+  app.get<{ Params: { workspaceId: string; artifactId: string } }>(
+    `${base}/artifacts/:artifactId/download`,
+    downloadHandler,
+  );
+
+  /**
+   * Gate 3 bound export (AC-10). Refuses with 409 unless the video is approved
+   * at the current scriptVersion and the run's artifacts still hash correctly.
+   */
+  app.post<{ Params: { workspaceId: string } }>(`${base}/exports`, async (request, reply) => {
+    const body = createExportBodySchema.safeParse(request.body);
+    if (!body.success) {
+      return reply
+        .code(400)
+        .send(errorBody('invalid_request', '导出需要 videoId。', body.error.issues));
+    }
+    try {
+      const bundle = await service.createExportBundle(request.params.workspaceId, body.data);
+      return reply.code(201).send(bundle);
+    } catch (error) {
+      return sendOrchestrationError(reply, error);
+    }
+  });
+
+  app.get<{ Params: { workspaceId: string } }>(`${base}/exports`, async (request, reply) => {
+    const query = exportLookupSchema.safeParse(request.query);
+    if (!query.success) {
+      return reply
+        .code(400)
+        .send(errorBody('invalid_request', '查询参数无效。', query.error.issues));
+    }
+    const bundles = await service.listExportBundles(request.params.workspaceId, query.data);
+    return { bundles };
+  });
 
   app.get<{ Params: { workspaceId: string; videoId: string } }>(
     `${base}/videos/:videoId/latest-video-artifact`,

@@ -1,11 +1,19 @@
 import {
   AbsoluteFill,
+  Audio,
   Sequence,
   interpolate,
+  staticFile,
   useCurrentFrame,
   useVideoConfig,
 } from 'remotion';
-import { findRealCaptureAsset, type RenderInputV1, type StoryboardSceneV1 } from '@asvs/domain';
+import {
+  findRealCaptureAsset,
+  narrationStartOffsetFrames,
+  type NarrationClipV1,
+  type RenderInputV1,
+  type StoryboardSceneV1,
+} from '@asvs/domain';
 import { Caption, MockBadge, TopBar, Vignette, type Unit } from './chrome';
 import { sceneTheme } from './theme';
 import { CtaScene } from './scenes/cta-scene';
@@ -29,6 +37,27 @@ function SceneBody(props: SceneProps) {
     case 'generated_visual':
       return <GeneratedScene {...props} />;
   }
+}
+
+/**
+ * Narration for one scene. Mounted inside the scene's `<Sequence>` so the clip
+ * starts exactly at the scene boundary; the inner `<Sequence>` adds the
+ * per-clip lead-in so speech never collides with the cut. `libs/render` never
+ * fetches anything: `clip.src` points into the worker-verified public dir.
+ */
+function SceneNarration({
+  clip,
+  fps,
+}: {
+  clip: NarrationClipV1;
+  fps: number;
+}) {
+  const offset = narrationStartOffsetFrames(clip, fps);
+  return (
+    <Sequence from={offset} durationInFrames={Math.max(1, Math.ceil((clip.durationMs / 1000) * fps))}>
+      <Audio src={staticFile(clip.src)} volume={1} />
+    </Sequence>
+  );
 }
 
 function SceneFrame({
@@ -116,6 +145,9 @@ export function StoryboardComposition({ input }: StoryboardProps) {
     return <AbsoluteFill style={{ backgroundColor: '#0B0D11' }} />;
   }
   const scenes = input.storyboard.scenes;
+  const clipsByScene = new Map(
+    (input.narration?.clips ?? []).map((clip) => [clip.sceneId, clip]),
+  );
   let offset = 0;
 
   return (
@@ -123,6 +155,7 @@ export function StoryboardComposition({ input }: StoryboardProps) {
       {scenes.map((scene) => {
         const from = offset;
         offset += scene.durationFrames;
+        const clip = clipsByScene.get(scene.id);
         return (
           <Sequence
             key={scene.id}
@@ -131,6 +164,7 @@ export function StoryboardComposition({ input }: StoryboardProps) {
             name={`${String(scene.order + 1).padStart(2, '0')} · ${scene.title}`}
           >
             <SceneFrame scene={scene} input={input} index={scene.order} total={scenes.length} />
+            {clip ? <SceneNarration clip={clip} fps={input.storyboard.fps} /> : null}
           </Sequence>
         );
       })}

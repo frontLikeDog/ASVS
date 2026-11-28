@@ -20,6 +20,9 @@ const STUB: OrchestrationClientPort = {
   approveRun: vi.fn(),
   getLatestVideoArtifact: vi.fn(),
   artifactDownloadUrl: () => '',
+  createExportBundle: vi.fn(),
+  listExportBundles: vi.fn(),
+  getHealth: vi.fn(),
   isReachable: vi.fn(),
 };
 

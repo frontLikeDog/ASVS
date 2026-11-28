@@ -10,14 +10,29 @@ import {
   workspaceExportFileName,
   workspacePutRequestSchema,
 } from '@asvs/domain';
-import type { GitHubReadOnlyPort, KnowledgeIndexPort, PRDiscoveryPort } from '@asvs/ports';
+import type {
+  GitHubReadOnlyPort,
+  KnowledgeIndexPort,
+  PRDiscoveryPort,
+  SpeechHealth,
+  SpeechRuntimeConfig,
+} from '@asvs/ports';
 import type { DatabaseSync } from 'node:sqlite';
 import type { OrchestrationServicePort, RenderJobExecutorPort } from '@asvs/ports';
+import { loadSpeechConfig } from './config';
 import { openDatabase } from './db/database';
+import { ExportBundleStore } from './db/export-bundle-store';
 import { SqliteOrchestrationStore } from './db/orchestration-store';
 import { Orchestrator } from './orchestration/orchestrator';
 import { RenderProcessExecutor } from './orchestration/render-process-executor';
 import { registerOrchestrationRoutes } from './routes/orchestration';
+import {
+  SpeechCacheStore,
+  SpeechService,
+  createSpeechPort,
+  speechAudioRoot,
+} from './speech';
+import type { SpeechServiceOptions } from './speech/speech-service';
 import { SqliteKnowledgeSnapshotStore } from './db/knowledge-store';
 import { SqlitePRDiscoveryStore } from './db/pr-discovery-store';
 import { SqliteWorkspaceStore } from './db/workspace-store';
@@ -51,6 +66,13 @@ export interface BuildAppOptions {
   /** Test hook: pin the instance id and clock used for lease recovery. */
   orchestrationInstanceId?: string;
   orchestrationNow?: () => Date;
+  /**
+   * Narration synthesis (5B). Defaults to a service over the configured
+   * `SpeechRuntimeConfig`; tests inject a deterministic adapter or null.
+   */
+  speechService?: SpeechService | null;
+  /** Overrides `ASVS_TTS_*` env when building the default speech service. */
+  speechConfig?: SpeechRuntimeConfig;
 }
 
 export interface BuiltApp {
@@ -64,6 +86,9 @@ export interface BuiltApp {
   orchestrationStore: SqliteOrchestrationStore;
   orchestration: OrchestrationServicePort;
   orchestrator: Orchestrator;
+  exportStore: ExportBundleStore;
+  speech: SpeechService | null;
+  speechHealth: SpeechHealth;
 }
 
 const workspaceIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, 'workspace id 只能包含字母、数字、_ 与 -');
@@ -94,14 +119,21 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     options.prDiscovery ??
     new PRDiscoveryService({ github, knowledgeStore, store: prDiscoveryStore });
   const orchestrationStore = new SqliteOrchestrationStore(db);
+  const exportStore = new ExportBundleStore(db);
   const artifactDir =
     options.artifactDir ?? path.resolve(path.dirname(options.dbPath), 'artifacts');
+  const speech =
+    options.speechService === undefined
+      ? createDefaultSpeechService(db, artifactDir, options.speechConfig)
+      : options.speechService;
   const orchestrator = new Orchestrator({
     store: orchestrationStore,
     artifactDir,
     mediaRoot: options.mediaRoot,
     loadWorkspace: (workspaceId) => store.get(workspaceId)?.workspace ?? null,
     executor: options.renderExecutor ?? new RenderProcessExecutor(),
+    speech,
+    exportStore,
     maxAttempts: options.maxAttempts,
     leaseTtlMs: options.leaseTtlMs,
     schedulerIntervalMs: options.schedulerIntervalMs,
@@ -149,6 +181,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     return reply.code(500).send(errorBody('internal_error', '服务器处理请求时发生错误。'));
   });
 
+  const speechHealth = orchestrator.speechHealth();
   app.get('/v1/health', async () => ({
     ok: true,
     service: 'asvs-api',
@@ -156,6 +189,9 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     schemaVersion: STUDIO_SNAPSHOT_VERSION,
     githubConfigured: github.isConfigured(),
     orchestrationReady: true,
+    // `configured: false` is the fail-closed signal the UI uses to tell the
+    // reviewer narration is unavailable — never to fake it.
+    tts: speechHealth,
   }));
 
   registerGitHubRoutes(app, github);
@@ -267,7 +303,28 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     orchestrationStore,
     orchestration: orchestrator,
     orchestrator,
+    exportStore,
+    speech,
+    speechHealth,
   };
+}
+
+/**
+ * Builds the speech stack from environment config. `unconfigured` yields a
+ * service whose `isConfigured()` is false, so narration requests fail closed
+ * (503) instead of silently rendering silence.
+ */
+function createDefaultSpeechService(
+  db: DatabaseSync,
+  artifactDir: string,
+  config?: SpeechRuntimeConfig,
+): SpeechService {
+  const resolved = config ?? loadSpeechConfig(process.env);
+  return new SpeechService({
+    port: createSpeechPort(resolved),
+    cache: new SpeechCacheStore(db),
+    audioRoot: speechAudioRoot(artifactDir),
+  } satisfies SpeechServiceOptions);
 }
 
 /** Convenience for the entrypoint: build and return only the server. */

@@ -1,25 +1,40 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  DEFAULT_NARRATION_TIMING_POLICY,
+  MIN_SPEECH_SPEED,
+  MAX_SPEECH_SPEED,
   ORCHESTRATION_STEPS,
+  NarrationOverflowError,
   artifactReceiptV1Schema,
   buildInitialRunSteps,
   buildRenderInput,
+  buildSrtFromTimeline,
   canTransitionJob,
   canTransitionRun,
   evaluateClaimGate,
   isRealCaptureAsset,
   orchestrationStepDefinition,
+  parseAndValidateSrt,
   renderJobDigest,
   renderManifestV1Schema,
   renderProfileSchema,
+  reconcileStoryboardWithNarration,
+  speechLanguageSchema,
+  speechVoiceProfileSchema,
   stableJson,
   storyboardDurationMs,
   totalStoryboardFrames,
   type Asset,
   type Claim,
+  type ExportBundleDetailV1,
+  type ExportBundleFileV1,
+  type NarrationClipV1,
+  type NarrationInputV1,
+  type NarrationTimingAdjustment,
+  type NarrationTimingPolicy,
   type OrchestrationApprovalV1,
   type OrchestrationArtifactV1,
   type OrchestrationCheckpointV1,
@@ -29,22 +44,29 @@ import {
   type OrchestrationRunV1,
   type OrchestrationStepKey,
   type OrchestrationStepStateV1,
-  type RenderJobInputV1,
+  type RenderAudioAssetV1,
   type RenderInputV1,
+  type RenderJobInputV1,
   type RenderMediaAssetV1,
   type RenderProfile,
+  type SpeechLanguage,
   type StudioSnapshot,
   type VideoProject,
 } from '@asvs/domain';
 import type {
+  CreateExportBundleInput,
   CreateOrchestrationRunInput,
   CreateOrchestrationRunResult,
+  ExportBundleListOptions,
   ListOrchestrationRunsOptions,
   OrchestrationServicePort,
   RenderJobExecutionResult,
   RenderJobExecutorPort,
+  SpeechHealth,
 } from '@asvs/ports';
+import type { ExportBundleStore } from '../db/export-bundle-store';
 import { SqliteOrchestrationStore } from '../db/orchestration-store';
+import type { SpeechService } from '../speech/speech-service';
 import {
   fileExists,
   fileSize,
@@ -73,6 +95,14 @@ export interface OrchestratorOptions {
    */
   mediaRoot?: string;
   executor?: RenderJobExecutorPort;
+  /**
+   * Narration synthesis (5B). Omitted keeps the orchestrator in 5A silent mode:
+   * a run explicitly asking for narration then fails closed with
+   * `tts_not_configured` instead of shipping a fake voice.
+   */
+  speech?: SpeechService | null;
+  /** Gate-3 bundle persistence; required for `createExportBundle`. */
+  exportStore?: ExportBundleStore | null;
   maxAttempts?: number;
   leaseTtlMs?: number;
   schedulerIntervalMs?: number;
@@ -124,6 +154,8 @@ export class Orchestrator implements OrchestrationServicePort {
   private readonly mediaRoot: string;
   private readonly loadWorkspace: (workspaceId: string) => StudioSnapshot | null;
   private readonly executor: RenderJobExecutorPort | null;
+  private readonly speech: SpeechService | null;
+  private readonly exportStore: ExportBundleStore | null;
   private readonly maxAttempts: number;
   private readonly leaseTtlMs: number;
   private readonly intervalMs: number;
@@ -143,6 +175,8 @@ export class Orchestrator implements OrchestrationServicePort {
     this.mediaRoot = path.resolve(options.mediaRoot ?? defaultMediaRoot());
     this.loadWorkspace = options.loadWorkspace;
     this.executor = options.executor ?? null;
+    this.speech = options.speech ?? null;
+    this.exportStore = options.exportStore ?? null;
     this.maxAttempts = options.maxAttempts ?? 3;
     this.leaseTtlMs = options.leaseTtlMs ?? 15_000;
     this.intervalMs = options.schedulerIntervalMs ?? 500;
@@ -202,6 +236,16 @@ export class Orchestrator implements OrchestrationServicePort {
     const timestamp = this.now().toISOString();
     const runId = newId('orchrun');
     const claims = this.resolveClaims(snapshot, video);
+    const narration = resolveNarrationRequest(input.narration);
+    if (narration.enabled && (!this.speech || !this.speech.isConfigured())) {
+      // Fail closed at creation time rather than after an expensive render:
+      // a run that asks for narration must never silently ship silent video.
+      throw new OrchestrationHttpError(
+        503,
+        'tts_not_configured',
+        '未配置 TTS 服务（ASVS_TTS_PROVIDER / ASVS_TTS_API_URL / ASVS_TTS_API_KEY），无法生成旁白音频。请配置后重试，或显式关闭旁白。',
+      );
+    }
     const run: OrchestrationRunV1 = {
       schemaVersion: '1',
       id: runId,
@@ -219,10 +263,30 @@ export class Orchestrator implements OrchestrationServicePort {
         durationSec: video.scenes.reduce((sum, scene) => sum + scene.durationSec, 0),
         aspect: video.brief.aspect,
         claimCount: claims.length,
+        narration: {
+          enabled: narration.enabled,
+          clipCount: 0,
+          cacheHits: 0,
+          synthetic: false,
+          timingPolicy: narration.timingPolicy,
+          adjustments: 0,
+        },
       },
       createdAt: timestamp,
       updatedAt: timestamp,
     };
+
+    // The request body is not part of `OrchestrationRunV1`, so it is persisted
+    // next to the frozen input where `synthesize_voice` reads it back after a
+    // crash. Nothing in it is secret (voice id and speed only).
+    writeJsonFile(path.join(runDirFor(this.artifactDir, workspaceId, runId), NARRATION_REQUEST_FILE), {
+      schemaVersion: '1',
+      enabled: narration.enabled,
+      voiceId: narration.voiceId,
+      speed: narration.speed,
+      timingPolicy: narration.timingPolicy,
+      requestedAt: timestamp,
+    } satisfies PersistedNarrationRequest);
 
     const created = this.store.insertRun({
       run,
@@ -236,6 +300,11 @@ export class Orchestrator implements OrchestrationServicePort {
       })),
     });
     if (!created.created) return { run: created.run, created: false };
+    if (!narration.enabled) {
+      // No voice was requested: the narration steps are not "skipped by luck",
+      // they are recorded as skipped so the DAG view stays honest.
+      this.markNarrationStepsSkipped(runId);
+    }
 
     this.appendEvent(runId, null, 'info', 'state_change', `运行已入队 · 视频 ${video.id}`);
     this.pumpSoon();
@@ -414,6 +483,251 @@ export class Orchestrator implements OrchestrationServicePort {
       if (artifact) return { run, artifact };
     }
     return null;
+  }
+
+  // ── Gate-3 export (AC-10) ───────────────────────────────────────────────
+
+  /**
+   * Creates a downloadable bundle from an *approved* video. Every gate is
+   * re-checked here from server state, never trusted from the client:
+   *
+   * 1. the video is at stage `approved` or `exported` (Gate 3 passed);
+   * 2. the run succeeded and belongs to this workspace + video;
+   * 3. the run was produced from the video's current `scriptVersion`;
+   * 4. MP4 / SRT / manifest still hash to what the run registered.
+   */
+  async createExportBundle(
+    workspaceId: string,
+    input: CreateExportBundleInput,
+  ): Promise<ExportBundleDetailV1> {
+    if (!this.exportStore) {
+      throw new OrchestrationHttpError(503, 'export_unavailable', '导出存储未配置。');
+    }
+    const snapshot = this.loadWorkspace(workspaceId);
+    if (!snapshot) {
+      throw new OrchestrationHttpError(404, 'workspace_not_found', `工作区 ${workspaceId} 尚未同步。`);
+    }
+    const video = snapshot.videos.find((item) => item.id === input.videoId);
+    if (!video) {
+      throw new OrchestrationHttpError(404, 'video_not_found', `视频 ${input.videoId} 不在工作区中。`);
+    }
+    if (video.stage !== 'approved' && video.stage !== 'exported') {
+      throw new OrchestrationHttpError(
+        409,
+        'export_not_approved',
+        `视频处于 ${video.stage}；必须先在审核页通过 Gate 3 才能导出。`,
+      );
+    }
+    if (video.review?.status !== 'approved') {
+      throw new OrchestrationHttpError(
+        409,
+        'export_not_approved',
+        '审核尚未批准（review.status ≠ approved），禁止导出。',
+      );
+    }
+
+    const candidates = this.store
+      .listRuns(workspaceId, { videoId: video.id, limit: 50 })
+      .filter((run) => run.status === 'succeeded');
+    const run = input.runId
+      ? candidates.find((item) => item.id === input.runId)
+      : candidates[0];
+    if (!run) {
+      throw new OrchestrationHttpError(
+        409,
+        'export_run_missing',
+        input.runId
+          ? `运行 ${input.runId} 不存在、未成功或不属于该视频。`
+          : '没有成功的服务端渲染运行可供导出。',
+      );
+    }
+
+    // Staleness: a script edit after the render invalidates the approval.
+    const frozen = this.readFrozenScriptVersion(run);
+    if (frozen !== null && frozen !== video.scriptVersion) {
+      throw new OrchestrationHttpError(
+        409,
+        'export_stale',
+        `运行基于 scriptVersion ${frozen}，当前为 ${video.scriptVersion}；请重新渲染并复审。`,
+      );
+    }
+
+    const artifacts = this.store.listArtifacts(run.id);
+    const byKind = (kind: OrchestrationArtifactV1['kind']) =>
+      artifacts.find((item) => item.kind === kind);
+    const mp4 = byKind('video_mp4');
+    const srt = byKind('subtitles_srt');
+    const manifest = byKind('render_manifest');
+    const receipt = byKind('artifact_receipt');
+    if (!mp4 || !srt || !manifest || !receipt) {
+      throw new OrchestrationHttpError(
+        409,
+        'export_incomplete',
+        `运行 ${run.id} 缺少完整产物（MP4/SRT/manifest/receipt），无法导出。`,
+      );
+    }
+
+    // Re-hash now: the row is a claim, the file on disk is the truth.
+    const verified: Record<'video_mp4' | 'subtitles_srt' | 'render_manifest' | 'artifact_receipt', OrchestrationArtifactV1> = {
+      video_mp4: this.rehashArtifact(workspaceId, mp4),
+      subtitles_srt: this.rehashArtifact(workspaceId, srt),
+      render_manifest: this.rehashArtifact(workspaceId, manifest),
+      artifact_receipt: this.rehashArtifact(workspaceId, receipt),
+    };
+
+    const timestamp = this.now().toISOString();
+    const bundleId = newId('exportbundle');
+    const baseUrl = `/v1/workspaces/${encodeURIComponent(workspaceId)}/orchestration/artifacts`;
+    const fileNameFor = (artifact: OrchestrationArtifactV1): string => {
+      if (artifact.kind === 'video_mp4') return `${video.id}.mp4`;
+      if (artifact.kind === 'subtitles_srt') return `${video.id}.srt`;
+      if (artifact.kind === 'render_manifest') return `${video.id}.manifest.json`;
+      return `${video.id}.receipt.json`;
+    };
+    const files: ExportBundleFileV1[] = [
+      verified.video_mp4,
+      verified.subtitles_srt,
+      verified.render_manifest,
+      verified.artifact_receipt,
+    ].map((artifact) => ({
+      artifactId: artifact.id,
+      kind: artifact.kind,
+      fileName: fileNameFor(artifact),
+      mimeType: artifact.mimeType,
+      byteSize: artifact.byteSize,
+      sha256: artifact.sha256,
+      downloadUrl: `${baseUrl}/${encodeURIComponent(artifact.id)}/download`,
+    }));
+
+    const manifestJson = readJsonFile<{
+      ffprobe?: { durationMs?: number; audio?: { durationMs?: number } };
+      narration?: {
+        provider?: string;
+        voiceId?: string;
+        language?: string;
+        license?: string;
+        synthetic?: boolean;
+        timingPolicy?: string;
+      };
+    }>(resolveArtifactPath(this.artifactDir, verified.render_manifest.storageRef));
+    const narrationMeta = manifestJson.narration;
+
+    const bundle = {
+      schemaVersion: '1' as const,
+      id: bundleId,
+      workspaceId,
+      projectId: video.projectId,
+      videoId: video.id,
+      runId: run.id,
+      mp4ArtifactId: verified.video_mp4.id,
+      srtArtifactId: verified.subtitles_srt.id,
+      manifestArtifactId: verified.render_manifest.id,
+      receiptArtifactId: verified.artifact_receipt.id,
+      mp4Sha256: verified.video_mp4.sha256,
+      srtSha256: verified.subtitles_srt.sha256,
+      manifestSha256: verified.render_manifest.sha256,
+      scriptVersion: video.scriptVersion,
+      ...(input.approvalNote ? { approvalNote: input.approvalNote } : {}),
+      createdAt: timestamp,
+    };
+    const detail: ExportBundleDetailV1 = {
+      bundle,
+      files,
+      ...(manifestJson.ffprobe?.durationMs !== undefined
+        ? { videoDurationMs: manifestJson.ffprobe.durationMs }
+        : {}),
+      ...(manifestJson.ffprobe?.audio?.durationMs !== undefined
+        ? { audioDurationMs: manifestJson.ffprobe.audio.durationMs }
+        : {}),
+      ...(narrationMeta?.provider && narrationMeta.voiceId && narrationMeta.language && narrationMeta.license && narrationMeta.timingPolicy
+        ? {
+            narration: {
+              provider: narrationMeta.provider,
+              voiceId: narrationMeta.voiceId,
+              language: narrationMeta.language,
+              license: narrationMeta.license,
+              synthetic: Boolean(narrationMeta.synthetic),
+              timingPolicy: narrationMeta.timingPolicy,
+            },
+          }
+        : {}),
+    };
+    this.exportStore.insert(detail);
+    this.appendEvent(
+      run.id,
+      null,
+      'success',
+      'state_change',
+      `导出包已生成：${bundleId}（MP4 ${bundle.mp4Sha256.slice(0, 12)}… / SRT ${bundle.srtSha256.slice(0, 12)}…）`,
+    );
+    return detail;
+  }
+
+  async listExportBundles(
+    workspaceId: string,
+    options: ExportBundleListOptions = {},
+  ): Promise<ExportBundleDetailV1[]> {
+    return this.exportStore?.list(workspaceId, options) ?? [];
+  }
+
+  speechHealth(): SpeechHealth {
+    return (
+      this.speech?.health() ?? {
+        configured: false,
+        provider: 'unconfigured',
+        model: 'none',
+        synthetic: false,
+        license: 'none',
+      }
+    );
+  }
+
+  /** Re-hashes one artifact and refuses to export a file that changed. */
+  private rehashArtifact(
+    workspaceId: string,
+    artifact: OrchestrationArtifactV1,
+  ): OrchestrationArtifactV1 {
+    let file: string;
+    try {
+      file = resolveArtifactPath(this.artifactDir, artifact.storageRef);
+    } catch {
+      throw new OrchestrationHttpError(409, 'export_incomplete', `产物路径不安全：${artifact.fileName}`);
+    }
+    if (!fileExists(file)) {
+      throw new OrchestrationHttpError(409, 'export_incomplete', `产物文件缺失：${artifact.fileName}`);
+    }
+    const actual = sha256File(file);
+    const bytes = fileSize(file);
+    if (actual !== artifact.sha256 || bytes !== artifact.byteSize) {
+      this.logger.error(
+        `${workspaceId}/${artifact.id} 哈希漂移：${actual.slice(0, 12)}… vs ${artifact.sha256.slice(0, 12)}…`,
+      );
+      throw new OrchestrationHttpError(
+        409,
+        'export_hash_mismatch',
+        `产物 ${artifact.fileName} 的 SHA256 与登记值不一致，拒绝导出。`,
+      );
+    }
+    return artifact;
+  }
+
+  /**
+   * `scriptVersion` frozen into the run. The render IR has no such field, but
+   * the storyboard pins `briefRevisionId = "<videoId>_brief_v<N>"` when it is
+   * built, so that suffix is the authoritative frozen version.
+   */
+  private readFrozenScriptVersion(run: OrchestrationRunV1): number | null {
+    const file = path.join(runDirFor(this.artifactDir, run.workspaceId, run.id), 'input.json');
+    if (!fileExists(file)) return null;
+    try {
+      const frozen = readJsonFile<{ input?: { storyboard?: { briefRevisionId?: string } } }>(file);
+      const revisionId = frozen.input?.storyboard?.briefRevisionId;
+      if (!revisionId) return null;
+      const match = /_brief_v(\d+)$/.exec(revisionId);
+      return match ? Number(match[1]) : null;
+    } catch {
+      return null;
+    }
   }
 
   // ── Scheduler ───────────────────────────────────────────────────────────
@@ -650,6 +964,14 @@ export class Orchestrator implements OrchestrationServicePort {
         });
         return;
       }
+      case 'synthesize_voice': {
+        await this.synthesizeVoice(run, stepKey, attempt);
+        return;
+      }
+      case 'generate_subtitles': {
+        this.generateSubtitles(run, stepKey, attempt);
+        return;
+      }
       case 'register_artifacts': {
         const registered = this.registerArtifacts(run);
         this.writeCheckpoint(run, stepKey, 'step_done', { artifactIds: registered.artifactIds });
@@ -658,6 +980,322 @@ export class Orchestrator implements OrchestrationServicePort {
       }
       default:
         throw new StepFailure('unexpected_error', `未知的进程内步骤：${stepKey}`, false);
+    }
+  }
+
+  /**
+   * `synthesize_voice`: one provider call per unique text (cache hits cost
+   * nothing), then reconcile the frozen storyboard against real audio lengths.
+   *
+   * This step is resumable at its own checkpoint: a crash after synthesis but
+   * before the render replays `narration_ready` from disk, and the cache means
+   * the replay makes zero provider calls.
+   */
+  private async synthesizeVoice(
+    run: OrchestrationRunV1,
+    stepKey: OrchestrationStepKey,
+    attempt: number,
+  ): Promise<void> {
+    const runDir = runDirFor(this.artifactDir, run.workspaceId, run.id);
+    const narrationFile = path.join(runDir, 'narration.json');
+    const request = this.readNarrationRequest(run);
+
+    if (!request.enabled) {
+      this.completeSkippedNarrationStep(run, stepKey, attempt, '用户已显式关闭旁白');
+      return;
+    }
+    if (!this.speech || !this.speech.isConfigured()) {
+      throw new StepFailure(
+        'tts_not_configured',
+        '未配置 TTS 服务，无法合成旁白；拒绝以静音或假音色替代。',
+        false,
+      );
+    }
+
+    // Crash after synthesis, before the render: reuse the on-disk narration.
+    if (fileExists(narrationFile)) {
+      const cached = readJsonFile<{
+        clips: NarrationClipV1[];
+        audio: RenderAudioAssetV1[];
+        cacheHits: number;
+        providerCalls: number;
+        provider: string;
+        synthetic: boolean;
+      }>(narrationFile);
+      if (cached.clips.length > 0 && cached.audio.every((item) => fileExists(item.sourceFile))) {
+        this.writeCheckpoint(run, stepKey, 'narration_ready', {
+          clipCount: cached.clips.length,
+          cacheHits: cached.cacheHits,
+          reused: true,
+        });
+        this.completeStep(run, stepKey, attempt, {
+          clipCount: cached.clips.length,
+          cacheHits: cached.cacheHits,
+          synthetic: cached.synthetic,
+        });
+        return;
+      }
+    }
+
+    const frozen = this.readFrozenInput(run);
+    const video = this.requireVideo(this.requireWorkspace(run.workspaceId), run.videoId);
+    const language = speechLanguageSchema.parse(video.brief.language ?? 'zh-CN');
+    const defaultVoice = this.speech.defaultVoice(language);
+    const scenes = frozen.input.storyboard.scenes
+      .filter((scene) => scene.narration.trim().length > 0)
+      .map((scene) => ({
+        sceneId: scene.id,
+        sceneRevision: scene.revision,
+        text: scene.narration,
+        language,
+        voiceId: request.voiceId ?? defaultVoice.voiceId,
+        speed: request.speed,
+      }));
+    if (scenes.length === 0) {
+      throw new StepFailure(
+        'invalid_input',
+        '所有镜头都没有旁白文本；请补写旁白或显式关闭旁白。',
+        false,
+      );
+    }
+
+    let report;
+    try {
+      report = await this.speech.synthesizeNarration(scenes);
+    } catch (error) {
+      const isSpeechError =
+        error instanceof Error && (error as { code?: string }).code === 'tts_not_configured';
+      throw new StepFailure(
+        isSpeechError ? 'tts_not_configured' : 'tts_failed',
+        error instanceof Error ? error.message : String(error),
+        !isSpeechError,
+      );
+    }
+
+    // The storyboard is extended where narration doesn't fit; the adjustment
+    // list travels with the render job into manifest.json.
+    let reconciled;
+    try {
+      reconciled = reconcileStoryboardWithNarration(frozen.input.storyboard, report.clips, {
+        policy: request.timingPolicy,
+      });
+    } catch (error) {
+      if (error instanceof NarrationOverflowError) {
+        throw new StepFailure(
+          'narration_overflow',
+          `镜头 ${error.sceneId} 的旁白超出画面 ${error.overflowMs}ms（策略 fail_on_overflow）。`,
+          false,
+        );
+      }
+      throw error;
+    }
+
+    const narrationInput = buildNarrationInputForRender({
+      clips: reconciled.clips,
+      speed: request.speed,
+      timingPolicy: request.timingPolicy,
+      language,
+    });
+    const updatedInput: RenderInputV1 = {
+      ...frozen.input,
+      storyboard: reconciled.storyboard,
+      narration: narrationInput,
+    };
+    // Keep the frozen IR self-consistent: digest is over the extended storyboard
+    // so the worker's fingerprint check still passes.
+    const digest = sha256OfJson({ renderInput: updatedInput });
+    writeJsonFile(path.join(runDir, 'input.json'), {
+      schemaVersion: '1',
+      input: updatedInput,
+      digest,
+      storyboardFrames: totalStoryboardFrames(updatedInput.storyboard),
+      durationMs: storyboardDurationMs(updatedInput.storyboard),
+      frozenAt: this.now().toISOString(),
+      narrationAppliedAt: this.now().toISOString(),
+    });
+    const latestRun = this.store.getRun(run.id) ?? run;
+    this.store.updateRun({ ...latestRun, inputDigest: digest, updatedAt: this.now().toISOString() });
+    writeJsonFile(narrationFile, {
+      schemaVersion: '1',
+      clips: reconciled.clips,
+      audio: report.audio,
+      cacheHits: report.cacheHits,
+      providerCalls: report.providerCalls,
+      provider: report.provider,
+      model: report.model,
+      voiceId: report.voiceId,
+      language: report.language,
+      license: report.license,
+      synthetic: report.synthetic,
+      timingPolicy: request.timingPolicy,
+      adjustments: reconciled.adjustments,
+      synthesizedAt: this.now().toISOString(),
+    });
+
+    this.writeCheckpoint(run, stepKey, 'narration_ready', {
+      clipCount: reconciled.clips.length,
+      cacheHits: report.cacheHits,
+      providerCalls: report.providerCalls,
+      synthetic: report.synthetic,
+      adjustments: reconciled.adjustments.length,
+    });
+    this.completeStep(run, stepKey, attempt, {
+      clipCount: reconciled.clips.length,
+      cacheHits: report.cacheHits,
+      synthetic: report.synthetic,
+      adjustments: reconciled.adjustments.length,
+    });
+  }
+
+  /**
+   * `generate_subtitles`: builds the SRT from the reconciled frame timeline and
+   * validates it with the independent parser. An invalid SRT fails the run —
+   * export is never unlocked by a file we cannot prove is well-formed.
+   */
+  private generateSubtitles(
+    run: OrchestrationRunV1,
+    stepKey: OrchestrationStepKey,
+    attempt: number,
+  ): void {
+    const request = this.readNarrationRequest(run);
+    if (!request.enabled) {
+      this.completeSkippedNarrationStep(run, stepKey, attempt, '用户已显式关闭旁白');
+      return;
+    }
+    const runDir = runDirFor(this.artifactDir, run.workspaceId, run.id);
+    const frozen = this.readFrozenInput(run);
+    const narration = fileExists(path.join(runDir, 'narration.json'))
+      ? readJsonFile<{ clips: NarrationClipV1[] }>(path.join(runDir, 'narration.json'))
+      : { clips: [] };
+    const { cues, content } = buildSrtFromTimeline(frozen.input.storyboard, {
+      clips: narration.clips,
+    });
+    const totalDurationMs = storyboardDurationMs(frozen.input.storyboard);
+    const validation = parseAndValidateSrt(content, { totalDurationMs });
+    if (!validation.ok) {
+      throw new StepFailure(
+        'subtitle_invalid',
+        `SRT 未通过独立校验，禁止进入渲染/导出：${validation.issues.join('；')}`,
+        false,
+      );
+    }
+    const srtFile = path.join(runDir, 'subtitles.srt');
+    writeFileSync(srtFile, content, 'utf8');
+    // Re-read and re-validate the bytes actually on disk: writing and checking
+    // the same in-memory string would not catch an encoding problem.
+    const onDisk = readFileSync(srtFile, 'utf8');
+    const recheck = parseAndValidateSrt(onDisk, { totalDurationMs });
+    if (!recheck.ok) {
+      throw new StepFailure(
+        'subtitle_invalid',
+        `写入后的 SRT 校验失败：${recheck.issues.join('；')}`,
+        false,
+      );
+    }
+    this.writeCheckpoint(run, stepKey, 'subtitles_ready', {
+      cueCount: cues.length,
+      sha256: sha256OfText(onDisk),
+      totalDurationMs,
+    });
+    this.completeStep(run, stepKey, attempt, {
+      cueCount: cues.length,
+      sha256: sha256OfText(onDisk),
+    });
+  }
+
+  private readNarrationRequest(run: OrchestrationRunV1): PersistedNarrationRequest {
+    const file = path.join(runDirFor(this.artifactDir, run.workspaceId, run.id), NARRATION_REQUEST_FILE);
+    if (!fileExists(file)) {
+      // Runs created before 5B (or without the file) are silent by definition.
+      return {
+        schemaVersion: '1',
+        enabled: false,
+        speed: 1,
+        timingPolicy: DEFAULT_NARRATION_TIMING_POLICY,
+        requestedAt: run.createdAt,
+      };
+    }
+    const raw = readJsonFile<Partial<PersistedNarrationRequest>>(file);
+    return {
+      schemaVersion: '1',
+      enabled: raw.enabled ?? false,
+      ...(raw.voiceId ? { voiceId: raw.voiceId } : {}),
+      speed: raw.speed ?? 1,
+      timingPolicy: raw.timingPolicy ?? DEFAULT_NARRATION_TIMING_POLICY,
+      requestedAt: raw.requestedAt ?? run.createdAt,
+    };
+  }
+
+  private readFrozenInput(run: OrchestrationRunV1): { input: RenderInputV1; digest: string } {
+    const file = path.join(runDirFor(this.artifactDir, run.workspaceId, run.id), 'input.json');
+    if (!fileExists(file)) {
+      throw new StepFailure('invalid_input', '缺少冻结输入 input.json。', false);
+    }
+    return readJsonFile<{ input: RenderInputV1; digest: string }>(file);
+  }
+
+  private completeSkippedNarrationStep(
+    run: OrchestrationRunV1,
+    stepKey: OrchestrationStepKey,
+    attempt: number,
+    reason: string,
+  ): void {
+    this.writeCheckpoint(run, stepKey, 'step_done', { skipped: true, reason });
+    const timestamp = this.now().toISOString();
+    const latest = this.store.getRun(run.id) ?? run;
+    if (latest.status === 'failed' || latest.status === 'cancelled' || latest.status === 'succeeded') {
+      return;
+    }
+    const steps = latest.steps.map((step) =>
+      step.stepKey === stepKey
+        ? { ...step, status: 'skipped' as const, attempt, finishedAt: timestamp }
+        : step,
+    );
+    const allDone = steps.every((step) => step.status === 'succeeded' || step.status === 'skipped');
+    const nextStep = steps.find((step) => step.status !== 'succeeded' && step.status !== 'skipped');
+    this.store.updateRun({
+      ...latest,
+      status: allDone ? 'succeeded' : 'running',
+      steps,
+      currentStepKey: allDone ? null : (nextStep?.stepKey ?? null),
+      updatedAt: timestamp,
+      finishedAt: allDone ? timestamp : undefined,
+    });
+    const job = this.store.getJobForStep(run.id, stepKey);
+    if (job) {
+      this.store.updateJob({
+        ...job,
+        status: 'succeeded',
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        updatedAt: timestamp,
+      });
+    }
+    this.appendEvent(run.id, stepKey, 'info', 'state_change', `${orchestrationStepDefinition(stepKey).name}已跳过：${reason}`);
+  }
+
+  /** Marks the voice steps skipped at creation time when narration is off. */
+  private markNarrationStepsSkipped(runId: string): void {
+    const run = this.store.getRun(runId);
+    if (!run) return;
+    const timestamp = this.now().toISOString();
+    const steps = run.steps.map((step) =>
+      step.stepKey === 'synthesize_voice' || step.stepKey === 'generate_subtitles'
+        ? { ...step, status: 'skipped' as const, finishedAt: timestamp }
+        : step,
+    );
+    this.store.updateRun({ ...run, steps, updatedAt: timestamp });
+    for (const stepKey of ['synthesize_voice', 'generate_subtitles'] as const) {
+      const job = this.store.getJobForStep(run.id, stepKey);
+      if (job) {
+        this.store.updateJob({
+          ...job,
+          status: 'succeeded',
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          updatedAt: timestamp,
+        });
+      }
     }
   }
 
@@ -680,12 +1318,18 @@ export class Orchestrator implements OrchestrationServicePort {
     }
     const frozen = readJsonFile<{ input: RenderInputV1 }>(frozenPath);
     const prepared = this.readPreparedMedia(run);
+    const narrationState = this.readNarrationState(run);
+    const srtFile = path.join(runDir, 'subtitles.srt');
+    const subtitlesPath = narrationState.enabled && fileExists(srtFile) ? srtFile : undefined;
     const artifactId = job.jobId.replace(/^orchjob/, 'artifact');
     const jobDigest = await renderJobDigest({
       jobId: job.jobId,
       artifactId,
       renderInput: frozen.input,
       media: prepared,
+      audio: narrationState.audio,
+      subtitlesPath,
+      timingAdjustments: narrationState.adjustments,
     });
     const renderInput: RenderJobInputV1 = {
       schemaVersion: '1',
@@ -695,6 +1339,11 @@ export class Orchestrator implements OrchestrationServicePort {
       runId: run.id,
       input: frozen.input,
       media: prepared,
+      audio: narrationState.audio,
+      ...(subtitlesPath ? { subtitlesPath } : {}),
+      ...(narrationState.adjustments.length > 0
+        ? { timingAdjustments: narrationState.adjustments }
+        : {}),
       outputFileName: `${run.id}.mp4`,
       jobDigest,
       createdAt: this.now().toISOString(),
@@ -711,6 +1360,12 @@ export class Orchestrator implements OrchestrationServicePort {
       if (current) this.store.updateJob(mutate(current));
     };
 
+    // A cancel may land during the awaits above (the job digest hashes every
+    // media file). Re-check synchronously right before claiming the active run:
+    // otherwise the run is already `cancelled`, `activeRunId` is still null so
+    // `cancelRun` cannot abort, and a renderer would be spawned for a run whose
+    // output will be discarded.
+    if (this.abortRequested.has(run.id)) return;
     this.activeRunId = run.id;
     const result: RenderJobExecutionResult = await this.executor.execute(
       renderInput,
@@ -949,10 +1604,22 @@ export class Orchestrator implements OrchestrationServicePort {
     );
     const allDone = nextSteps.every((step) => step.status === 'succeeded' || step.status === 'skipped');
     const nextStep = nextSteps.find((step) => step.status !== 'succeeded' && step.status !== 'skipped');
-    const nextInput =
-      stepKey === 'prepare_media' && typeof details.usingPlaceholder === 'boolean'
-        ? { ...latest.input, usingPlaceholder: details.usingPlaceholder }
-        : latest.input;
+    let nextInput = latest.input;
+    if (stepKey === 'prepare_media' && typeof details.usingPlaceholder === 'boolean') {
+      nextInput = { ...nextInput, usingPlaceholder: details.usingPlaceholder };
+    }
+    if (stepKey === 'synthesize_voice' && latest.input.narration) {
+      nextInput = {
+        ...nextInput,
+        narration: {
+          ...latest.input.narration,
+          clipCount: typeof details.clipCount === 'number' ? details.clipCount : 0,
+          cacheHits: typeof details.cacheHits === 'number' ? details.cacheHits : 0,
+          synthetic: details.synthetic === true,
+          adjustments: typeof details.adjustments === 'number' ? details.adjustments : 0,
+        },
+      };
+    }
     const next: OrchestrationRunV1 = {
       ...latest,
       status: allDone ? 'succeeded' : 'running',
@@ -1187,9 +1854,32 @@ export class Orchestrator implements OrchestrationServicePort {
     return readJsonFile<{ media?: RenderMediaAssetV1[] }>(file).media ?? [];
   }
 
+  /** Narration files + timing adjustments produced by `synthesize_voice`. */
+  private readNarrationState(run: OrchestrationRunV1): {
+    enabled: boolean;
+    audio: RenderAudioAssetV1[];
+    adjustments: NarrationTimingAdjustment[];
+  } {
+    const request = this.readNarrationRequest(run);
+    const file = path.join(runDirFor(this.artifactDir, run.workspaceId, run.id), 'narration.json');
+    if (!request.enabled || !fileExists(file)) {
+      return { enabled: request.enabled, audio: [], adjustments: [] };
+    }
+    const raw = readJsonFile<{
+      audio?: RenderAudioAssetV1[];
+      adjustments?: NarrationTimingAdjustment[];
+    }>(file);
+    return {
+      enabled: true,
+      audio: raw.audio ?? [],
+      adjustments: raw.adjustments ?? [],
+    };
+  }
+
   private registerArtifacts(run: OrchestrationRunV1): { artifactIds: string[] } {
     const runDir = runDirFor(this.artifactDir, run.workspaceId, run.id);
     const outDir = path.join(runDir, 'artifacts');
+    // `runDir` is the source of the SRT; `outDir` holds the worker's output.
     const job = this.store.getJobForStep(run.id, 'render_video');
     if (!job) throw new StepFailure('unexpected_error', '缺少 render_video 任务记录。', false);
 
@@ -1279,12 +1969,75 @@ export class Orchestrator implements OrchestrationServicePort {
         durationMs: manifest.ffprobe.durationMs,
         codecName: manifest.ffprobe.codecName,
         frameCount: manifest.ffprobe.frameCount ?? null,
-        hasAudio: false,
+        // The worker measured this; a narration run without an audio stream
+        // would have failed `validateProbe` before reaching this code.
+        hasAudio: Boolean(manifest.ffprobe.audio),
+        ...(manifest.ffprobe.audio
+          ? {
+              audioCodecName: manifest.ffprobe.audio.codecName,
+              audioSampleRate: manifest.ffprobe.audio.sampleRate,
+              audioChannels: manifest.ffprobe.audio.channels,
+              audioDurationMs: manifest.ffprobe.audio.durationMs,
+              ...(manifest.ffprobe.audio.meanVolumeDb !== undefined
+                ? { audioMeanVolumeDb: manifest.ffprobe.audio.meanVolumeDb }
+                : {}),
+            }
+          : {}),
         aspect: '16:9',
         rendererVersion: manifest.rendererVersion,
         usingPlaceholder: run.input.usingPlaceholder ?? false,
+        ...(manifest.narration
+          ? {
+              narration: {
+                provider: manifest.narration.provider,
+                voiceId: manifest.narration.voiceId,
+                language: manifest.narration.language,
+                license: manifest.narration.license,
+                synthetic: manifest.narration.synthetic,
+                timingPolicy: manifest.narration.timingPolicy,
+              },
+            }
+          : {}),
       },
     );
+
+    // The SRT is only registered if the manifest bound a valid one, so the
+    // download route can never serve a subtitle the worker didn't verify.
+    const srtFile = path.join(runDir, 'subtitles.srt');
+    if (manifest.subtitles) {
+      if (!fileExists(srtFile)) {
+        throw new StepFailure('artifact_mismatch', '清单记录了字幕，但 subtitles.srt 不存在。', false);
+      }
+      const srtSha = sha256File(srtFile);
+      if (srtSha !== manifest.subtitles.sha256) {
+        throw new StepFailure(
+          'artifact_mismatch',
+          `SRT SHA256 与清单不一致（${srtSha.slice(0, 12)}… vs ${manifest.subtitles.sha256.slice(0, 12)}…）。`,
+          false,
+        );
+      }
+      register(
+        'subtitles_srt',
+        srtFile,
+        'subtitles.srt',
+        srtSha,
+        fileSize(srtFile),
+        'application/x-subrip; charset=utf-8',
+        {
+          cueCount: manifest.subtitles.cueCount,
+          durationMs: manifest.subtitles.durationMs,
+          language: manifest.narration?.language ?? 'zh-CN',
+        },
+      );
+    } else if (fileExists(srtFile)) {
+      // A stray SRT must not sit next to an MP4 it does not describe.
+      throw new StepFailure(
+        'artifact_mismatch',
+        '目录中存在 subtitles.srt，但清单未记录字幕；拒绝登记可能过期的字幕。',
+        false,
+      );
+    }
+
     register(
       'render_manifest',
       manifestFile,
@@ -1363,6 +2116,77 @@ function isSixteenByNine(width: number, height: number): boolean {
   return Math.abs(width / height - 16 / 9) < 0.01;
 }
 
+export interface ResolvedNarrationRequest {
+  enabled: boolean;
+  voiceId?: string;
+  speed: number;
+  timingPolicy: NarrationTimingPolicy;
+}
+
+/**
+ * Where does the narration request live between `createRun` and the
+ * `synthesize_voice` step? On disk: the request body isn't part of the run
+ * row, and the step must replay identically after a crash. This is the file
+ * contract for `<runDir>/narration-request.json`.
+ */
+export interface PersistedNarrationRequest extends ResolvedNarrationRequest {
+  schemaVersion: '1';
+  requestedAt: string;
+}
+
+const NARRATION_REQUEST_FILE = 'narration-request.json';
+
+/** Normalizes the optional body fields; absent means "narration on, defaults". */
+export function resolveNarrationRequest(input?: {
+  enabled?: boolean;
+  voiceId?: string;
+  speed?: number;
+  timingPolicy?: NarrationTimingPolicy;
+}): ResolvedNarrationRequest {
+  const enabled = input?.enabled ?? true;
+  const speed = input?.speed ?? 1;
+  if (!Number.isFinite(speed) || speed < MIN_SPEECH_SPEED || speed > MAX_SPEECH_SPEED) {
+    throw new OrchestrationHttpError(
+      400,
+      'invalid_narration_options',
+      `旁白语速必须在 ${MIN_SPEECH_SPEED}–${MAX_SPEECH_SPEED} 之间，收到 ${input?.speed}。`,
+    );
+  }
+  return {
+    enabled,
+    ...(input?.voiceId ? { voiceId: input.voiceId } : {}),
+    speed,
+    timingPolicy: input?.timingPolicy ?? DEFAULT_NARRATION_TIMING_POLICY,
+  };
+}
+
+/**
+ * Builds the narration input for the render job. The voice profile comes from
+ * the clips themselves (they carry provider / model / license provenance), so
+ * the manifest describes what was really synthesized, not what was requested.
+ */
+export function buildNarrationInputForRender(input: {
+  clips: NarrationClipV1[];
+  speed: number;
+  timingPolicy: NarrationTimingPolicy;
+  language: SpeechLanguage;
+}): NarrationInputV1 {
+  const first = input.clips[0];
+  if (!first) throw new Error('旁白输入缺少片段');
+  const voice = speechVoiceProfileSchema.parse({
+    provider: first.provider,
+    // Clips carry provenance but not the model name; the renderer never needs
+    // it, and the manifest takes it from `narration.json` instead.
+    model: 'provider-default',
+    voiceId: first.voiceId,
+    language: first.language,
+    speed: input.speed,
+    license: first.license,
+    synthetic: first.synthetic,
+  });
+  return { voice, clips: input.clips, timingPolicy: input.timingPolicy };
+}
+
 class StepFailure extends Error {
   constructor(
     readonly code: string,
@@ -1379,6 +2203,10 @@ function sha256OfJson(value: unknown): string {
   // Same canonical stringify the worker uses, so a resumed job sees an
   // identical digest for an identical frozen input.
   return createHash('sha256').update(stableJson(value), 'utf8').digest('hex');
+}
+
+function sha256OfText(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
 export { StepFailure as OrchestrationStepFailure };

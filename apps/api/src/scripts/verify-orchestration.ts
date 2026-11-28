@@ -462,13 +462,18 @@ async function main(): Promise<void> {
     });
     await apiFirst.start();
     const idempotencyKey = `verify-${Date.now()}`;
+    // This script is the 5A silent-render acceptance check: no TTS is
+    // configured here, so narration must be explicitly disabled. The audio
+    // path has its own acceptance check (`pnpm export:verify`).
     const created = await apiFirst.createRun(WORKSPACE_ID, {
       videoId: VIDEO_ID,
       idempotencyKey,
+      narration: { enabled: false },
     });
     const duplicate = await apiFirst.createRun(WORKSPACE_ID, {
       videoId: VIDEO_ID,
       idempotencyKey,
+      narration: { enabled: false },
     });
     record(
       '重复投递只创建一个运行',
@@ -659,6 +664,7 @@ async function main(): Promise<void> {
       await apiGate.createRun(WORKSPACE_ID, {
         videoId: PORTRAIT_VIDEO_ID,
         idempotencyKey: `verify-portrait-${Date.now()}`,
+        narration: { enabled: false },
       });
     } catch (error) {
       portraitError = error;
@@ -677,6 +683,7 @@ async function main(): Promise<void> {
     const blockedRun = await apiGate.createRun(WORKSPACE_ID, {
       videoId: BLOCKED_VIDEO_ID,
       idempotencyKey: `verify-blocked-${Date.now()}`,
+      narration: { enabled: false },
     });
     const blockedDetail = await waitFor(
       () => apiGate.getRun(WORKSPACE_ID, blockedRun.run.id),
@@ -708,6 +715,7 @@ async function main(): Promise<void> {
     const exhaustedRun = await apiCrash.createRun(WORKSPACE_ID, {
       videoId: VIDEO_ID,
       idempotencyKey: `verify-exhaust-${Date.now()}`,
+      narration: { enabled: false },
     });
     const exhausted = await waitFor(
       () => apiCrash.getRun(WORKSPACE_ID, exhaustedRun.run.id),
@@ -811,6 +819,7 @@ async function main(): Promise<void> {
     const cancelRun = await apiCancel.createRun(WORKSPACE_ID, {
       videoId: VIDEO_ID,
       idempotencyKey: `verify-cancel-${Date.now()}`,
+      narration: { enabled: false },
     });
     await waitFor(
       () => apiCancel.getRun(WORKSPACE_ID, cancelRun.run.id),

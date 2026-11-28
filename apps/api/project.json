@@ -50,6 +50,11 @@
       "executor": "nx:run-commands",
       "options": { "command": "tsx src/scripts/verify-orchestration.ts", "cwd": "apps/api" },
       "cache": false
+    },
+    "verify-audio-export": {
+      "executor": "nx:run-commands",
+      "options": { "command": "tsx src/scripts/verify-audio-export.ts", "cwd": "apps/api" },
+      "cache": false
     }
   }
 }

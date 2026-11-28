@@ -13,7 +13,7 @@
 
 | # | 假设 | 当前状态 | 失败后果 |
 |---|---|---|---|
-| H1 | `StoryboardV1` 能被确定性渲染成可播放的 MP4 | **已有证据**（2026-11-20）：`libs/render` + `workers/render-worker` 产出 30 秒 MP4，见 [docs/11](11-RENDER-SLICE.md)。基线提交时为零实现 | 产品核心价值不成立，需重新选型 |
+| H1 | `StoryboardV1` 能被确定性渲染成可播放的 MP4 | **已有证据**（2026-11-20，2026-11-27 扩展到配音）：`libs/render` + `workers/render-worker` 产出 30 秒 MP4；5B 起服务端成片含真实旁白音轨（H.264 + AAC）与同步 SRT，见 [docs/11](11-RENDER-SLICE.md) / [docs/14](14-AUDIO-EXPORT-SLICE.md)。基线提交时为零实现 | 产品核心价值不成立，需重新选型 |
 | H2 | Playwright 能在真实 UI 上稳定录屏，且「断言通过」比「脚本退出码 0」更可信 | **已有证据**（2026-11-26）：`workers/browser-worker` 按已批准 DemoPlan 录制 `web-studio`（11/11 断言、3/3 重复通过率 100%）并接入渲染成片，见 [docs/12](12-CAPTURE-SLICE.md) | 演示素材只能靠手工，产品退化为普通编辑器 |
 | H3 | 前端状态可迁移到真实后端而不大规模返工 | **零实现**：无 `apps/api`，无接口抽象，`mock-services` 被 Store 直接调用 | 后期返工成本超过重写 |
 
@@ -86,6 +86,8 @@ Step 1  真实渲染切片        [2 周]     → Exit: 固定输入产出可播
 Step 2  真实录屏            [2 周]     → Exit: 同一 DemoPlan 重复执行通过率可测
 Step 3  最薄后端 + 接口抽象 [1.5 周]   → Exit: Store 只依赖接口，数据可跨设备恢复
 Step 4  真实知识源          [3–4 周]   → Exit: 真实 PR → Claim → 视频候选闭环
+Step 5A 服务端编排底座      [已完成]    → Exit: SIGKILL 可恢复的真实 MP4（无音轨）
+Step 5B 配音与交付包        [已完成]    → Exit: 带旁白音轨的 MP4 + SRT + Gate 3 导出包
 ```
 
 | 阶段 | 估算 | 核心交付 | Exit Gate | 主要风险 |
@@ -389,6 +391,58 @@ schema 变更一次，已有数据仍在
 
 ---
 
+## 7B. Step 5B · 配音、SRT 与 Gate 3 交付包（WP-03 / AC-10）
+
+**目标**：把 5A 的静音 MP4 变成**可交付的成片包**——真实旁白音轨、与冻结帧时间轴一致的服务端 SRT、以及绑定 Gate 3 的 MP4 + SRT + manifest 下载与 SHA256 回执。
+
+### 工作项
+
+| ID | 任务 | 验收 |
+|---|---|---|
+| S5B-1 | `SpeechPort` 抽象 + OpenAI 兼容适配器 + 离线确定性测试适配器 | 401 不重试且不泄露密钥；429/5xx 有限重试；未配置时 fail-closed |
+| S5B-2 | `SpeechService`：provider 输出统一归一化为 WAV `pcm_s16le` 48 kHz，内容寻址缓存（`provider/model/voice/language/speed/text`） | 相同输入重跑 **0 次 provider 调用**；篡改/缺失的缓存文件被驱逐重生 |
+| S5B-3 | 编排器新增 `synthesize_voice` / `generate_subtitles`（5 步 → 7 步） | 旁白关闭时创建即标 skipped；未配置 TTS 时创建运行 503，绝不静默降级 |
+| S5B-4 | 时长策略：`extend_scene`（延长溢出镜头，不截断、不跨镜头）/ `fail_on_overflow` | 溢出镜头被延长，其余镜头帧数不变；不一致时有结构化错误 |
+| S5B-5 | 服务端 SRT 生成 + 独立解析器校验 | 序号连续、单调、无重叠、不超视频总长；非法 SRT 阻断运行与导出 |
+| S5B-6 | 渲染 worker：`prepareAudioDir` 复验 WAV、`<Audio staticFile>`、AAC 编码、ffprobe + volumedetect | 音轨非静音且音画时长一致；静音 fixture 零回归 |
+| S5B-7 | SQLite v6：`speech_cache` + `export_bundles` | 只新增表，旧数据保留 |
+| S5B-8 | Gate 3 导出：未审批 / 脚本变更 / 产物篡改 / 缺产物 → 409；导出包绑定三个哈希与 `scriptVersion` | 四类 409 均有测试 |
+| S5B-9 | Web：生产页旁白面板、审核页 Gate 3 交付面板（逐文件 SHA256 校验后下载）、合成音色诚实标注 | 首屏与路由预算不劣化；浏览器内导出明确标为草稿 |
+| S5B-10 | `pnpm export:verify` 验收脚本 + `audio-export-real-flow.spec.ts` E2E | 20 项断言全过；E2E 覆盖 409 / 交付包下载 |
+
+### Exit Gate
+
+```text
+服务端 MP4 含真实旁白音轨（H.264 + AAC），ffprobe 音画时长一致且非静音
+同一输入重跑不重复调用 TTS（内容寻址缓存 0 次 provider 调用）
+旁白溢出只延长对应镜头，绝不截断、绝不跨镜头；SRT 不超视频总长
+SRT 经独立解析器校验（单调、无重叠、序号连续）；非法 SRT 绝不放行导出
+Gate 3 未通过 / 脚本版本变化 / 产物被篡改时导出返回 409
+审核页可下载 MP4 + SRT + manifest，下载前校验 SHA256
+离线测试音轨全程标注「测试合成音轨 · 非真人配音」，绝不伪装商用配音
+```
+
+### 执行状态（2026-11-27）
+
+| ID | 状态 | 证据 |
+|---|---|---|
+| S5B-1 | ✅ | `libs/ports/src/speech.ts`、`apps/api/src/speech/openai-compatible-adapter.ts`（+11 用例）、`deterministic-test-adapter.ts` |
+| S5B-2 | ✅ | `apps/api/src/speech/speech-service.ts` + `normalize-audio.ts` + `speech-cache-store.ts`（14 用例） |
+| S5B-3 | ✅ | `apps/api/src/orchestration/orchestrator.ts`：`synthesizeVoice` / `generateSubtitles`，`ORCHESTRATION_STEPS` 7 步 |
+| S5B-4 | ✅ | `libs/domain/src/narration.ts`：`reconcileStoryboardWithNarration` / `NarrationOverflowError` |
+| S5B-5 | ✅ | `libs/domain/src/srt.ts`（生成 + `parseAndValidateSrt` 独立解析器）、`format.ts` 毫秒进位修复 |
+| S5B-6 | ✅ | `workers/render-worker/src/media.ts` `prepareAudioDir`、`libs/render/src/storyboard-composition.tsx` `<Audio>`、`ffprobe.ts` 音频探测 |
+| S5B-7 | ✅ | `apps/api/src/db/database.ts` v6 + `database-v6.test.ts`（5 用例）、`export-bundle-store.ts` |
+| S5B-8 | ✅ | `orchestrator-narration.test.ts`：未审批 → `export_not_approved`、脚本变更 → `export_stale`、篡改 → `export_hash_mismatch` |
+| S5B-9 | ✅ | `server-orchestration-panel.tsx` 旁白面板、`review-artifact-panel.tsx` Gate 3 交付面板、`downloadVerifiedArtifact` |
+| S5B-10 | ✅ | `pnpm export:verify` 20/20；`audio-export-real-flow.spec.ts` 3 条 |
+
+**验证记录**：`nx run-many -t lint typecheck test --skip-nx-cache` 15 项目 / 50 文件 / 434 用例全绿；`pnpm export:verify` 20/20（MP4 36,480 ms · h264+aac · −21.1 dB · SRT 9 条；二次运行 `providerCalls=0`）；`pnpm render:fixture` 静音黄金样片 SHA256 仍为 `b1451bfb…26ccd8a`；`pnpm build && pnpm budget` 初始 228 kB / Production 21.2 kB / Review 17.1 kB gzip，全部达标；`pnpm test:e2e` 45/45 通过。详见 [docs/14](14-AUDIO-EXPORT-SLICE.md) §7。
+
+**Step 5B 边界**：不做 BGM / ducking；不做多语言、多画幅；不做词级卡拉 OK 字幕；不做单镜头局部重渲染；不做服务端驱动 Playwright / 隐私 QA / LLM Director；导出包仍在本地 `data/artifacts`，无对象存储 / CDN / 签名 URL。
+
+---
+
 ## 8. Step 4 · 真实知识源（3–4 周，对应 WP-10 / WP-11）
 
 **目标**：把 README 里「GitHub OAuth / API / 仓库读取是本地确定性模拟」换成真实只读连接。
@@ -542,7 +596,7 @@ docs/01 §7 的北极星指标需要真实后端才能度量；本阶段先建�
 - [录屏、渲染与编辑器](07-VIDEO-CAPTURE-RENDER-AND-EDITOR.md)：DemoPlan、Remotion 合成、质量门禁
 - [安全、证据与 ATVG2](08-SECURITY-EVIDENCE-AND-ATVG2-INTEGRATION.md)：端口定义（§8）、安全验收用例（§9）
 - [实施路线与验收](09-IMPLEMENTATION-ROADMAP-AND-ACCEPTANCE.md)：WP-00 ~ WP-17、评审模板
-- [真实渲染切片](11-RENDER-SLICE.md) / [真实录屏切片](12-CAPTURE-SLICE.md) / [服务端编排切片](13-ORCHESTRATION-SLICE.md)：已执行的验收记录
+- [真实渲染切片](11-RENDER-SLICE.md) / [真实录屏切片](12-CAPTURE-SLICE.md) / [服务端编排切片](13-ORCHESTRATION-SLICE.md) / [配音与交付包切片](14-AUDIO-EXPORT-SLICE.md)：已执行的验收记录
 
 ---
 

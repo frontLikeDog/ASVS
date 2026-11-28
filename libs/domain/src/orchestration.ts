@@ -7,6 +7,7 @@ import {
 } from './schemas';
 import type { Claim, ClaimPublishEligibility } from './schemas';
 import {
+  renderAudioAssetV1Schema,
   renderInputV1Schema,
   renderMediaAssetV1Schema,
   renderProfileSchema,
@@ -51,6 +52,8 @@ export const ORCHESTRATION_STEP_KEYS = [
   'freeze_input',
   'verify_claims',
   'prepare_media',
+  'synthesize_voice',
+  'generate_subtitles',
   'render_video',
   'register_artifacts',
 ] as const;
@@ -65,7 +68,7 @@ export interface OrchestrationStepDefinition {
   executor: 'inline' | 'worker';
 }
 
-/** The fixed five-step 5A DAG. 5C inserts `capture_demo` before `render_video`. */
+/** The fixed seven-step 5B DAG. 5C inserts `capture_demo` before `render_video`. */
 export const ORCHESTRATION_STEPS: readonly OrchestrationStepDefinition[] = [
   {
     stepKey: 'freeze_input',
@@ -86,15 +89,27 @@ export const ORCHESTRATION_STEPS: readonly OrchestrationStepDefinition[] = [
     executor: 'inline',
   },
   {
+    stepKey: 'synthesize_voice',
+    name: '合成旁白音频',
+    description: '逐镜头调用 SpeechPort；内容哈希命中缓存时不重复扣费，旁白超长时延展镜头或明确报错。',
+    executor: 'inline',
+  },
+  {
+    stepKey: 'generate_subtitles',
+    name: '生成并校验 SRT',
+    description: '按冻结帧时间轴生成 SRT，并用独立解析器校验序号、单调、无重叠、不越界。',
+    executor: 'inline',
+  },
+  {
     stepKey: 'render_video',
     name: '渲染视频',
-    description: '以独立子进程驱动 render-worker，支持子阶段 checkpoint 断点续跑。',
+    description: '以独立子进程驱动 render-worker，渲染 H.264 + AAC，ffprobe 校验音画时长与非静音。',
     executor: 'worker',
   },
   {
     stepKey: 'register_artifacts',
     name: '登记产物',
-    description: '复核 MP4 / 回执 / 清单一致性并登记为可下载产物。',
+    description: '复核 MP4 / SRT / 回执 / 清单一致性并登记为可下载产物。',
     executor: 'inline',
   },
 ];
@@ -192,6 +207,10 @@ export const ORCHESTRATION_FAILURE_CODES = [
   'aspect_not_supported',
   'claims_blocked',
   'media_invalid',
+  'narration_overflow',
+  'tts_not_configured',
+  'tts_failed',
+  'subtitle_invalid',
   'render_failed',
   'worker_crash_exhausted',
   'heartbeat_lost_exhausted',
@@ -239,6 +258,17 @@ export const orchestrationInputSummaryV1Schema = z.object({
   aspect: aspectRatioSchema,
   claimCount: z.number().int().min(0),
   usingPlaceholder: z.boolean().optional(),
+  /** 5B: narration state; absent for runs that opt out of voice. */
+  narration: z
+    .object({
+      enabled: z.boolean(),
+      clipCount: z.number().int().min(0),
+      cacheHits: z.number().int().min(0),
+      synthetic: z.boolean(),
+      timingPolicy: z.string().min(1),
+      adjustments: z.number().int().min(0),
+    })
+    .optional(),
 });
 export type OrchestrationInputSummaryV1 = z.infer<typeof orchestrationInputSummaryV1Schema>;
 
@@ -326,6 +356,8 @@ export type OrchestrationJobV1 = z.infer<typeof orchestrationJobV1Schema>;
 
 export const CHECKPOINT_PHASES = [
   'step_done',
+  'narration_ready',
+  'subtitles_ready',
   'bundle_ready',
   'video_rendered',
   'verified_receipt',
@@ -347,6 +379,7 @@ export type OrchestrationCheckpointV1 = z.infer<typeof orchestrationCheckpointV1
 
 export const ORCHESTRATION_ARTIFACT_KINDS = [
   'video_mp4',
+  'subtitles_srt',
   'render_manifest',
   'artifact_receipt',
 ] as const;
@@ -426,6 +459,22 @@ export const renderJobInputV1Schema = z.object({
   input: renderInputV1Schema,
   /** Real capture files referenced by `Asset.media`; empty when placeholder. */
   media: z.array(renderMediaAssetV1Schema).default([]),
+  /** Normalized narration WAV files copied into the render public dir. */
+  audio: z.array(renderAudioAssetV1Schema).default([]),
+  /** Absolute path of the server-verified SRT to bind into manifest.json. */
+  subtitlesPath: z.string().min(1).optional(),
+  /** Scene durations extended to fit narration; surfaced in manifest.json. */
+  timingAdjustments: z
+    .array(
+      z.object({
+        sceneId: idSchema,
+        originalDurationFrames: z.number().int().min(1),
+        effectiveDurationFrames: z.number().int().min(1),
+        audioDurationMs: z.number().int().min(1),
+        overflowMs: z.number().int().min(0),
+      }),
+    )
+    .optional(),
   outputFileName: z.string().regex(/^[A-Za-z0-9._-]+\.mp4$/, '输出文件名必须是安全的 .mp4'),
   jobDigest: sha256Schema,
   createdAt: isoDateSchema,
@@ -481,6 +530,16 @@ export const workerEventSchema = z.discriminatedUnion('type', [
     outputPath: z.string().min(1),
     outputSha256: sha256Schema,
     byteSize: z.number().int().positive(),
+    /** Present when the job carried narration; the worker's own probe result. */
+    audio: z
+      .object({
+        codecName: z.string(),
+        sampleRate: z.number().int().positive(),
+        channels: z.number().int().min(1).max(2),
+        durationMs: z.number().int().nonnegative(),
+        meanVolumeDb: z.number(),
+      })
+      .optional(),
     at: isoDateSchema.optional(),
   }),
   z.object({
@@ -515,6 +574,9 @@ export async function renderJobDigest(input: {
   artifactId: string;
   renderInput: unknown;
   media: unknown[];
+  audio?: unknown[];
+  subtitlesPath?: string;
+  timingAdjustments?: unknown[];
 }): Promise<string> {
   const canonical = stableJson({
     jobId: input.jobId,
@@ -523,9 +585,66 @@ export async function renderJobDigest(input: {
     media: [...input.media].sort((a, b) =>
       JSON.stringify(a).localeCompare(JSON.stringify(b)),
     ),
+    audio: [...(input.audio ?? [])].sort((a, b) =>
+      JSON.stringify(a).localeCompare(JSON.stringify(b)),
+    ),
+    subtitlesPath: input.subtitlesPath ?? null,
+    timingAdjustments: input.timingAdjustments ?? [],
   });
   return sha256Hex(canonical);
 }
+
+// ── Export bundle (Gate 3 bound delivery, AC-10) ───────────────────────────
+
+export const exportBundleV1Schema = z.object({
+  schemaVersion: z.literal(ORCHESTRATION_SCHEMA_VERSION),
+  id: idSchema,
+  workspaceId: idSchema,
+  projectId: idSchema,
+  videoId: idSchema,
+  runId: idSchema,
+  mp4ArtifactId: idSchema,
+  srtArtifactId: idSchema,
+  manifestArtifactId: idSchema,
+  receiptArtifactId: idSchema,
+  mp4Sha256: sha256Schema,
+  srtSha256: sha256Schema,
+  manifestSha256: sha256Schema,
+  scriptVersion: z.number().int().min(1),
+  approvalNote: z.string().optional(),
+  createdAt: isoDateSchema,
+});
+export type ExportBundleV1 = z.infer<typeof exportBundleV1Schema>;
+
+/** Download descriptor returned by the export API; URLs are path-form. */
+export const exportBundleFileV1Schema = z.object({
+  artifactId: idSchema,
+  kind: orchestrationArtifactKindSchema,
+  fileName: z.string().min(1),
+  mimeType: z.string().min(1),
+  byteSize: z.number().int().nonnegative(),
+  sha256: sha256Schema,
+  downloadUrl: z.string().min(1),
+});
+export type ExportBundleFileV1 = z.infer<typeof exportBundleFileV1Schema>;
+
+export const exportBundleDetailV1Schema = z.object({
+  bundle: exportBundleV1Schema,
+  files: z.array(exportBundleFileV1Schema),
+  videoDurationMs: z.number().int().nonnegative().optional(),
+  audioDurationMs: z.number().int().nonnegative().optional(),
+  narration: z
+    .object({
+      provider: z.string().min(1),
+      voiceId: z.string().min(1),
+      language: z.string().min(1),
+      license: z.string().min(1),
+      synthetic: z.boolean(),
+      timingPolicy: z.string().min(1),
+    })
+    .optional(),
+});
+export type ExportBundleDetailV1 = z.infer<typeof exportBundleDetailV1Schema>;
 
 // ── Claim gate (reuses 4D publishability rules) ────────────────────────────
 

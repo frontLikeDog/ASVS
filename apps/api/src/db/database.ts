@@ -269,6 +269,69 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 6,
+    up(db) {
+      // Step 5B narration + Gate-3 bound export bundles (docs/06 §5, AC-10).
+      //
+      // `speech_cache` is content-addressed: the key hashes provider, model,
+      // voice, language, speed and the exact text, so an identical re-run must
+      // never re-bill the provider. The WAV bytes live on disk under
+      // `data/artifacts/tts/<cache_key>.wav`; this row records their hash so a
+      // truncated or swapped file is detected on the next hit.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS speech_cache (
+          cache_key TEXT PRIMARY KEY,
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL,
+          voice_id TEXT NOT NULL,
+          language TEXT NOT NULL,
+          speed REAL NOT NULL,
+          text_sha256 TEXT NOT NULL,
+          text_length INTEGER NOT NULL,
+          file_path TEXT NOT NULL,
+          sha256 TEXT NOT NULL,
+          byte_size INTEGER NOT NULL,
+          duration_ms INTEGER NOT NULL,
+          sample_rate INTEGER NOT NULL,
+          channels INTEGER NOT NULL,
+          license TEXT NOT NULL,
+          synthetic INTEGER NOT NULL,
+          created_at TEXT NOT NULL,
+          last_used_at TEXT NOT NULL,
+          hit_count INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_speech_cache_created
+          ON speech_cache(created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS export_bundles (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL,
+          project_id TEXT NOT NULL,
+          video_id TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          mp4_artifact_id TEXT NOT NULL,
+          srt_artifact_id TEXT NOT NULL,
+          manifest_artifact_id TEXT NOT NULL,
+          receipt_artifact_id TEXT NOT NULL,
+          mp4_sha256 TEXT NOT NULL,
+          srt_sha256 TEXT NOT NULL,
+          manifest_sha256 TEXT NOT NULL,
+          script_version INTEGER NOT NULL,
+          approval_note TEXT,
+          payload TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_export_bundles_workspace_video
+          ON export_bundles(workspace_id, video_id, created_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_export_bundles_run
+          ON export_bundles(run_id, created_at DESC);
+      `);
+    },
+  },
 ];
 
 function readUserVersion(db: DatabaseSync): number {

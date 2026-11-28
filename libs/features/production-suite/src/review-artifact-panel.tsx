@@ -1,11 +1,26 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { OrchestrationArtifactV1, OrchestrationRunV1 } from '@asvs/domain';
-import { Download, Film, HardDrive, Loader2, ShieldCheck } from 'lucide-react';
+import type {
+  ExportBundleDetailV1,
+  OrchestrationArtifactV1,
+  OrchestrationRunV1,
+} from '@asvs/domain';
+import {
+  Download,
+  FileText,
+  Film,
+  HardDrive,
+  Loader2,
+  PackageCheck,
+  ShieldCheck,
+} from 'lucide-react';
 import { Badge, Button, Callout, Panel, PanelHeader, cn } from '@asvs/ui';
 import { getOrchestrationClient, useUiStore, useWorkspaceSyncStore } from '@asvs/state';
-import { formatArtifactSize, formatDurationMs, shortSha } from './server-orchestration';
-
-const NO_AUDIO_NOTE = '16:9 · H.264 · 无音轨（5B 接入配音与 SRT）';
+import {
+  downloadVerifiedArtifact,
+  formatArtifactSize,
+  formatDurationMs,
+  shortSha,
+} from './server-orchestration';
 
 interface LatestVideoArtifact {
   run: OrchestrationRunV1;
@@ -15,20 +30,38 @@ interface LatestVideoArtifact {
 
 type ProbeState = 'probing' | 'unavailable' | 'none' | 'ready';
 
+const FILE_LABEL: Record<string, string> = {
+  video_mp4: 'MP4',
+  subtitles_srt: 'SRT',
+  render_manifest: 'manifest.json',
+  artifact_receipt: 'receipt.json',
+};
+
 /**
- * Real server-rendered MP4 for a video, if one exists.
+ * Gate-3 bound delivery (AC-10).
  *
- * Deliberately read-only: approval still happens on the review page's own
- * checks, and this panel never fakes a file. When the API is unreachable or the
- * video was never rendered server-side it says so and leaves the existing
- * simulated export flow untouched.
+ * Read-only until the review page's own checks pass: the export button appears
+ * only for an approved video, and the server re-verifies the gate and re-hashes
+ * every file before it inserts a bundle. Downloads always verify the bytes
+ * against the registered SHA256, so a truncated or swapped file never lands on
+ * the user's disk silently.
  */
-export function ReviewArtifactPanel({ videoId }: { videoId: string }) {
+export function ReviewArtifactPanel({
+  videoId,
+  gateApproved,
+}: {
+  videoId: string;
+  /** Mirror of Gate 3 as the review page sees it; the server re-checks anyway. */
+  gateApproved: boolean;
+}) {
   const syncConfig = useWorkspaceSyncStore((state) => state.config);
   const pushToast = useUiStore((state) => state.pushToast);
   const [state, setState] = useState<ProbeState>('probing');
   const [latest, setLatest] = useState<LatestVideoArtifact | null>(null);
   const [manifest, setManifest] = useState<OrchestrationArtifactV1 | null>(null);
+  const [srt, setSrt] = useState<OrchestrationArtifactV1 | null>(null);
+  const [bundles, setBundles] = useState<ExportBundleDetailV1[]>([]);
+  const [exporting, setExporting] = useState(false);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,8 +78,12 @@ export function ReviewArtifactPanel({ videoId }: { videoId: string }) {
           if (!cancelled) setState('unavailable');
           return;
         }
-        const found = await client.getLatestVideoArtifact(syncConfig.workspaceId, videoId);
+        const [found, existing] = await Promise.all([
+          client.getLatestVideoArtifact(syncConfig.workspaceId, videoId),
+          client.listExportBundles(syncConfig.workspaceId, { videoId, limit: 10 }),
+        ]);
         if (cancelled) return;
+        setBundles(existing);
         if (!found) {
           setState('none');
           return;
@@ -55,6 +92,7 @@ export function ReviewArtifactPanel({ videoId }: { videoId: string }) {
         const detail = await client.getRun(syncConfig.workspaceId, found.run.id);
         if (cancelled) return;
         setManifest(detail?.artifacts.find((artifact) => artifact.kind === 'render_manifest') ?? null);
+        setSrt(detail?.artifacts.find((artifact) => artifact.kind === 'subtitles_srt') ?? null);
         setState('ready');
       } catch {
         if (!cancelled) setState('unavailable');
@@ -66,31 +104,15 @@ export function ReviewArtifactPanel({ videoId }: { videoId: string }) {
   }, [syncConfig.enabled, syncConfig.baseUrl, syncConfig.workspaceId, videoId]);
 
   const download = useCallback(
-    async (artifact: OrchestrationArtifactV1) => {
+    async (artifact: { id: string; fileName: string; mimeType: string; sha256: string }) => {
       setDownloading(artifact.id);
       setError(null);
       try {
         const client = await getOrchestrationClient(syncConfig.baseUrl);
-        const response = await fetch(client.artifactDownloadUrl(syncConfig.workspaceId, artifact.id));
-        if (!response.ok) throw new Error(`下载失败（HTTP ${response.status}）`);
-        // The server sets ETag to the stored SHA256; verify the bytes match
-        // before handing them to the user.
-        const buffer = await response.arrayBuffer();
-        const digest = await crypto.subtle.digest('SHA-256', buffer);
-        const hex = Array.from(new Uint8Array(digest))
-          .map((byte) => byte.toString(16).padStart(2, '0'))
-          .join('');
-        if (hex !== artifact.sha256) {
-          throw new Error(`下载内容 SHA256 不匹配（${hex.slice(0, 12)}… vs ${artifact.sha256.slice(0, 12)}…）`);
-        }
-        const url = URL.createObjectURL(new Blob([buffer], { type: artifact.mimeType }));
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = artifact.fileName;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        window.setTimeout(() => URL.revokeObjectURL(url), 1200);
+        await downloadVerifiedArtifact(
+          client.artifactDownloadUrl(syncConfig.workspaceId, artifact.id),
+          artifact,
+        );
         pushToast({
           tone: 'success',
           title: `已下载 ${artifact.fileName}`,
@@ -105,6 +127,29 @@ export function ReviewArtifactPanel({ videoId }: { videoId: string }) {
     [syncConfig.baseUrl, syncConfig.workspaceId, pushToast],
   );
 
+  const createBundle = useCallback(async () => {
+    if (!latest) return;
+    setExporting(true);
+    setError(null);
+    try {
+      const client = await getOrchestrationClient(syncConfig.baseUrl);
+      const created = await client.createExportBundle(syncConfig.workspaceId, {
+        videoId,
+        runId: latest.run.id,
+      });
+      setBundles((current) => [created, ...current]);
+      pushToast({
+        tone: 'success',
+        title: '交付包已生成',
+        description: `MP4 ${shortSha(created.bundle.mp4Sha256)} · SRT ${shortSha(created.bundle.srtSha256)}`,
+      });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setExporting(false);
+    }
+  }, [latest, syncConfig.baseUrl, syncConfig.workspaceId, videoId, pushToast]);
+
   if (state === 'probing') {
     return (
       <Panel>
@@ -118,7 +163,8 @@ export function ReviewArtifactPanel({ videoId }: { videoId: string }) {
   if (state === 'unavailable') {
     return (
       <Callout tone="info" size="sm" title="没有连接服务端编排">
-        连接本机工作区后，这里会显示真实的 16:9 MP4（含 SHA256 / 时长 / 分辨率）与 manifest.json；当前仅提供下方浏览器内的导出。
+        连接本机工作区后，这里会显示真实的 16:9 MP4（含 AAC 旁白）与 SRT，并在批准后生成带 SHA256 回执的交付包；
+        当前仅提供下方浏览器内的导出。
       </Callout>
     );
   }
@@ -126,7 +172,7 @@ export function ReviewArtifactPanel({ videoId }: { videoId: string }) {
   if (state === 'none') {
     return (
       <Callout tone="warning" size="sm" title="还没有服务端渲染的真实 MP4">
-        到 <span className="font-mono">生产监控</span> 启动一次服务端渲染后，这里会出现可下载的 MP4 与 manifest。
+        到 <span className="font-mono">生产监控</span> 启动一次服务端渲染后，这里会出现可导出的 MP4、SRT 与 manifest。
         当前导出记录里的 MP4/WebM 仍是模拟任务状态。
       </Callout>
     );
@@ -140,12 +186,18 @@ export function ReviewArtifactPanel({ videoId }: { videoId: string }) {
   const fps = typeof videoArtifact.metadata.fps === 'number' ? videoArtifact.metadata.fps : null;
   const codec = typeof videoArtifact.metadata.codecName === 'string' ? videoArtifact.metadata.codecName : 'h264';
   const usingPlaceholder = videoArtifact.metadata.usingPlaceholder === true;
+  const hasAudio = videoArtifact.metadata.hasAudio === true;
+  const narration = videoArtifact.metadata.narration as
+    | { provider?: string; voiceId?: string; license?: string; synthetic?: boolean; timingPolicy?: string; language?: string }
+    | undefined;
+  const latestBundle = bundles[0] ?? null;
+  const latestBundleCoversThisRun = latestBundle?.bundle.runId === latest.run.id;
 
   return (
     <Panel>
       <PanelHeader
         title="服务端真实产物"
-        description="由 render-worker 子进程渲染，经 ffprobe 校验并登记为可下载产物。"
+        description="由 render-worker 子进程渲染，经 ffprobe 校验音画与非静音后登记为可下载产物。"
         actions={
           <Badge tone="success" dot={false}>
             <ShieldCheck size={9} className="mr-1" />
@@ -161,7 +213,12 @@ export function ReviewArtifactPanel({ videoId }: { videoId: string }) {
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-[11px] text-fg">{videoArtifact.fileName}</span>
-              <Badge tone="outline" dot={false}>{NO_AUDIO_NOTE}</Badge>
+              <Badge tone="outline" dot={false}>
+                {hasAudio ? '16:9 · H.264 + AAC 48kHz' : '16:9 · H.264 · 无音轨'}
+              </Badge>
+              {narration?.synthetic ? (
+                <Badge tone="warn" dot={false}>测试合成音轨 · 非真人配音</Badge>
+              ) : null}
               {usingPlaceholder ? <Badge tone="warn" dot={false}>含占位画面</Badge> : null}
             </div>
             <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[9.5px] text-faint">
@@ -175,28 +232,41 @@ export function ReviewArtifactPanel({ videoId }: { videoId: string }) {
                 帧率 <span className="font-mono text-muted">{fps ?? '—'}</span>
               </span>
               <span>
-                编码 <span className="font-mono text-muted">{codec}</span>
+                编码 <span className="font-mono text-muted">{codec}{hasAudio ? ' + aac' : ''}</span>
               </span>
               <span>
                 大小 <span className="font-mono text-muted">{formatArtifactSize(videoArtifact.byteSize)}</span>
               </span>
+              {srt ? (
+                <span>
+                  字幕 <span className="font-mono text-muted">{String(srt.metadata.cueCount ?? '?')} 条</span>
+                </span>
+              ) : null}
             </div>
             <div className="mt-1 break-all font-mono text-[9px] text-faint">
               SHA256 {videoArtifact.sha256}
             </div>
+            {narration ? (
+              <div className="mt-1 text-[9px] text-faint">
+                旁白 {narration.voiceId} · {narration.language} · {narration.provider} · 许可 {narration.license} · 策略{' '}
+                {narration.timingPolicy}
+              </div>
+            ) : null}
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Button
-            variant="primary"
-            size="sm"
-            icon={<Download size={12} />}
-            disabled={downloading !== null}
-            onClick={() => void download(videoArtifact)}
-          >
-            {downloading === videoArtifact.id ? '下载并校验中…' : '下载 MP4'}
-          </Button>
+          {srt ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              icon={<FileText size={12} />}
+              disabled={downloading !== null}
+              onClick={() => void download(srt)}
+            >
+              {downloading === srt.id ? '校验中…' : '下载 SRT'}
+            </Button>
+          ) : null}
           {manifest ? (
             <Button
               variant="ghost"
@@ -213,8 +283,107 @@ export function ReviewArtifactPanel({ videoId }: { videoId: string }) {
           </span>
         </div>
 
+        <div className="rounded-sm border border-line bg-raised/20 p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[10.5px] font-medium text-fg">Gate 3 交付包</span>
+            {latestBundleCoversThisRun ? (
+              <Badge tone="success" dot={false}>已生成 · {formatRelative(latestBundle!.bundle.createdAt)}</Badge>
+            ) : (
+              <Badge tone="warn" dot={false}>尚未生成</Badge>
+            )}
+            {latestBundle?.narration?.synthetic ? (
+              <Badge tone="warn" dot={false}>测试合成音轨 · 非真人配音</Badge>
+            ) : null}
+            <Button
+              variant="primary"
+              size="sm"
+              className="ml-auto"
+              icon={<PackageCheck size={12} />}
+              disabled={exporting || latestBundleCoversThisRun || !gateApproved}
+              onClick={() => void createBundle()}
+            >
+              {exporting
+                ? '正在校验产物…'
+                : latestBundleCoversThisRun
+                  ? '交付包已生成'
+                  : gateApproved
+                    ? '生成交付包'
+                    : '需先通过 Gate 3'}
+            </Button>
+          </div>
+          <p className="mt-1.5 text-[9px] leading-4 text-faint">
+            需要视频已通过 Gate 3（stage = approved/exported 且审核通过）。服务端会重新核对脚本版本、重新计算每个文件的
+            SHA256，任一不符返回 409，不会放行过期或篡改的产物。
+          </p>
+        </div>
+
+        {bundles.length > 0 ? (
+          <div className="space-y-2">
+            {bundles.map((detail) => (
+              <div key={detail.bundle.id} className="rounded-sm border border-line p-2.5">
+                <div className="flex flex-wrap items-center gap-2 text-[9.5px]">
+                  <span className="font-mono text-muted">{detail.bundle.id}</span>
+                  <span className="text-faint">脚本 v{detail.bundle.scriptVersion}</span>
+                  <span className="text-faint">{formatRelative(detail.bundle.createdAt)}</span>
+                  {detail.videoDurationMs !== undefined ? (
+                    <span className="text-faint">
+                      视频 <span className="font-mono text-muted">{formatDurationMs(detail.videoDurationMs)}</span>
+                    </span>
+                  ) : null}
+                  {detail.audioDurationMs !== undefined ? (
+                    <span className="text-faint">
+                      音轨 <span className="font-mono text-muted">{formatDurationMs(detail.audioDurationMs)}</span>
+                    </span>
+                  ) : null}
+                </div>
+                {detail.bundle.approvalNote ? (
+                  <div className="mt-1 text-[9px] text-faint">备注：{detail.bundle.approvalNote}</div>
+                ) : null}
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  {detail.files.map((file) => (
+                    <Button
+                      key={file.artifactId}
+                      variant={file.kind === 'video_mp4' ? 'secondary' : 'ghost'}
+                      size="sm"
+                      icon={<Download size={11} />}
+                      disabled={downloading !== null}
+                      title={`SHA256 ${file.sha256}`}
+                      onClick={() =>
+                        void download({
+                          id: file.artifactId,
+                          fileName: file.fileName,
+                          mimeType: file.mimeType,
+                          sha256: file.sha256,
+                        })
+                      }
+                    >
+                      {downloading === file.artifactId ? '校验中…' : `${FILE_LABEL[file.kind] ?? file.kind} · ${formatArtifactSize(file.byteSize)}`}
+                    </Button>
+                  ))}
+                </div>
+                <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-0.5 font-mono text-[8.5px] text-faint">
+                  <span>MP4 {shortSha(detail.bundle.mp4Sha256, 16)}</span>
+                  <span>SRT {shortSha(detail.bundle.srtSha256, 16)}</span>
+                  <span>manifest {shortSha(detail.bundle.manifestSha256, 16)}</span>
+                </div>
+                {detail.narration ? (
+                  <div className="mt-1 text-[8.5px] text-faint">
+                    旁白 {detail.narration.voiceId} · {detail.narration.language} · 许可 {detail.narration.license}
+                    {detail.narration.synthetic ? ' · 测试合成' : ''}
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-[9px] leading-4 text-faint">
+            还没有交付包。批准后点击「生成交付包」，即可分别下载 MP4、SRT 与 manifest.json；每个文件都附带 SHA256 回执。
+          </p>
+        )}
+
         <p className="text-[9px] leading-4 text-faint">
-          下载会先按登记的 SHA256 校验字节，再交给浏览器保存。5A 只产出画面；配音与 SRT 在 5B 接入，当前 MP4 无音轨。
+          每次下载都会先按登记的 SHA256 校验字节，再交给浏览器保存。旁白为合成音轨时会在本页与 manifest 中明确标注；
+          {gateApproved ? ' 当前 Gate 3 已通过。' : ' 当前尚未通过 Gate 3，服务端会以 409 拒绝导出。'}
         </p>
 
         {error ? (
@@ -225,4 +394,15 @@ export function ReviewArtifactPanel({ videoId }: { videoId: string }) {
       </div>
     </Panel>
   );
+}
+
+function formatRelative(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return iso;
+  const diffMinutes = Math.round((Date.now() - then) / 60_000);
+  if (diffMinutes < 1) return '刚刚';
+  if (diffMinutes < 60) return `${diffMinutes} 分钟前`;
+  const diffHours = Math.round(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours} 小时前`;
+  return `${Math.round(diffHours / 24)} 天前`;
 }

@@ -70,7 +70,7 @@ const FORMAT_INFO: Record<
   mp4: { label: 'MP4', detail: 'H.264 · 模拟任务状态，不生成文件', simulated: true, icon: Film },
   webm: { label: 'WebM', detail: 'VP9 · 模拟任务状态，不生成文件', simulated: true, icon: Video },
   json: { label: '工程 JSON', detail: '真实下载 · 可重建的工程与知识快照', simulated: false, icon: FileJson },
-  srt: { label: '字幕 SRT', detail: '真实下载 · 与镜头时长对齐', simulated: false, icon: FileText },
+  srt: { label: '字幕 SRT', detail: '浏览器本地草稿 · 服务端版本在交付包中', simulated: false, icon: FileText },
 };
 
 const ACTION_LINK: Record<ReviewCheck['action'], { label: string; path: 'knowledge' | 'editor' | 'production' | null }> = {
@@ -257,7 +257,7 @@ export function ReviewPage() {
       <div className="mt-4 grid grid-cols-[minmax(0,1fr)] gap-4 xl:grid-cols-[minmax(0,1fr)_350px]">
         <div className="space-y-4">
           {/* 5A: real server-rendered MP4 + manifest, when one exists. */}
-          <ReviewArtifactPanel videoId={video.id} />
+          <ReviewArtifactPanel videoId={video.id} gateApproved={exportUnlocked && approved} />
           <Panel className="overflow-hidden">
             <div
               className={cn(
@@ -429,8 +429,8 @@ export function ReviewPage() {
 
           <Panel>
             <PanelHeader
-              title="导出"
-              description="媒体格式只模拟任务状态；JSON / SRT 是真实可下载文件。"
+              title="浏览器内导出（草稿）"
+              description="这些文件不经过服务端校验；正式交付请使用上方 Gate 3 交付包。"
               actions={
                 exportUnlocked ? (
                   <Badge tone="success" dot={false}>已解锁</Badge>
@@ -695,10 +695,10 @@ export function ReviewPage() {
           <Panel>
             <PanelHeader title="交付边界" />
             <div className="space-y-2 px-4 pb-4 text-[9.5px] leading-4 text-muted">
-              <p className="flex gap-2"><Check size={10} className="mt-0.5 shrink-0 text-success" /> 项目 JSON 与 SRT 为真实文件。</p>
-              <p className="flex gap-2"><Check size={10} className="mt-0.5 shrink-0 text-success" /> 审批、版本失效与证据阻断会落盘。</p>
-              <p className="flex gap-2"><CircleAlert size={10} className="mt-0.5 shrink-0 text-warn" /> 媒体导出是模拟状态，不会产生视频文件。</p>
-              <p className="flex gap-2"><CircleAlert size={10} className="mt-0.5 shrink-0 text-warn" /> 没有真实发布、上传或 CDN 分发。</p>
+              <p className="flex gap-2"><Check size={10} className="mt-0.5 shrink-0 text-success" /> 服务端 MP4（H.264 + AAC）与 SRT 为真实文件，下载前校验 SHA256。</p>
+              <p className="flex gap-2"><Check size={10} className="mt-0.5 shrink-0 text-success" /> 审批、版本失效与证据阻断会落盘；交付包绑定 Gate 3 与脚本版本。</p>
+              <p className="flex gap-2"><CircleAlert size={10} className="mt-0.5 shrink-0 text-warn" /> 浏览器内的 MP4 / WebM 记录仍是模拟状态，不生成文件。</p>
+              <p className="flex gap-2"><CircleAlert size={10} className="mt-0.5 shrink-0 text-warn" /> 没有真实发布、上传或 CDN 分发；交付包只提供本地下载。</p>
             </div>
           </Panel>
 

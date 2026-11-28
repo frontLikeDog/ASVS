@@ -381,3 +381,56 @@ describe('sceneDurationFrames', () => {
     expect(sceneDurationFrames({ durationSec: 0.01 }, 30)).toBe(1);
   });
 });
+
+describe('5B 可选音轨契约（向后兼容）', () => {
+  it('旧版无音频 fixture 仍然通过，audio 默认为空数组', async () => {
+    const { renderFixtureV1Schema } = await import('./render');
+    const fixture = renderFixtureV1Schema.parse({
+      schemaVersion: '1',
+      kind: 'asvs.render-fixture',
+      video: video(),
+      project,
+      features: [feature],
+      assets: [],
+    });
+    expect(fixture.audio).toEqual([]);
+  });
+
+  it('renderInput 不携带 narration 时仍合法，携带时校验字段', async () => {
+    const { renderInputV1Schema, buildRenderInput } = await import('./render');
+    const input = buildRenderInput({
+      video: video(),
+      project,
+      features: [feature],
+      assets: [],
+    });
+    expect(input.narration).toBeUndefined();
+    expect(() => renderInputV1Schema.parse(input)).not.toThrow();
+
+    expect(() =>
+      renderInputV1Schema.parse({
+        ...input,
+        narration: {
+          voice: {
+            provider: 'deterministic_test',
+            model: 'tone',
+            voiceId: 'zh-test',
+            language: 'zh-CN',
+            speed: 1,
+            license: 'internal-deterministic-test-only',
+            synthetic: true,
+          },
+          clips: [],
+          timingPolicy: 'extend_scene',
+        },
+      }),
+    ).not.toThrow();
+
+    expect(() =>
+      renderInputV1Schema.parse({
+        ...input,
+        narration: { voice: { voiceId: '' }, clips: [], timingPolicy: 'nope' },
+      }),
+    ).toThrow();
+  });
+});

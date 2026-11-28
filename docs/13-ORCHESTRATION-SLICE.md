@@ -2,7 +2,9 @@
 
 > 状态：**已执行**｜日期：2026-11-27｜分支：`claude/interesting-neumann-9276b4`
 > 对应计划：docs/09 WP-03 / AC-06、docs/06 §5（可恢复执行）、docs/05 §4（`JobEnvelopeV1`）
-> 结论先说：生产运行的状态与执行已从浏览器定时器迁到 **SQLite 持久化任务队列 + 独立 worker 子进程**。真实 `render-worker` 被 `SIGKILL` 后，重启的「API 进程」按 `bundle_ready` checkpoint 续跑并产出 6 秒真实 MP4；ffprobe、SHA256、回执、清单、数据库登记行五方一致。**审核页仍不提供配音与 SRT**（5B），Web 内的模拟 DAG 未被替换。
+> 结论先说：生产运行的状态与执行已从浏览器定时器迁到 **SQLite 持久化任务队列 + 独立 worker 子进程**。真实 `render-worker` 被 `SIGKILL` 后，重启的「API 进程」按 `bundle_ready` checkpoint 续跑并产出 6 秒真实 MP4；ffprobe、SHA256、回执、清单、数据库登记行五方一致。Web 内的模拟 DAG 未被替换。
+>
+> 后续（2026-11-27）：配音、SRT 与 Gate 3 交付包已由 [Step 5B](14-AUDIO-EXPORT-SLICE.md) 补齐，本切片描述的 5 步 DAG 已扩为 7 步；下面关于「无音轨」的描述均指 5A 验收当时的产物。
 
 ---
 
@@ -130,7 +132,7 @@ register_artifacts：回执/清单 Schema、SHA256、字节数、jobId、16:9 �
 |---|---|
 | 生产监控 `ServerOrchestrationPanel` | 未连接工作区 / API 不可达时显示 Callout 并明确说明「下面仍可使用浏览器内模拟 DAG」；连接后提供「启动服务端渲染」，展示五步 DAG、attempt、checkpoint 徽标、事件日志、失败码、Gate 批准、取消/重试/下载 |
 | 审核 `ReviewArtifactPanel` | 只读展示最新成功 run 的 MP4 与 manifest；下载前用 WebCrypto 校验 SHA256 再落盘；无产物时明确说明「导出记录里的 MP4/WebM 仍是模拟任务状态」 |
-| 格式标注 | 两处均标注 `16:9 · H.264 · 无音轨（5B 接入配音与 SRT）` |
+| 格式标注 | 两处均标注 `16:9 · H.264 · 无音轨（5B 接入配音与 SRT）`。（5B 起改为按产物标注 `16:9 · H.264 + AAC 48kHz · 含旁白音轨` / `16:9 · H.264 · 无音轨`，见 [docs/14](14-AUDIO-EXPORT-SLICE.md) §8） |
 
 首屏预算：客户端通过 `libs/state/src/orchestration.ts` **动态** `import('@asvs/adapters-http')`，初始 chunk 不新增静态依赖（见 §7 预算数字）。
 
@@ -153,9 +155,9 @@ register_artifacts：回执/清单 Schema、SHA256、字节数、jobId、16:9 �
 
 ---
 
-## 8. 明确未做（5B 及以后）
+## 8. 明确未做（5B 已完成，见 [docs/14](14-AUDIO-EXPORT-SLICE.md)）
 
-- TTS / 配音 / SRT 字幕轨（MP4 明确无音轨）
+- ~~TTS / 配音 / SRT 字幕轨（MP4 明确无音轨）~~ → 已由 5B 实现：旁白音轨（H.264 + AAC）、服务端 SRT 与 Gate 3 交付包
 - 服务端驱动 Playwright / Demo Planner（`awaiting_approval` 与 `/approve` 仅预留，未接 Gate）
 - 隐私 QA、LLM AI Director
 - 局部重渲染 / FFmpeg 片段拼接
