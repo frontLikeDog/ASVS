@@ -15,6 +15,7 @@ import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import {
   exportBundleDetailV1Schema,
+  type OrchestrationStepKey,
   type StoryboardV1,
   type StudioSnapshot,
 } from '@asvs/domain';
@@ -55,8 +56,12 @@ const WORKSPACE_ID = 'ws_audio_export_verify';
 const VIDEO_ID = 'vid_audio_export';
 const UNAPPROVED_VIDEO_ID = 'vid_audio_unapproved';
 const ISO = '2026-11-27T10:00:00.000Z';
-/** 5C Gate 2 steps; `skipped` here means "capture was never requested". */
-const CAPTURE_STEP_KEYS = ['plan_demo', 'capture_demo'];
+/**
+ * 5C Gate 2 steps; `skipped` here means "capture was never requested". Typed as
+ * `OrchestrationStepKey[]` (not a bare literal array) so it can index the
+ * step-keyed Map without widening to `string`.
+ */
+const CAPTURE_STEP_KEYS: OrchestrationStepKey[] = ['plan_demo', 'capture_demo'];
 
 /**
  * ~150 characters of Chinese. The deterministic adapter estimates 4.2 chars/s,

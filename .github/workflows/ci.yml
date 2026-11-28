@@ -472,6 +472,17 @@ jobs:
       - name: Install Chromium
         run: pnpm exec playwright install --with-deps chromium
 
+      # The Gate 2 capture spec approves a real run, and `synthesize_voice`
+      # shells out to ffmpeg to normalize every narration clip — without it the
+      # run fails at step 6 with `spawnSync ffmpeg ENOENT` and the "clip was
+      # backfilled" assertion never gets a chance to pass. Same reason the
+      # validate job installs it.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 ffmpeg
+          ffmpeg -version
+
       - name: Run Playwright
         run: pnpm test:e2e
 
