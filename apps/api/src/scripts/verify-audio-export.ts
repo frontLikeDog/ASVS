@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -688,6 +689,14 @@ async function main(): Promise<void> {
     process.stdout.write(`全部 ${reports.length} 项验收通过。\n`);
   } finally {
     db.close();
+    const exportDir = process.env.ASVS_VERIFY_EXPORT_DIR;
+    if (exportDir) {
+      // CI uploads this directory as the PR's audio evidence; a fresh run
+      // replaces it so a stale MP4 can never be mistaken for this run's.
+      rmSync(exportDir, { recursive: true, force: true });
+      cpSync(tempRoot, exportDir, { recursive: true });
+      process.stdout.write(`导出证据已复制：${exportDir}\n`);
+    }
     if (!process.env.ASVS_KEEP_VERIFY_DIR) {
       rmSync(tempRoot, { recursive: true, force: true });
     } else {

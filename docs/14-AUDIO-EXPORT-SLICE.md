@@ -199,6 +199,8 @@ GET …/artifacts/:id/download   ETag = sha256
 | `pnpm test:e2e` | **45/45 通过（2.0 分钟）**：桌面 / 平板 / 移动三个项目；新增 `audio-export-real-flow.spec.ts` 3 条，`orchestration-real-flow.spec.ts` 断言更新为含音轨格式 |
 | `pnpm lint:boundary-check` | 4/4 探针按预期 |
 
+**CI（首次 PR 运行暴露的真实缺口）**：`Validate` 作业此前没有安装 ffmpeg，`apps/api/src/speech` 的 16 个用例在 Linux runner 上以 `spawnSync ffmpeg ENOENT` 全部失败（本机 Windows 已安装 ffmpeg，所以本地矩阵一直是绿的）。修复：`validate` 作业补装 `ffmpeg` 并打印版本；同时把 `pnpm export:verify` 挂到已具备 ffmpeg + Remotion + CJK 字体的 `render` 作业（`RENDER_PROJECTS` 增加 `api|ports|adapters-http`），设置 `ASVS_VERIFY_EXPORT_DIR=dist/audio-verify` 并把该目录作为 `narration-export-verify` 工件上传，让 PR 上能直接检查带音轨的 MP4 / SRT / manifest。其余 5 个作业（affected / build / render golden / capture / e2e）在 PR #9 首轮即通过。
+
 ---
 
 ## 8. Web 接入
