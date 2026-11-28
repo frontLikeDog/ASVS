@@ -17,6 +17,7 @@ import type {
   RenderJobExecutorPort,
 } from '@asvs/ports';
 import { openDatabase } from '../db/database';
+import { OrchestrationApprovalStore } from '../db/orchestration-approval-store';
 import { SqliteOrchestrationStore } from '../db/orchestration-store';
 import { Orchestrator } from './orchestrator';
 import { OrchestrationHttpError } from './errors';
@@ -388,18 +389,21 @@ describe('编排器 · DAG 推进', () => {
     };
 
     const detail = await waitForRun(orchestrator, created.run.id, (run) => run.status === 'succeeded');
-    // 5B inserts synthesize_voice + generate_subtitles (skipped here because
-    // narration is off); render_video is index 5 and crashed once.
-    expect(detail.run.steps.map((step) => step.status)).toEqual([
-      'succeeded',
-      'succeeded',
-      'succeeded',
-      'skipped',
-      'skipped',
-      'succeeded',
-      'succeeded',
+    // 5C inserts plan_demo + capture_demo (skipped here because capture is
+    // off) and 5B inserts synthesize_voice + generate_subtitles (skipped here
+    // because narration is off); render_video crashed once before succeeding.
+    expect(detail.run.steps.map((step) => `${step.stepKey}:${step.status}`)).toEqual([
+      'freeze_input:succeeded',
+      'verify_claims:succeeded',
+      'plan_demo:skipped',
+      'capture_demo:skipped',
+      'prepare_media:succeeded',
+      'synthesize_voice:skipped',
+      'generate_subtitles:skipped',
+      'render_video:succeeded',
+      'register_artifacts:succeeded',
     ]);
-    expect(detail.run.steps[5]!.attempt).toBe(2);
+    expect(detail.run.steps.find((step) => step.stepKey === 'render_video')!.attempt).toBe(2);
     const eventTypes = detail.events.map((event) => event.eventType);
     expect(eventTypes).toContain('worker_crash');
     expect(eventTypes).toContain('retry');
@@ -720,6 +724,8 @@ describe('编排器 · approve 守门', () => {
     const { orchestrator, store } = createHarness();
     const created = await orchestrator.createRun(WORKSPACE_ID, RUN_INPUT);
     const run = store.getRun(created.run.id)!;
+    // A generic gate (no Gate 2 plan): no ledger row, no plan digest. The
+    // check under test is the id + subject-digest equality itself.
     store.updateRun({
       ...run,
       status: 'awaiting_approval',
@@ -730,6 +736,11 @@ describe('编排器 · approve 守门', () => {
         subjectDigest: 'd'.repeat(64),
         requestedAt: ISO,
       } as OrchestrationApprovalV1,
+    });
+    // The ledger is the decision authority, so the pending row must exist.
+    new OrchestrationApprovalStore(store.database).createPending(created.run.id, {
+      workspaceId: WORKSPACE_ID,
+      approval: store.getRun(created.run.id)!.approval!,
     });
     await expect(
       orchestrator.approveRun(WORKSPACE_ID, created.run.id, {

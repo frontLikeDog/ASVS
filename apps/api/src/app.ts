@@ -18,13 +18,19 @@ import type {
   SpeechRuntimeConfig,
 } from '@asvs/ports';
 import type { DatabaseSync } from 'node:sqlite';
-import type { OrchestrationServicePort, RenderJobExecutorPort } from '@asvs/ports';
-import { loadSpeechConfig } from './config';
+import type {
+  CaptureJobExecutorPort,
+  OrchestrationServicePort,
+  RenderJobExecutorPort,
+} from '@asvs/ports';
+import { loadCaptureConfig, loadSpeechConfig } from './config';
 import { openDatabase } from './db/database';
 import { ExportBundleStore } from './db/export-bundle-store';
 import { SqliteOrchestrationStore } from './db/orchestration-store';
+import { CaptureProcessExecutor } from './orchestration/capture-process-executor';
 import { Orchestrator } from './orchestration/orchestrator';
 import { RenderProcessExecutor } from './orchestration/render-process-executor';
+import type { CaptureServiceConfig } from './orchestration/demo-planner-service';
 import { registerOrchestrationRoutes } from './routes/orchestration';
 import {
   SpeechCacheStore,
@@ -58,6 +64,14 @@ export interface BuildAppOptions {
   artifactDir?: string;
   /** Defaults to a real child-process render worker; tests inject a fake. */
   renderExecutor?: RenderJobExecutorPort;
+  /**
+   * 5C capture executor. Defaults to a real child-process browser-worker;
+   * `null` disables real capture so a capture run fails closed at creation.
+   */
+  captureExecutor?: CaptureJobExecutorPort | null;
+  /** 5C capture config; defaults to `ASVS_CAPTURE_*` env / localhost allowlist. */
+  captureConfig?: CaptureServiceConfig;
+  captureWorkerScript?: string;
   /** Defaults to `buildApp`'s own directory-relative repository root. */
   mediaRoot?: string;
   maxAttempts?: number;
@@ -126,12 +140,20 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     options.speechService === undefined
       ? createDefaultSpeechService(db, artifactDir, options.speechConfig)
       : options.speechService;
+  const captureConfig = options.captureConfig ?? loadCaptureConfig(process.env);
   const orchestrator = new Orchestrator({
     store: orchestrationStore,
     artifactDir,
     mediaRoot: options.mediaRoot,
     loadWorkspace: (workspaceId) => store.get(workspaceId)?.workspace ?? null,
     executor: options.renderExecutor ?? new RenderProcessExecutor(),
+    captureExecutor:
+      options.captureExecutor === undefined
+        ? new CaptureProcessExecutor(
+            options.captureWorkerScript ? { workerScript: options.captureWorkerScript } : {},
+          )
+        : options.captureExecutor,
+    captureConfig,
     speech,
     exportStore,
     maxAttempts: options.maxAttempts,
@@ -147,6 +169,11 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
   await app.register(cors, {
     origin: options.corsOrigins ?? true,
+    // @fastify/cors defaults to `GET,HEAD,POST`, which makes the browser's
+    // preflight reject every PUT before it is sent. Both `PUT /v1/workspaces/:id`
+    // (sync save) and `PUT /runs/:runId/demo-plan` (Gate 2 plan edit) are real
+    // browser writes, so the preflight must name PUT explicitly.
+    methods: ['GET', 'HEAD', 'POST', 'PUT'],
   });
 
   app.addHook('onClose', async () => {
@@ -192,6 +219,9 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     // `configured: false` is the fail-closed signal the UI uses to tell the
     // reviewer narration is unavailable — never to fake it.
     tts: speechHealth,
+    // The capture allowlist is public information (docs/08 §3): the UI shows
+    // the exact origins a capture may target. No credentials, no paths.
+    capture: orchestrator.captureHealth(),
   }));
 
   registerGitHubRoutes(app, github);

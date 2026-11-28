@@ -1,4 +1,8 @@
 import type {
+  CaptureJobInputV1,
+  CaptureJobResultV1,
+  DemoPlanDraftV1,
+  DemoPlanTemplateId,
   ExportBundleDetailV1,
   NarrationTimingPolicy,
   OrchestrationApprovalV1,
@@ -10,6 +14,23 @@ import type {
   WorkerEvent,
 } from '@asvs/domain';
 import type { SpeechHealth } from './speech';
+
+/**
+ * Step 5C capture options. Omitting `capture` (or `enabled: false`) keeps the
+ * 5A/5B behaviour: `plan_demo` and `capture_demo` are recorded as skipped at
+ * creation time. `enabled: true` on a video without `real_demo` scenes fails
+ * closed at creation with `no_real_demo_scenes` — never a silent skip.
+ */
+export interface CaptureRunOptions {
+  enabled: boolean;
+  template?: DemoPlanTemplateId;
+  baseUrl?: string;
+  resetStrategy?: 'fixture' | 'none';
+  viewport?: { width: number; height: number };
+  capture?: { width: number; height: number; fps?: number; clipDurationMs?: number };
+  /** Template `custom` only; validated by the domain draft schema. */
+  customSteps?: DemoPlanDraftV1['steps'];
+}
 
 /** Body accepted by `POST /v1/workspaces/:id/orchestration/runs`. */
 export interface CreateOrchestrationRunInput {
@@ -23,6 +44,28 @@ export interface CreateOrchestrationRunInput {
     speed?: number;
     timingPolicy?: NarrationTimingPolicy;
   };
+  /** 5C Gate 2 capture; omitted means no capture (steps skipped). */
+  capture?: CaptureRunOptions;
+}
+
+/** Body accepted by `PUT /v1/workspaces/:id/orchestration/runs/:runId/demo-plan`. */
+export interface UpdateDemoPlanInput {
+  /** Replaces the editable fields of the waiting draft. */
+  patch: {
+    template?: DemoPlanTemplateId;
+    baseUrl?: string;
+    resetStrategy?: 'fixture' | 'none';
+    customSteps?: DemoPlanDraftV1['steps'];
+  };
+  /** Must equal the digest the caller reviewed; a stale value is a 409. */
+  expectedPlanDigest: string;
+  note?: string;
+}
+
+/** Body accepted by `POST .../runs/:runId/reject`. */
+export interface RejectGateInput {
+  approvalId: string;
+  reason?: string;
 }
 
 /** Body accepted by `POST /v1/workspaces/:id/orchestration/exports`. */
@@ -103,6 +146,70 @@ export interface RenderJobExecutorPort {
 }
 
 /**
+ * Outcome of one capture-job subprocess invocation. Like the render result it
+ * reports *what happened*; the orchestrator owns state transitions and the
+ * decision to register evidence.
+ */
+export type CaptureJobExecutionResult =
+  | {
+      ok: true;
+      workerPid: number | null;
+      exitCode: number | null;
+      checkpoints: Array<{ phase: string; payload: Record<string, unknown> }>;
+      result: CaptureJobResultV1;
+    }
+  | {
+      ok: false;
+      workerPid: number | null;
+      exitCode: number | null;
+      signal: string | null;
+      /** True when the process died by signal or without writing a result. */
+      crashed: boolean;
+      code: string;
+      message: string;
+      checkpoints: Array<{ phase: string; payload: Record<string, unknown> }>;
+      /** Present when the worker wrote a structured failure before exiting. */
+      result?: CaptureJobResultV1;
+    };
+
+export interface CaptureJobExecutorCallbacks {
+  onHeartbeat?(pid: number): void;
+  onProgress?(phase: string, percent: number): void;
+  onCheckpoint?(phase: string, payload: Record<string, unknown>): void;
+  onLog?(level: 'info' | 'warn' | 'error', message: string): void;
+  onSpawn?(pid: number): void;
+}
+
+/**
+ * Runs one capture job in an isolated OS process. Implementations must resolve
+ * (never reject) after the process exits; `abort()` terminates the browser
+ * worker and its Chromium children.
+ */
+export interface CaptureJobExecutorPort {
+  execute(
+    job: CaptureJobInputV1,
+    inputFile: string,
+    outDir: string,
+    checkpointFile: string,
+    callbacks: CaptureJobExecutorCallbacks,
+  ): Promise<CaptureJobExecutionResult>;
+  abort(): void;
+  isRunning(): boolean;
+}
+
+/** `/v1/health` capture block; never contains credentials or full paths. */
+export interface CaptureHealth {
+  enabled: boolean;
+  /** Exact origins captures may target (server allowlist). */
+  allowedOrigins: string[];
+  defaultBaseUrl: string;
+  /** Whether the worker may auto-start a web server for a down target. */
+  allowAutoServe: boolean;
+  /** Policy version Gate 2 approvals are bound to. */
+  policyVersion: string;
+}
+
+/**
  * Server-side boundary for the 5A orchestrator (docs/06 §5). HTTP routes and
  * tests talk to this; one instance serves every workspace, and each method is
  * scoped by `workspaceId`.
@@ -119,10 +226,29 @@ export interface OrchestrationServicePort {
   getRun(workspaceId: string, runId: string): Promise<OrchestrationRunDetailV1 | null>;
   cancelRun(workspaceId: string, runId: string): Promise<OrchestrationRunV1>;
   retryRun(workspaceId: string, runId: string): Promise<OrchestrationRunV1>;
+  /**
+   * Gate 2 approval. The server recomputes the waiting plan's digest and
+   * refuses unless it equals both the stored one and `subjectDigest`.
+   */
   approveRun(
     workspaceId: string,
     runId: string,
-    input: { approvalId: string; subjectDigest?: string },
+    input: { approvalId: string; subjectDigest?: string; decidedBy?: string; note?: string },
+  ): Promise<OrchestrationApprovalV1>;
+  /** Gate 2 rejection: terminal `failed` with `approval_rejected`. */
+  rejectRun(
+    workspaceId: string,
+    runId: string,
+    input: RejectGateInput,
+  ): Promise<OrchestrationApprovalV1>;
+  /**
+   * Replaces the waiting draft (Gate 2). Supersedes the previous approval and
+   * returns the new pending approval with a fresh digest.
+   */
+  updateDemoPlan(
+    workspaceId: string,
+    runId: string,
+    input: UpdateDemoPlanInput,
   ): Promise<OrchestrationApprovalV1>;
   /** Artifact row for the download route; null when unknown in this workspace. */
   getArtifact(workspaceId: string, artifactId: string): Promise<OrchestrationArtifactV1 | null>;
@@ -155,6 +281,8 @@ export interface OrchestrationServicePort {
   ): Promise<ExportBundleDetailV1[]>;
   /** TTS availability for `/v1/health`; never exposes credentials. */
   speechHealth(): SpeechHealth;
+  /** Capture capability for `/v1/health`; never exposes full worker paths. */
+  captureHealth(): CaptureHealth;
   /** Starts the scheduler loop and recovers orphaned leases. Idempotent. */
   start(): Promise<void>;
   /** Stops the loop, aborts the active worker and waits for it to exit. */

@@ -188,6 +188,15 @@ function decodeEvent(row: EventRow): OrchestrationEventV1 {
 export class SqliteOrchestrationStore {
   constructor(private readonly db: DatabaseSync) {}
 
+  /**
+   * The connection this store owns. The Gate 2 approval ledger lives in the
+   * same SQLite file and must share the connection so a supersede and the run
+   * update that references it see one consistent state.
+   */
+  get database(): DatabaseSync {
+    return this.db;
+  }
+
   // ── Runs ────────────────────────────────────────────────────────────────
 
   /** Idempotent: a second call with the same (workspace, key) returns the first. */

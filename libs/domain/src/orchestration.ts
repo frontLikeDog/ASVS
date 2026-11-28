@@ -6,6 +6,8 @@ import {
   stepStatusSchema,
 } from './schemas';
 import type { Claim, ClaimPublishEligibility } from './schemas';
+import { sha256Hex, stableJson } from './canonical';
+import { demoPlanDraftV1Schema, demoPlanRiskSummaryV1Schema } from './capture';
 import {
   renderAudioAssetV1Schema,
   renderInputV1Schema,
@@ -51,6 +53,8 @@ export type OrchestrationJobStatus = z.infer<typeof orchestrationJobStatusSchema
 export const ORCHESTRATION_STEP_KEYS = [
   'freeze_input',
   'verify_claims',
+  'plan_demo',
+  'capture_demo',
   'prepare_media',
   'synthesize_voice',
   'generate_subtitles',
@@ -64,11 +68,14 @@ export interface OrchestrationStepDefinition {
   stepKey: OrchestrationStepKey;
   name: string;
   description: string;
-  /** `worker` steps run in the isolated render subprocess; the rest inline. */
-  executor: 'inline' | 'worker';
+  /**
+   * `worker` steps run in an isolated subprocess (render); `capture` steps run
+   * in the browser-worker subprocess; the rest run inline in the API process.
+   */
+  executor: 'inline' | 'worker' | 'capture';
 }
 
-/** The fixed seven-step 5B DAG. 5C inserts `capture_demo` before `render_video`. */
+/** The fixed nine-step 5C DAG. */
 export const ORCHESTRATION_STEPS: readonly OrchestrationStepDefinition[] = [
   {
     stepKey: 'freeze_input',
@@ -81,6 +88,20 @@ export const ORCHESTRATION_STEPS: readonly OrchestrationStepDefinition[] = [
     name: '核验功能声明',
     description: '按 4D 规则阻断未核验、已过期或人工驳回的 Claim。',
     executor: 'inline',
+  },
+  {
+    stepKey: 'plan_demo',
+    name: '生成演示计划',
+    description:
+      '按 4D 已核验的功能/声明与项目路由，用确定性模板生成 DemoPlanDraftV1，计算 digest 与风险摘要，并挂起 Gate 2 审批。',
+    executor: 'inline',
+  },
+  {
+    stepKey: 'capture_demo',
+    name: '受控真实录屏',
+    description:
+      '以独立子进程驱动 browser-worker 执行已批准计划；只有全部 UI 断言通过才回填真实素材，失败必须留下报告、截图与 trace。',
+    executor: 'capture',
   },
   {
     stepKey: 'prepare_media',
@@ -218,6 +239,18 @@ export const ORCHESTRATION_FAILURE_CODES = [
   'deadline_exceeded',
   'invalid_input',
   'unexpected_error',
+  // Step 5C · Gate 2 + capture
+  'no_real_demo_scenes',
+  'demo_plan_invalid',
+  'capture_not_configured',
+  'approval_rejected',
+  'approval_superseded',
+  'capture_plan_tampered',
+  'capture_origin_blocked',
+  'capture_target_unreachable',
+  'capture_timeout',
+  'capture_assertion_failed',
+  'capture_worker_crashed',
 ] as const;
 
 export const orchestrationFailureV1Schema = z.object({
@@ -228,14 +261,40 @@ export const orchestrationFailureV1Schema = z.object({
 });
 export type OrchestrationFailureV1 = z.infer<typeof orchestrationFailureV1Schema>;
 
+export const ORCHESTRATION_APPROVAL_STATUSES = [
+  'pending',
+  'approved',
+  'rejected',
+  'superseded',
+] as const;
+export const orchestrationApprovalStatusSchema = z.enum(ORCHESTRATION_APPROVAL_STATUSES);
+export type OrchestrationApprovalStatus = z.infer<typeof orchestrationApprovalStatusSchema>;
+
+/**
+ * Which gate the approval belongs to. Step 5A modelled a single generic
+ * subject digest; Step 5C's Gate 2 binds a DemoPlan, a policy version and a
+ * decided-by/decided-note audit trail.
+ */
+export const ORCHESTRATION_GATE_TYPES = ['generic', 'gate2_demo_capture'] as const;
+export const orchestrationGateTypeSchema = z.enum(ORCHESTRATION_GATE_TYPES);
+export type OrchestrationGateType = z.infer<typeof orchestrationGateTypeSchema>;
+
 export const orchestrationApprovalV1Schema = z.object({
   approvalId: idSchema,
   stepKey: orchestrationStepKeySchema,
-  status: z.enum(['pending', 'approved']),
+  status: orchestrationApprovalStatusSchema,
+  gateType: orchestrationGateTypeSchema.default('generic'),
   /** Digest of the subject the approval is bound to (Gate 2, docs/06 §3). */
   subjectDigest: sha256Schema.optional(),
+  /** Gate 2: the DemoPlan id and the policy version the decision was made under. */
+  planId: idSchema.optional(),
+  policyVersion: z.string().min(1).max(40).optional(),
   requestedAt: isoDateSchema,
   approvedAt: isoDateSchema.optional(),
+  rejectedAt: isoDateSchema.optional(),
+  /** Who decided, as a principal string; `local` in single-user mode. */
+  decidedBy: z.string().min(1).max(120).optional(),
+  decisionNote: z.string().max(500).optional(),
 });
 export type OrchestrationApprovalV1 = z.infer<typeof orchestrationApprovalV1Schema>;
 
@@ -269,8 +328,64 @@ export const orchestrationInputSummaryV1Schema = z.object({
       adjustments: z.number().int().min(0),
     })
     .optional(),
+  /**
+   * 5C: capture state. `enabled: false` means the two capture steps were
+   * recorded as skipped at creation time (never "quietly absent").
+   */
+  capture: z
+    .object({
+      enabled: z.boolean(),
+      template: z.string().min(1).optional(),
+      baseUrl: z.string().optional(),
+      realDemoSceneCount: z.number().int().min(0),
+      /** Filled once the real clip was backfilled into the render input. */
+      capturedAssetId: idSchema.optional(),
+      clipSha256: sha256Schema.optional(),
+      clipDurationMs: z.number().int().positive().optional(),
+      assertions: z
+        .object({
+          total: z.number().int().min(0),
+          passed: z.number().int().min(0),
+        })
+        .optional(),
+      planDigest: sha256Schema.optional(),
+    })
+    .optional(),
 });
 export type OrchestrationInputSummaryV1 = z.infer<typeof orchestrationInputSummaryV1Schema>;
+
+/**
+ * The Gate 2 subject as the run exposes it. `draft` is exactly what the digest
+ * covers (no `approval`), so a client can recompute the digest and refuse a
+ * stale approval without trusting the server.
+ */
+export const demoPlanSummaryV1Schema = z.object({
+  planId: idSchema,
+  template: z.string().min(1),
+  templateLabel: z.string().min(1),
+  baseUrl: z.string().url(),
+  allowedOrigins: z.array(z.string()).min(1),
+  planDigest: sha256Schema,
+  policyVersion: z.string().min(1),
+  requestedAt: isoDateSchema,
+  risk: demoPlanRiskSummaryV1Schema,
+  draft: demoPlanDraftV1Schema,
+});
+export type DemoPlanSummaryV1 = z.infer<typeof demoPlanSummaryV1Schema>;
+
+export const captureFailureSummaryV1Schema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  failedStepId: idSchema.optional(),
+  assertionFailures: z.number().int().nonnegative().default(0),
+  failureReportArtifactId: idSchema.optional(),
+  traceArtifactId: idSchema.optional(),
+  screenshotArtifactIds: z.array(idSchema).default([]),
+  blockedRequests: z.array(z.string()).default([]),
+  retryable: z.boolean(),
+  failedAt: isoDateSchema,
+});
+export type CaptureFailureSummaryV1 = z.infer<typeof captureFailureSummaryV1Schema>;
 
 export const orchestrationRunV1Schema = z.object({
   schemaVersion: z.literal(ORCHESTRATION_SCHEMA_VERSION),
@@ -288,6 +403,10 @@ export const orchestrationRunV1Schema = z.object({
   input: orchestrationInputSummaryV1Schema,
   approval: orchestrationApprovalV1Schema.optional(),
   failure: orchestrationFailureV1Schema.optional(),
+  /** Gate 2: the draft plan the approval binds, so a reload can restore it. */
+  demoPlan: demoPlanSummaryV1Schema.optional(),
+  /** 5C: structured capture failure for the UI's evidence panel. */
+  captureFailure: captureFailureSummaryV1Schema.optional(),
   createdAt: isoDateSchema,
   updatedAt: isoDateSchema,
   startedAt: isoDateSchema.optional(),
@@ -304,7 +423,7 @@ export function buildInitialRunSteps(): OrchestrationStepStateV1[] {
   }));
 }
 
-/** 0–100 across the five steps; succeeded steps count fully. */
+/** 0–100 across the DAG; succeeded and skipped steps count fully. */
 export function runProgressPercent(run: Pick<OrchestrationRunV1, 'status' | 'steps'>): number {
   if (run.status === 'succeeded') return 100;
   if (run.steps.length === 0) return 0;
@@ -325,7 +444,7 @@ export function nextPendingStep(
 
 // ── Jobs, checkpoints, artifacts, events (docs/05 §4 JobEnvelopeV1) ────────
 
-export const ORCHESTRATION_JOB_TYPES = ['inline', 'render'] as const;
+export const ORCHESTRATION_JOB_TYPES = ['inline', 'render', 'capture'] as const;
 export const orchestrationJobTypeSchema = z.enum(ORCHESTRATION_JOB_TYPES);
 export type OrchestrationJobType = z.infer<typeof orchestrationJobTypeSchema>;
 
@@ -356,6 +475,11 @@ export type OrchestrationJobV1 = z.infer<typeof orchestrationJobV1Schema>;
 
 export const CHECKPOINT_PHASES = [
   'step_done',
+  'plan_ready',
+  'plan_verified',
+  'capture_started',
+  'capture_recorded',
+  'clip_transcoded',
   'narration_ready',
   'subtitles_ready',
   'bundle_ready',
@@ -382,6 +506,12 @@ export const ORCHESTRATION_ARTIFACT_KINDS = [
   'subtitles_srt',
   'render_manifest',
   'artifact_receipt',
+  // Step 5C · capture evidence (all downloadable from the run view)
+  'capture_clip',
+  'capture_receipt',
+  'capture_failure_report',
+  'capture_trace',
+  'capture_screenshot',
 ] as const;
 export const orchestrationArtifactKindSchema = z.enum(ORCHESTRATION_ARTIFACT_KINDS);
 export type OrchestrationArtifactKind = z.infer<typeof orchestrationArtifactKindSchema>;
@@ -416,6 +546,7 @@ export const ORCHESTRATION_EVENT_TYPES = [
   'retry',
   'cancel',
   'approval',
+  'capture',
   'log',
 ] as const;
 export const orchestrationEventTypeSchema = z.enum(ORCHESTRATION_EVENT_TYPES);
@@ -540,12 +671,42 @@ export const workerEventSchema = z.discriminatedUnion('type', [
         meanVolumeDb: z.number(),
       })
       .optional(),
+    /** Step 5C · set by `capture-job.ts`; absent for render jobs. */
+    capture: z
+      .object({
+        planId: idSchema,
+        planDigest: sha256Schema,
+        receiptPath: z.string().min(1),
+        receiptSha256: sha256Schema,
+        clipPath: z.string().min(1),
+        clipSha256: sha256Schema,
+        clipWidth: z.number().int().positive(),
+        clipHeight: z.number().int().positive(),
+        clipDurationMs: z.number().int().positive(),
+        assertions: z
+          .object({
+            total: z.number().int().min(1),
+            passed: z.number().int().min(1),
+          })
+          .strict(),
+        failureReportPath: z.string().min(1).optional(),
+      })
+      .optional(),
     at: isoDateSchema.optional(),
   }),
   z.object({
     type: z.literal('failed'),
     code: z.string().min(1),
     message: z.string().min(1),
+    /** Step 5C · failing step and evidence paths (all inside the job outDir). */
+    failedStepId: z.string().min(1).optional(),
+    artifacts: z
+      .object({
+        failureReportPath: z.string().min(1).optional(),
+        tracePath: z.string().min(1).optional(),
+        screenshotPaths: z.array(z.string()).default([]),
+      })
+      .optional(),
     at: isoDateSchema.optional(),
   }),
 ]);
@@ -722,33 +883,7 @@ export function joinStorageRef(...parts: string[]): string {
 
 // ── Small crypto helpers (no Node deps: usable in browser + worker + API) ───
 
-function normalizeForStableJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeForStableJson);
-  if (value && typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([, entry]) => entry !== undefined)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-    return Object.fromEntries(entries.map(([key, entry]) => [key, normalizeForStableJson(entry)]));
-  }
-  return value;
-}
-
-export function stableJson(value: unknown): string {
-  return JSON.stringify(normalizeForStableJson(value));
-}
-
-/**
- * SHA-256 of a UTF-8 string. WebCrypto is available in Node 22 (API, worker,
- * tests) and in the browser, so the same implementation serves every runtime
- * without pulling `node:crypto` into the browser bundle.
- */
-export async function sha256Hex(text: string): Promise<string> {
-  const bytes = new TextEncoder().encode(text);
-  const subtle = globalThis.crypto?.subtle;
-  if (!subtle) throw new Error('当前运行时没有可用的 SHA-256 实现');
-  const digest = await subtle.digest('SHA-256', bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('');
-}
+// Canonical serialization + hashing live in `canonical.ts`, which `capture.ts`
+// also uses; re-exported here so every existing import keeps working.
+export { sha256Hex, stableJson } from './canonical';
 

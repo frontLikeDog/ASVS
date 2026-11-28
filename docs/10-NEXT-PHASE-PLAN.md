@@ -88,6 +88,7 @@ Step 3  最薄后端 + 接口抽象 [1.5 周]   → Exit: Store 只依赖接口�
 Step 4  真实知识源          [3–4 周]   → Exit: 真实 PR → Claim → 视频候选闭环
 Step 5A 服务端编排底座      [已完成]    → Exit: SIGKILL 可恢复的真实 MP4（无音轨）
 Step 5B 配音与交付包        [已完成]    → Exit: 带旁白音轨的 MP4 + SRT + Gate 3 导出包
+Step 5C 真实录屏 Gate 2     [已完成]    → Exit: 规则计划 → 审批 → 真实录屏回填 → 真实成片
 ```
 
 | 阶段 | 估算 | 核心交付 | Exit Gate | 主要风险 |
@@ -443,6 +444,33 @@ Gate 3 未通过 / 脚本版本变化 / 产物被篡改时导出返回 409
 
 ---
 
+## 7C. Step 5C · Demo Planner 与 Gate 2 真实录屏（WP-14）
+
+**目标**：`real_demo` 镜头不再只能用占位素材。规则驱动（无 LLM）的计划 → Gate 2 审批绑定摘要 → 隔离子进程真实录屏 → 断言全通过才回填 → 5B 链路产出真实成片；失败留证据、绝不伪造回执。
+
+### 工作项与执行状态（2026-11-28）
+
+| ID | 任务 | 状态 | 证据 |
+|---|---|---|---|
+| S5C-1 | `DemoPlanDraftV1` + 四模板规则生成器（`web_studio_tour` / `web_studio_knowledge_claim` / `web_studio_route_focus` / `custom`）、语义 selector DSL、每模板 ≥ 1 断言、风险摘要 | ✅ | `libs/domain/src/demo-planner.ts` + `demo-planner.test.ts`（13 用例） |
+| S5C-2 | 跨端同值摘要 `computeDemoPlanDigest`（WebCrypto，无 `node:crypto`） | ✅ | `libs/domain/src/canonical.ts` / `capture.ts`；与 worker `node:crypto` 复算一致（`capture:demo` 实测） |
+| S5C-3 | SQLite v7 `orchestration_approvals` + append-only 台账（`supersedes`） | ✅ | `database-v7.test.ts`、`orchestration-approval-store.ts` |
+| S5C-4 | 编排器 `plan_demo` / `capture_demo` + 三层防篡改 + 回填 | ✅ | `orchestrator-capture.test.ts`（11 用例） |
+| S5C-5 | `CaptureProcessExecutor` 隔离子进程；**API 绝不静态 import worker** | ✅ | `capture-process-executor.ts`；`lint:boundary-check` 4/4 |
+| S5C-6 | worker 侧第 3 层摘要复算，不符则不启动 Chromium | ✅ | `workers/browser-worker/src/capture-job.ts` + `capture-job.test.ts` |
+| S5C-7 | 失败证据（report / PNG / trace）登记为可下载产物 + 结构化 `captureFailure` | ✅ | `gate2:verify` 第 16–18 项 |
+| S5C-8 | Web：capture 面板、Gate 2 审批 / 编辑 / 驳回面板（`React.lazy`）、成功与失败证据面板 | ✅ | `gate2-approval-panel.tsx`、`server-orchestration-panel.tsx` |
+| S5C-9 | 零回归：未请求录屏时两步创建即 `skipped`；显式 `enabled=true` 但无 `real_demo` → 400 `no_real_demo_scenes` | ✅ | `gate2:verify` 第 19 项；`routes/orchestration-capture.test.ts` |
+| S5C-10 | `pnpm gate2:verify` 验收脚本 + `capture-gate2-real-flow.spec.ts` E2E + CI capture 作业 | ✅ | 19/19；E2E 4 条；`.github/workflows/ci.yml` 上传 `dist/gate2-verify/**` |
+
+**验收**：`pnpm gate2:verify` **19/19**（真实 Chromium 18 秒录屏 + 真实 Remotion 渲染，74.7 s）；`pnpm test:e2e` **49/49**；`nx run-many -t lint typecheck test` 15 项目 / 56 文件 / 497 用例全绿；`pnpm export:verify` 20/20（5B 零回归）；`pnpm build && pnpm budget` 初始 **229.3 kB** gzip（预算 230 / 790）全部达标。详见 [docs/15](15-CAPTURE-GATE2-SLICE.md)。
+
+**验收过程挖出的三个真实产品缺陷**（均由真链路暴露，非测试问题）：`storageRef` 基准错位；`synthesize_voice` 重写 `input.json` 时抹掉录屏溯源块；`@fastify/cors` 默认不允许 `PUT`，导致浏览器端同步保存与 Gate 2 计划编辑在真实部署中必然失败。三者均已修复并各配回归用例。
+
+**Step 5C 边界**：不做 LLM Demo Planner（5E）；不做隐私 QA / 画面脱敏（5D）；不做增量 / 局部重渲染（5F）；不做多环境 / 多视口矩阵；不做「跳过某条断言」的人工干预；未触碰 `libs/render` / `workers/render-worker` / `studio-store`，未改 Step 2 的 `web-studio-tour.yaml` 断言与页面文案。
+
+---
+
 ## 8. Step 4 · 真实知识源（3–4 周，对应 WP-10 / WP-11）
 
 **目标**：把 README 里「GitHub OAuth / API / 仓库读取是本地确定性模拟」换成真实只读连接。
@@ -596,7 +624,7 @@ docs/01 §7 的北极星指标需要真实后端才能度量；本阶段先建�
 - [录屏、渲染与编辑器](07-VIDEO-CAPTURE-RENDER-AND-EDITOR.md)：DemoPlan、Remotion 合成、质量门禁
 - [安全、证据与 ATVG2](08-SECURITY-EVIDENCE-AND-ATVG2-INTEGRATION.md)：端口定义（§8）、安全验收用例（§9）
 - [实施路线与验收](09-IMPLEMENTATION-ROADMAP-AND-ACCEPTANCE.md)：WP-00 ~ WP-17、评审模板
-- [真实渲染切片](11-RENDER-SLICE.md) / [真实录屏切片](12-CAPTURE-SLICE.md) / [服务端编排切片](13-ORCHESTRATION-SLICE.md) / [配音与交付包切片](14-AUDIO-EXPORT-SLICE.md)：已执行的验收记录
+- [真实渲染切片](11-RENDER-SLICE.md) / [真实录屏切片](12-CAPTURE-SLICE.md) / [服务端编排切片](13-ORCHESTRATION-SLICE.md) / [配音与交付包切片](14-AUDIO-EXPORT-SLICE.md) / [Demo Planner 与 Gate 2 切片](15-CAPTURE-GATE2-SLICE.md)：已执行的验收记录
 
 ---
 

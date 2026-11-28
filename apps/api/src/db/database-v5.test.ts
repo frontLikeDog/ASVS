@@ -99,13 +99,17 @@ describe('SQLite migration v5 · 编排表', () => {
     )
       .map((row) => row.name)
       .sort();
-    expect(tables).toEqual([
+    // v7 appends `orchestration_approvals`; this test pins the v5 tables by
+    // checking they are all present rather than pinning the full table list.
+    expect(tables).toEqual(
+      expect.arrayContaining([
       'orchestration_artifacts',
       'orchestration_checkpoints',
       'orchestration_events',
       'orchestration_jobs',
       'orchestration_runs',
-    ]);
+      ]),
+    );
     const workspace = legacy
       .prepare('SELECT revision FROM workspaces WHERE id = ?')
       .get(WORKSPACE_ID) as { revision: number };

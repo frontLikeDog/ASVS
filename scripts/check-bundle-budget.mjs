@@ -52,11 +52,25 @@ async function main() {
   }
 
   const entries = Object.entries(manifest);
-  const findRoute = (pageFile) =>
-    entries.find(
+  // A dynamic entry keyed by source (`…/production-page.tsx`) is preferred;
+  // when Rollup merges entries it re-keys the chunk as `_production-page-*.js`
+  // and drops `src`. That merged form still counts as the route's chunk as
+  // long as the initial entry reaches it through a dynamic import — otherwise
+  // the route would be loaded eagerly, which the check must catch.
+  const findRoute = (pageFile) => {
+    const stem = pageFile.replace(/\.tsx?$/, '');
+    const bySource = entries.find(
       ([key, entry]) =>
         normalize(key).endsWith(`/${pageFile}`) || normalize(entry.src ?? '').endsWith(`/${pageFile}`),
     );
+    if (bySource) return bySource;
+    return entries.find(
+      ([key, entry]) =>
+        entry.isDynamicEntry === true &&
+        !entry.src &&
+        (normalize(key).endsWith(`/_${stem}-`) || normalize(key).startsWith(`_${stem}-`)),
+    );
+  };
 
   function closure(keys) {
     const seen = new Set();

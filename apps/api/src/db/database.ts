@@ -332,6 +332,43 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 7,
+    up(db) {
+      // Step 5C · Gate 2 approval ledger. The run row keeps a denormalized
+      // `approval_json` for the scheduler hot path, but this table is the
+      // audit authority: superseded and rejected decisions survive here even
+      // after the run moves on.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS orchestration_approvals (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES orchestration_runs(id) ON DELETE CASCADE,
+          workspace_id TEXT NOT NULL,
+          step_key TEXT NOT NULL,
+          gate_type TEXT NOT NULL,
+          status TEXT NOT NULL,
+          plan_id TEXT,
+          plan_digest TEXT,
+          policy_version TEXT,
+          risk_level TEXT,
+          requested_at TEXT NOT NULL,
+          decided_at TEXT,
+          decided_by TEXT,
+          decision_note TEXT,
+          superseded_by TEXT,
+          payload TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_orch_approvals_run
+          ON orchestration_approvals(run_id, requested_at DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_orch_approvals_workspace_status
+          ON orchestration_approvals(workspace_id, status, requested_at DESC);
+      `);
+    },
+  },
 ];
 
 function readUserVersion(db: DatabaseSync): number {

@@ -20,7 +20,7 @@ import {
   formatArtifactSize,
   formatDurationMs,
   shortSha,
-} from './server-orchestration';
+} from './orchestration-format';
 
 interface LatestVideoArtifact {
   run: OrchestrationRunV1;
@@ -60,6 +60,9 @@ export function ReviewArtifactPanel({
   const [latest, setLatest] = useState<LatestVideoArtifact | null>(null);
   const [manifest, setManifest] = useState<OrchestrationArtifactV1 | null>(null);
   const [srt, setSrt] = useState<OrchestrationArtifactV1 | null>(null);
+  // 5C: the approved plan + receipt that produced the embedded real clip.
+  const [captureReceipt, setCaptureReceipt] = useState<OrchestrationArtifactV1 | null>(null);
+  const [captureClip, setCaptureClip] = useState<OrchestrationArtifactV1 | null>(null);
   const [bundles, setBundles] = useState<ExportBundleDetailV1[]>([]);
   const [exporting, setExporting] = useState(false);
   const [downloading, setDownloading] = useState<string | null>(null);
@@ -93,6 +96,8 @@ export function ReviewArtifactPanel({
         if (cancelled) return;
         setManifest(detail?.artifacts.find((artifact) => artifact.kind === 'render_manifest') ?? null);
         setSrt(detail?.artifacts.find((artifact) => artifact.kind === 'subtitles_srt') ?? null);
+        setCaptureReceipt(detail?.artifacts.find((artifact) => artifact.kind === 'capture_receipt') ?? null);
+        setCaptureClip(detail?.artifacts.find((artifact) => artifact.kind === 'capture_clip') ?? null);
         setState('ready');
       } catch {
         if (!cancelled) setState('unavailable');
@@ -192,6 +197,18 @@ export function ReviewArtifactPanel({
     | undefined;
   const latestBundle = bundles[0] ?? null;
   const latestBundleCoversThisRun = latestBundle?.bundle.runId === latest.run.id;
+  // Real-capture provenance (5C). `usingPlaceholder` already reflects the
+  // render input; the receipt adds which approved plan produced the clip.
+  const captureAssertions = captureReceipt?.metadata.assertions as
+    | { total?: number; passed?: number }
+    | undefined;
+  const capturePlanDigest =
+    typeof captureReceipt?.metadata.planDigest === 'string'
+      ? captureReceipt.metadata.planDigest
+      : typeof captureClip?.metadata.planDigest === 'string'
+        ? captureClip.metadata.planDigest
+        : null;
+  const realCaptureEmbedded = !usingPlaceholder && captureClip !== null;
 
   return (
     <Panel>
@@ -220,6 +237,12 @@ export function ReviewArtifactPanel({
                 <Badge tone="warn" dot={false}>测试合成音轨 · 非真人配音</Badge>
               ) : null}
               {usingPlaceholder ? <Badge tone="warn" dot={false}>含占位画面</Badge> : null}
+              {realCaptureEmbedded ? (
+                <Badge tone="accent" dot={false}>
+                  <ShieldCheck size={9} className="mr-1" />
+                  真实录屏已嵌入 · Gate 2 已审批
+                </Badge>
+              ) : null}
             </div>
             <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[9.5px] text-faint">
               <span>
@@ -252,6 +275,32 @@ export function ReviewArtifactPanel({
                 {narration.timingPolicy}
               </div>
             ) : null}
+            {realCaptureEmbedded || captureClip ? (
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[9px] text-faint">
+                <span>
+                  录屏溯源{' '}
+                  <span className="font-mono text-muted">
+                    {captureAssertions?.passed !== undefined && captureAssertions?.total !== undefined
+                      ? `${captureAssertions.passed}/${captureAssertions.total} 断言通过`
+                      : '断言已通过'}
+                  </span>
+                </span>
+                {captureClip ? (
+                  <span>
+                    clip SHA256{' '}
+                    <span className="font-mono text-muted">{shortSha(captureClip.sha256, 16)}</span>
+                  </span>
+                ) : null}
+                {capturePlanDigest ? (
+                  <span>
+                    planDigest{' '}
+                    <span className="font-mono text-muted" title={capturePlanDigest}>
+                      {shortSha(capturePlanDigest, 12)}
+                    </span>
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -265,6 +314,17 @@ export function ReviewArtifactPanel({
               onClick={() => void download(srt)}
             >
               {downloading === srt.id ? '校验中…' : '下载 SRT'}
+            </Button>
+          ) : null}
+          {captureReceipt ? (
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<ShieldCheck size={12} />}
+              disabled={downloading !== null}
+              onClick={() => void download(captureReceipt)}
+            >
+              {downloading === captureReceipt.id ? '校验中…' : '下载录屏回执'}
             </Button>
           ) : null}
           {manifest ? (

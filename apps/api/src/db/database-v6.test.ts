@@ -15,12 +15,14 @@ function columns(db: DatabaseSync, table: string): string[] {
 }
 
 describe('migration v6 · 语音缓存与导出包', () => {
-  it('迁移版本递增到 6 且保持幂等', () => {
+  it('迁移版本递增到最新且保持幂等（v6 之后的迁移不改变本测试的表契约）', () => {
     const db = new DatabaseSync(':memory:');
-    expect(migrateDatabase(db)).toBe(6);
-    expect(migrateDatabase(db)).toBe(6);
+    const latest = MIGRATIONS.at(-1)!.version;
+    expect(latest).toBeGreaterThanOrEqual(6);
+    expect(migrateDatabase(db)).toBe(latest);
+    expect(migrateDatabase(db)).toBe(latest);
     const version = db.prepare('PRAGMA user_version').get() as { user_version: number };
-    expect(version.user_version).toBe(6);
+    expect(version.user_version).toBe(latest);
     db.close();
   });
 
@@ -39,7 +41,7 @@ describe('migration v6 · 语音缓存与导出包', () => {
        VALUES ('run_old', 'ws', 'proj', 'video', 'idem', 'succeeded', '{}', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
     ).run();
 
-    expect(migrateDatabase(db)).toBe(6);
+    expect(migrateDatabase(db)).toBe(MIGRATIONS.at(-1)!.version);
     const row = db
       .prepare("SELECT status FROM orchestration_runs WHERE id = 'run_old'")
       .get() as { status: string };
