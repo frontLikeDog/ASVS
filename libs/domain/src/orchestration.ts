@@ -55,10 +55,15 @@ export const ORCHESTRATION_STEP_KEYS = [
   'verify_claims',
   'plan_demo',
   'capture_demo',
+  // Step 5D · independent QA, two explicit steps (docs/16 §3.1):
+  // `qa_capture` blocks before TTS/render spend anything; `qa_final` always
+  // runs and guards `register_artifacts`.
+  'qa_capture',
   'prepare_media',
   'synthesize_voice',
   'generate_subtitles',
   'render_video',
+  'qa_final',
   'register_artifacts',
 ] as const;
 export const orchestrationStepKeySchema = z.enum(ORCHESTRATION_STEP_KEYS);
@@ -75,7 +80,7 @@ export interface OrchestrationStepDefinition {
   executor: 'inline' | 'worker' | 'capture';
 }
 
-/** The fixed nine-step 5C DAG. */
+/** The fixed eleven-step 5D DAG (5C's nine steps + `qa_capture` / `qa_final`). */
 export const ORCHESTRATION_STEPS: readonly OrchestrationStepDefinition[] = [
   {
     stepKey: 'freeze_input',
@@ -104,6 +109,13 @@ export const ORCHESTRATION_STEPS: readonly OrchestrationStepDefinition[] = [
     executor: 'capture',
   },
   {
+    stepKey: 'qa_capture',
+    name: '录屏独立 QA（AC-07）',
+    description:
+      '独立复核录屏帧、断言截图、Playwright trace 与回执：隐私扫描命中即阻断，且发生在配音与渲染之前。',
+    executor: 'inline',
+  },
+  {
     stepKey: 'prepare_media',
     name: '准备真实素材',
     description: '校验真实录屏文件与 SHA256；没有真实文件时明确标记占位。',
@@ -126,6 +138,13 @@ export const ORCHESTRATION_STEPS: readonly OrchestrationStepDefinition[] = [
     name: '渲染视频',
     description: '以独立子进程驱动 render-worker，渲染 H.264 + AAC，ffprobe 校验音画时长与非静音。',
     executor: 'worker',
+  },
+  {
+    stepKey: 'qa_final',
+    name: '成片独立 QA',
+    description:
+      '对最终 MP4、SRT、分镜文案与声明资格执行技术/事实/隐私/内容四维复核；报告绑定全部产物哈希，通过才登记交付产物。',
+    executor: 'inline',
   },
   {
     stepKey: 'register_artifacts',
@@ -251,6 +270,14 @@ export const ORCHESTRATION_FAILURE_CODES = [
   'capture_timeout',
   'capture_assertion_failed',
   'capture_worker_crashed',
+  // Step 5D · independent QA. All deterministic (retryable: false): the same
+  // bytes produce the same verdict until the input is fixed.
+  'qa_privacy_blocked',
+  'qa_technical_blocked',
+  'qa_fact_blocked',
+  'qa_content_blocked',
+  'qa_ocr_unavailable',
+  'qa_execution_failed',
 ] as const;
 
 export const orchestrationFailureV1Schema = z.object({
@@ -387,6 +414,25 @@ export const captureFailureSummaryV1Schema = z.object({
 });
 export type CaptureFailureSummaryV1 = z.infer<typeof captureFailureSummaryV1Schema>;
 
+/**
+ * Step 5D · the only QA shape allowed on the run row. It is ~10 lines so the
+ * heavy `qaReportV1Schema` (findings, coverage, digests) never enters the
+ * browser's static import closure via `orchestration.ts`; the full report is
+ * fetched from `/qa-report` lazily. docs/16 §2.2 red line 1.
+ */
+export const qaRunSummaryV1Schema = z.object({
+  reportId: idSchema,
+  stage: z.enum(['capture', 'final']),
+  verdict: z.enum(['pass', 'pass_with_warnings', 'fail']),
+  policyVersion: z.string().min(1),
+  reportArtifactId: idSchema.optional(),
+  blockerCount: z.number().int().nonnegative(),
+  warningCount: z.number().int().nonnegative(),
+  privacyBlockerCount: z.number().int().nonnegative(),
+  checkedAt: isoDateSchema,
+});
+export type QaRunSummaryV1 = z.infer<typeof qaRunSummaryV1Schema>;
+
 export const orchestrationRunV1Schema = z.object({
   schemaVersion: z.literal(ORCHESTRATION_SCHEMA_VERSION),
   id: idSchema,
@@ -407,6 +453,8 @@ export const orchestrationRunV1Schema = z.object({
   demoPlan: demoPlanSummaryV1Schema.optional(),
   /** 5C: structured capture failure for the UI's evidence panel. */
   captureFailure: captureFailureSummaryV1Schema.optional(),
+  /** 5D: lightweight latest-QA pointer; the full report lives in `qa_reports`. */
+  qaSummary: qaRunSummaryV1Schema.optional(),
   createdAt: isoDateSchema,
   updatedAt: isoDateSchema,
   startedAt: isoDateSchema.optional(),
@@ -485,6 +533,11 @@ export const CHECKPOINT_PHASES = [
   'bundle_ready',
   'video_rendered',
   'verified_receipt',
+  // Step 5D · independent QA progress
+  'qa_capture_checked',
+  'qa_media_checked',
+  'qa_privacy_scanned',
+  'qa_report_written',
 ] as const;
 export const checkpointPhaseSchema = z.enum(CHECKPOINT_PHASES);
 export type CheckpointPhase = z.infer<typeof checkpointPhaseSchema>;
@@ -512,6 +565,10 @@ export const ORCHESTRATION_ARTIFACT_KINDS = [
   'capture_failure_report',
   'capture_trace',
   'capture_screenshot',
+  // Step 5D · independent QA artifacts
+  'qa_report',
+  /** Blurred/annotated PNG evidence; the only PNG served with `?inline=1`. */
+  'qa_evidence_frame',
 ] as const;
 export const orchestrationArtifactKindSchema = z.enum(ORCHESTRATION_ARTIFACT_KINDS);
 export type OrchestrationArtifactKind = z.infer<typeof orchestrationArtifactKindSchema>;
@@ -547,6 +604,7 @@ export const ORCHESTRATION_EVENT_TYPES = [
   'cancel',
   'approval',
   'capture',
+  'qa',
   'log',
 ] as const;
 export const orchestrationEventTypeSchema = z.enum(ORCHESTRATION_EVENT_TYPES);
@@ -768,6 +826,12 @@ export const exportBundleV1Schema = z.object({
   srtArtifactId: idSchema,
   manifestArtifactId: idSchema,
   receiptArtifactId: idSchema,
+  /**
+   * Step 5D · the passing `qa_final` report the bundle was gated on. Optional
+   * only so pre-5D `export_bundles` rows stay valid; every new bundle has it.
+   */
+  qaReportArtifactId: idSchema.optional(),
+  qaReportSha256: sha256Schema.optional(),
   mp4Sha256: sha256Schema,
   srtSha256: sha256Schema,
   manifestSha256: sha256Schema,

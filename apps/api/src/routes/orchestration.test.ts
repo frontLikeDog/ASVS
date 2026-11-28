@@ -1,5 +1,6 @@
 // @vitest-environment node
-import { mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -11,6 +12,7 @@ import type {
   RenderJobExecutorPort,
 } from '@asvs/ports';
 import { buildApp } from '../app';
+import { DeterministicQaRunner } from '../qa/testing/deterministic-qa-runner';
 
 const ISO = '2026-11-27T10:00:00.000Z';
 const WORKSPACE_ID = 'ws_route_orch';
@@ -155,13 +157,16 @@ afterEach(async () => {
   artifactDir = undefined;
 });
 
-async function start() {
+async function start(options: { qaRunner?: DeterministicQaRunner } = {}) {
   artifactDir = mkdtempSync(path.join(os.tmpdir(), 'asvs-orch-route-'));
   const built = await buildApp({
     dbPath: ':memory:',
     artifactDir,
     renderExecutor: new BlockingExecutor(),
     orchestrationInstanceId: 'api_route_test',
+    // Real runs need QA (5D); the deterministic double keeps the routes
+    // offline while still producing real report files on disk.
+    qaRunner: options.qaRunner ?? new DeterministicQaRunner(),
     // Tests run offline: the deterministic voice keeps narration requests
     // valid without a provider while staying honestly labelled synthetic.
     speechConfig: {

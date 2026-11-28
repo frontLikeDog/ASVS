@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { ExportFormat, ReviewCheck } from '@asvs/domain';
 import {
@@ -22,6 +22,7 @@ import {
   Info,
   MonitorPlay,
   RefreshCw,
+  ShieldAlert,
   ShieldCheck,
   Video,
   XCircle,
@@ -49,7 +50,21 @@ import {
 } from '@asvs/ui';
 import { selectReviewBundle, useStudioStore, useUiStore } from '@asvs/state';
 import { NotFoundInline } from './not-found-inline';
+import { useQaGate } from './qa-gate';
 import { ReviewArtifactPanel } from './review-artifact-panel';
+
+/**
+ * 5D · the QA report renderer is its own chunk (docs/16 red line 1): the
+ * `review` route has a 22 kB gzip budget and must not statically pull the full
+ * finding taxonomy + evidence previews. The *gate state* comes from
+ * `useQaGate`, which is tiny, so the approve buttons can be disabled even
+ * before — or without — this chunk loading.
+ *
+ * The panel itself is deliberately permissive: it shows every finding
+ * (including warnings) rather than only what the header summary mentions, so a
+ * reviewer can see exactly what the server judged.
+ */
+const QaReportPanel = lazy(() => import('./qa-report-panel'));
 
 const CHECK_ICON = {
   pass: CheckCircle2,
@@ -107,6 +122,11 @@ export function ReviewPage() {
   const [format, setFormat] = useState<ExportFormat>('mp4');
   const [resolution, setResolution] = useState('1920×1080');
 
+  // 5D · server-independent QA gate. Must run before the early return below
+  // (rules of hooks); a missing video simply never reaches this state because
+  // `videoId` is non-empty in practice and `scriptVersion` falls back to 1.
+  const qaGate = useQaGate(videoId, video?.scriptVersion ?? 1);
+
   const aspect = video?.brief.aspect ?? '16:9';
   const resolutions = useMemo(() => {
     if (aspect === '9:16') return ['1080×1920', '720×1280'];
@@ -143,6 +163,11 @@ export function ReviewPage() {
     video.review?.status === 'approved' &&
     !bundle.checks.some((check) => check.id === 'approval-freshness' && check.status === 'fail');
   const exportUnlocked = video.stage === 'approved' || video.stage === 'exported';
+  // 5D · a blocked or stale server-side QA verdict disables approval and the
+  // Gate 3 bundle *locally*, mirroring the server's `POST /exports` hard gate.
+  // Loading/unreachable states do not block: the server refuses the export on
+  // its own (`export_qa_missing` / `export_qa_blocked` / `export_qa_stale`).
+  const qaBlocked = qaGate.blocked || qaGate.stale;
   const failCount = bundle.checks.filter((check) => check.status === 'fail').length;
   const warnCount = bundle.checks.filter((check) => check.status === 'warn').length;
   const passCount = bundle.checks.filter((check) => check.status === 'pass').length;
@@ -227,6 +252,16 @@ export function ReviewPage() {
           <p className="mt-1 text-[11.5px] text-muted">
             {scenes.length} 个镜头 · {totalDuration(scenes)} 秒 · {video.brief.aspect} · {video.brief.language}
           </p>
+          {qaGate.blocked || qaGate.stale ? (
+            <p className="mt-1.5 flex flex-wrap items-center gap-1.5 rounded-sm border border-danger/30 bg-danger-soft/20 px-2 py-1 text-[10.5px] text-danger">
+              <ShieldAlert size={11} className="shrink-0" />
+              {qaGate.stale ? '独立 QA 报告已过期：' : '服务端独立 QA 阻断：'}
+              {qaGate.stale
+                ? `最近报告对应 v${qaGate.envelope?.report.subject.scriptVersion ?? '?'}，当前 v${video.scriptVersion}`
+                : `${qaGate.blockerCount} 项阻断（含 ${qaGate.privacyBlockerCount} 项 AC-07 隐私守门）`}
+              <span className="text-danger/80">· 批准与导出已禁用</span>
+            </p>
+          ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Link to={`/videos/${video.id}/editor`} className={buttonStyles({ variant: 'ghost', size: 'sm' })}>
@@ -245,19 +280,37 @@ export function ReviewPage() {
           <Button
             variant="primary"
             size="sm"
-            disabled={!bundle.canApprove || approved}
+            disabled={!bundle.canApprove || approved || qaBlocked}
             onClick={() => { setApproveNote(''); setApproveOpen(true); }}
             icon={<ShieldCheck size={13} />}
+            title={qaBlocked ? (qaGate.reason ?? undefined) : undefined}
           >
-            {approved ? '已通过审核' : '批准视频'}
+            {approved ? '已通过审核' : qaBlocked ? '等待 QA 通过' : '批准视频'}
           </Button>
         </div>
       </div>
 
       <div className="mt-4 grid grid-cols-[minmax(0,1fr)] gap-4 xl:grid-cols-[minmax(0,1fr)_350px]">
         <div className="space-y-4">
+          {/* 5D · independent QA report + AC-07 privacy findings, its own chunk. */}
+          <Suspense
+            fallback={
+              <Panel>
+                <div className="flex items-center gap-2 p-4 text-[10.5px] text-faint">
+                  <ShieldCheck size={12} className="animate-pulse" /> 正在载入独立 QA 报告…
+                </div>
+              </Panel>
+            }
+          >
+            <QaReportPanel
+              videoId={video.id}
+              currentScriptVersion={video.scriptVersion}
+              gate={qaGate}
+            />
+          </Suspense>
+
           {/* 5A: real server-rendered MP4 + manifest, when one exists. */}
-          <ReviewArtifactPanel videoId={video.id} gateApproved={exportUnlocked && approved} />
+          <ReviewArtifactPanel videoId={video.id} gateApproved={exportUnlocked && approved && !qaBlocked} />
           <Panel className="overflow-hidden">
             <div
               className={cn(
@@ -637,11 +690,11 @@ export function ReviewPage() {
               <Button
                 variant="primary"
                 className="w-full"
-                disabled={!bundle.canApprove || approved}
+                disabled={!bundle.canApprove || approved || qaBlocked}
                 onClick={() => { setApproveNote(''); setApproveOpen(true); }}
                 icon={<ShieldCheck size={13} />}
               >
-                {approved ? '当前版本已批准' : '批准当前版本'}
+                {approved ? '当前版本已批准' : qaBlocked ? '等待 QA 通过' : '批准当前版本'}
               </Button>
               <Button
                 variant="secondary"
@@ -653,6 +706,11 @@ export function ReviewPage() {
               {!bundle.canApprove ? (
                 <p className="text-[9px] leading-4 text-danger">
                   还有 {failCount} 项阻断。批准按钮保持禁用，避免绕过事实与生产校验。
+                </p>
+              ) : null}
+              {qaBlocked ? (
+                <p className="text-[9px] leading-4 text-danger">
+                  {qaGate.reason} 批准按钮保持禁用；修复后重新生产，直到独立 QA 在当前脚本版本上通过。
                 </p>
               ) : null}
             </div>

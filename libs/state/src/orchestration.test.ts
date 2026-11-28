@@ -21,6 +21,8 @@ const STUB: OrchestrationClientPort = {
   rejectRun: vi.fn(),
   updateDemoPlan: vi.fn(),
   getLatestVideoArtifact: vi.fn(),
+  getRunQaReport: vi.fn(),
+  getLatestQaReport: vi.fn(),
   artifactDownloadUrl: () => '',
   artifactInlineUrl: () => '',
   createExportBundle: vi.fn(),

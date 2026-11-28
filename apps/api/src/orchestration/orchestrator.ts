@@ -25,6 +25,8 @@ import {
   isRetryableCaptureCode,
   orchestrationStepDefinition,
   parseAndValidateSrt,
+  QA_POLICY_VERSION,
+  qaReportV1Schema,
   renderJobDigest,
   renderManifestV1Schema,
   renderProfileSchema,
@@ -64,6 +66,10 @@ import {
   type OrchestrationRunV1,
   type OrchestrationStepKey,
   type OrchestrationStepStateV1,
+  type QaReportEnvelopeV1 as DomainQaReportEnvelopeV1,
+  type QaReportV1,
+  type QaRunSummaryV1,
+  type QaStage,
   type RenderAudioAssetV1,
   type RenderInputV1,
   type RenderJobInputV1,
@@ -83,6 +89,13 @@ import type {
   ExportBundleListOptions,
   ListOrchestrationRunsOptions,
   OrchestrationServicePort,
+  QaCaptureInput,
+  QaCaptureScreenshotInput,
+  QaHealth,
+  QaReportEnvelopeV1,
+  QaFinalInput,
+  QaRunOutcome,
+  QaRunnerPort,
   RejectGateInput,
   RenderJobExecutionResult,
   RenderJobExecutorPort,
@@ -91,6 +104,7 @@ import type {
 } from '@asvs/ports';
 import type { ExportBundleStore } from '../db/export-bundle-store';
 import { OrchestrationApprovalStore } from '../db/orchestration-approval-store';
+import { QaReportStore, type StoredQaReport } from '../db/qa-report-store';
 import { SqliteOrchestrationStore } from '../db/orchestration-store';
 import {
   DEFAULT_CAPTURE_CONFIG,
@@ -147,6 +161,14 @@ export interface OrchestratorOptions {
   captureConfig?: CaptureServiceConfig;
   /** Test hook: reuse a planner instead of building one from `captureConfig`. */
   capturePlanner?: DemoPlannerService;
+  /**
+   * 5D · independent QA runner. Omitted disables the two QA steps the same way
+   * a missing capture executor disables capture: it fails closed
+   * (`qa_execution_failed`) rather than letting a run pass unvetted.
+   */
+  qaRunner?: QaRunnerPort | null;
+  /** 5D · report persistence for Gate 3 / export gate. */
+  qaReportStore?: QaReportStore | null;
   maxAttempts?: number;
   leaseTtlMs?: number;
   schedulerIntervalMs?: number;
@@ -219,6 +241,8 @@ export class Orchestrator implements OrchestrationServicePort {
   private readonly approvals: OrchestrationApprovalStore;
   private readonly speech: SpeechService | null;
   private readonly exportStore: ExportBundleStore | null;
+  private readonly qaRunner: QaRunnerPort | null;
+  private readonly qaReports: QaReportStore | null;
   private readonly maxAttempts: number;
   private readonly leaseTtlMs: number;
   private readonly intervalMs: number;
@@ -232,6 +256,8 @@ export class Orchestrator implements OrchestrationServicePort {
   private activeRunId: string | null = null;
   /** Run whose capture subprocess is alive right now (cancel routing). */
   private activeCaptureRunId: string | null = null;
+  /** Set while a `qa_capture` / `qa_final` step is executing in this process. */
+  private activeQaRunId: string | null = null;
   private readonly abortRequested = new Set<string>();
 
   constructor(options: OrchestratorOptions) {
@@ -247,6 +273,8 @@ export class Orchestrator implements OrchestrationServicePort {
     this.approvals = new OrchestrationApprovalStore(options.store.database);
     this.speech = options.speech ?? null;
     this.exportStore = options.exportStore ?? null;
+    this.qaRunner = options.qaRunner ?? null;
+    this.qaReports = options.qaReportStore ?? null;
     this.maxAttempts = options.maxAttempts ?? 3;
     this.leaseTtlMs = options.leaseTtlMs ?? 15_000;
     this.intervalMs = options.schedulerIntervalMs ?? 500;
@@ -467,6 +495,7 @@ export class Orchestrator implements OrchestrationServicePort {
     }
     if (this.activeRunId === runId) this.executor?.abort();
     if (this.activeCaptureRunId === runId) this.captureExecutor?.abort();
+    if (this.activeQaRunId === runId) this.qaRunner?.abort();
     this.appendEvent(runId, null, 'warn', 'cancel', '运行已被用户取消；活跃渲染进程已终止。');
     return next;
   }
@@ -779,6 +808,108 @@ export class Orchestrator implements OrchestrationServicePort {
     return this.planner.health();
   }
 
+  /** 5D · `/v1/health` QA block; never exposes a binary path or credential. */
+  qaHealth(): QaHealth {
+    return (
+      this.qaRunner?.health() ?? {
+        enabled: false,
+        ocrProvider: 'unconfigured',
+        ocrConfigured: false,
+        policyVersion: QA_POLICY_VERSION,
+      }
+    );
+  }
+
+  /**
+   * Report for one run. `stage` omitted returns the stronger `final` report,
+   * falling back to `capture` for a run blocked before rendering. Every read
+   * re-hashes the report file: a tampered `qa-report.json` is a 409, never a
+   * silently-served stale verdict (docs/16 §6.2).
+   */
+  async getRunQaReport(
+    workspaceId: string,
+    runId: string,
+    stage?: QaStage,
+  ): Promise<DomainQaReportEnvelopeV1 | null> {
+    const stored = this.qaReports?.getByRun(workspaceId, runId, stage);
+    if (!stored) return null;
+    const detail = await this.getRun(workspaceId, runId);
+    if (!detail) return null;
+    return this.buildQaEnvelope(workspaceId, detail.run, stored);
+  }
+
+  /**
+   * Gate 3's core query: the newest report for a video, deliberately ignoring
+   * the run's terminal status so a run blocked at `qa_capture` / `qa_final`
+   * still explains itself on the review page.
+   */
+  async getLatestQaReport(
+    workspaceId: string,
+    videoId: string,
+  ): Promise<DomainQaReportEnvelopeV1 | null> {
+    const latest = this.qaReports?.findLatestByVideo(workspaceId, videoId);
+    if (!latest) return null;
+    const runDetail = await this.getRun(workspaceId, latest.report.runId);
+    if (!runDetail) return null;
+    return this.buildQaEnvelope(workspaceId, runDetail.run, latest);
+  }
+
+  private buildQaEnvelope(
+    workspaceId: string,
+    run: OrchestrationRunV1,
+    stored: StoredQaReport,
+  ): DomainQaReportEnvelopeV1 {
+    const artifacts = this.store.listArtifacts(run.id);
+    const reportArtifact = stored.reportArtifactId
+      ? (artifacts.find((artifact) => artifact.id === stored.reportArtifactId) ??
+        this.store.getArtifact(workspaceId, stored.reportArtifactId))
+      : (artifacts.find(
+          (artifact) =>
+            artifact.kind === 'qa_report' && artifact.metadata.stage === stored.report.stage,
+        ) ??
+        artifacts.find((artifact) => artifact.kind === 'qa_report') ??
+        null);
+    if (!reportArtifact) {
+      throw new OrchestrationHttpError(
+        409,
+        'qa_report_tampered',
+        'QA 报告产物记录缺失：报告可能已被删除或替换。',
+      );
+    }
+    let file: string;
+    try {
+      file = resolveArtifactPath(this.artifactDir, reportArtifact.storageRef);
+    } catch {
+      throw new OrchestrationHttpError(409, 'qa_report_tampered', 'QA 报告路径不安全。');
+    }
+    if (!fileExists(file) || sha256File(file) !== stored.reportSha256) {
+      throw new OrchestrationHttpError(
+        409,
+        'qa_report_tampered',
+        'QA 报告的磁盘 SHA256 与记录不一致，拒绝展示可能被篡改的结论。',
+      );
+    }
+    // Parse the bytes on disk, not the cached row, so the returned verdict is
+    // exactly what the reviewer is being asked to trust.
+    let report: QaReportV1;
+    try {
+      report = qaReportV1Schema.parse(JSON.parse(readFileSync(file, 'utf8')));
+    } catch (error) {
+      throw new OrchestrationHttpError(
+        409,
+        'qa_report_tampered',
+        `QA 报告无法解析：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const evidenceArtifacts = artifacts.filter((artifact) => artifact.kind === 'qa_evidence_frame');
+    return {
+      run,
+      report,
+      reportArtifact,
+      evidenceArtifacts,
+    } as DomainQaReportEnvelopeV1;
+  }
+
   async getArtifact(workspaceId: string, artifactId: string): Promise<OrchestrationArtifactV1 | null> {
     return this.store.getArtifact(workspaceId, artifactId);
   }
@@ -905,6 +1036,89 @@ export class Orchestrator implements OrchestrationServicePort {
       artifact_receipt: this.rehashArtifact(workspaceId, receipt),
     };
 
+    // Gate 5 (docs/16 §6.1 item 6): the passing `qa_final` report is a hard
+    // export precondition. It must exist, still hash to its row, not be
+    // blocking, and describe exactly the bytes being exported. Anything else
+    // is a 409 — approving in the UI can never skip this.
+    //
+    // A capture-enabled run registers **two** `qa_report` artifacts (capture +
+    // final). Selecting by kind alone would pick whichever was created first —
+    // the capture report — and then compare it against the `final` row, so
+    // every real-capture run would fail as `export_hash_mismatch`. The stage is
+    // in the artifact metadata precisely so this selection is unambiguous.
+    const qaArtifact =
+      artifacts.find(
+        (item) => item.kind === 'qa_report' && item.metadata.stage === 'final',
+      ) ?? byKind('qa_report');
+    const qaRow = qaArtifact ? this.qaReports?.getByRun(workspaceId, run.id, 'final') : null;
+    if (!qaArtifact || !qaRow) {
+      throw new OrchestrationHttpError(
+        409,
+        'export_qa_missing',
+        `运行 ${run.id} 没有成片独立 QA 报告，禁止导出；请重新运行至 qa_final 通过。`,
+      );
+    }
+    const verifiedQa = this.rehashArtifact(workspaceId, qaArtifact);
+    if (verifiedQa.sha256 !== qaRow.reportSha256) {
+      throw new OrchestrationHttpError(
+        409,
+        'export_hash_mismatch',
+        'QA 报告的磁盘哈希与 qa_reports 记录不一致，拒绝导出。',
+      );
+    }
+    let qaReport: QaReportV1;
+    try {
+      // Validate the bytes on disk again: the row could agree with a report
+      // that no longer satisfies the schema (e.g. a hand-edited downgrade).
+      qaReport = qaReportV1Schema.parse(
+        JSON.parse(readFileSync(resolveArtifactPath(this.artifactDir, verifiedQa.storageRef), 'utf8')),
+      );
+    } catch {
+      throw new OrchestrationHttpError(
+        409,
+        'export_hash_mismatch',
+        'QA 报告无法解析或已损坏，拒绝导出。',
+      );
+    }
+    if (
+      qaReport.verdict === 'fail' ||
+      qaReport.summary.blockerCount > 0 ||
+      qaReport.summary.privacyBlockerCount > 0
+    ) {
+      throw new OrchestrationHttpError(
+        409,
+        'export_qa_blocked',
+        `成片独立 QA 判定为 ${qaReport.verdict}（阻断 ${qaReport.summary.blockerCount} 项，含 AC-07 隐私 ${qaReport.summary.privacyBlockerCount} 项），禁止导出。`,
+        {
+          reportId: qaReport.reportId,
+          verdict: qaReport.verdict,
+          blockerCount: qaReport.summary.blockerCount,
+          privacyBlockerCount: qaReport.summary.privacyBlockerCount,
+          // Redacted only: never leak a matched secret through an error body.
+          blockers: qaReport.findings
+            .filter((finding) => finding.severity === 'blocker')
+            .map((finding) => ({
+              id: finding.id,
+              ruleId: finding.ruleId,
+              category: finding.category,
+              title: finding.title,
+              ...(finding.matchRedacted ? { matchRedacted: finding.matchRedacted } : {}),
+            })),
+        },
+      );
+    }
+    const staleSubjects: string[] = [];
+    if (qaReport.subject.mp4Sha256 !== verified.video_mp4.sha256) staleSubjects.push('MP4');
+    if (qaReport.subject.manifestSha256 !== verified.render_manifest.sha256) staleSubjects.push('manifest');
+    if (srt && qaReport.subject.srtSha256 !== verified.subtitles_srt.sha256) staleSubjects.push('SRT');
+    if (staleSubjects.length > 0) {
+      throw new OrchestrationHttpError(
+        409,
+        'export_qa_stale',
+        `QA 报告针对的产物与当前交付文件不一致（${staleSubjects.join(' / ')}），请重新运行 QA。`,
+      );
+    }
+
     const timestamp = this.now().toISOString();
     const bundleId = newId('exportbundle');
     const baseUrl = `/v1/workspaces/${encodeURIComponent(workspaceId)}/orchestration/artifacts`;
@@ -912,6 +1126,7 @@ export class Orchestrator implements OrchestrationServicePort {
       if (artifact.kind === 'video_mp4') return `${video.id}.mp4`;
       if (artifact.kind === 'subtitles_srt') return `${video.id}.srt`;
       if (artifact.kind === 'render_manifest') return `${video.id}.manifest.json`;
+      if (artifact.kind === 'qa_report') return `${video.id}.qa-report.json`;
       return `${video.id}.receipt.json`;
     };
     const files: ExportBundleFileV1[] = [
@@ -919,6 +1134,7 @@ export class Orchestrator implements OrchestrationServicePort {
       verified.subtitles_srt,
       verified.render_manifest,
       verified.artifact_receipt,
+      verifiedQa,
     ].map((artifact) => ({
       artifactId: artifact.id,
       kind: artifact.kind,
@@ -956,6 +1172,8 @@ export class Orchestrator implements OrchestrationServicePort {
       mp4Sha256: verified.video_mp4.sha256,
       srtSha256: verified.subtitles_srt.sha256,
       manifestSha256: verified.render_manifest.sha256,
+      qaReportArtifactId: verifiedQa.id,
+      qaReportSha256: verifiedQa.sha256,
       scriptVersion: video.scriptVersion,
       ...(input.approvalNote ? { approvalNote: input.approvalNote } : {}),
       createdAt: timestamp,
@@ -1079,12 +1297,15 @@ export class Orchestrator implements OrchestrationServicePort {
     }
     // Killing the children makes any in-flight `execute()` resolve promptly.
     // Both executors are separate OS processes; a capture can be the live one.
+    // QA runs ffmpeg/ffprobe/tesseract the same way, so it is aborted too.
     this.executor?.abort();
     this.captureExecutor?.abort();
+    this.qaRunner?.abort();
     // Give the child a moment to exit so onClose does not orphan it.
     for (
       let i = 0;
-      i < 40 && (this.executor?.isRunning() || this.captureExecutor?.isRunning());
+      i < 40 &&
+      (this.executor?.isRunning() || this.captureExecutor?.isRunning() || this.qaRunner?.isRunning());
       i += 1
     ) {
       await new Promise((resolve) => setTimeout(resolve, 50));
@@ -1314,6 +1535,14 @@ export class Orchestrator implements OrchestrationServicePort {
         this.generateSubtitles(run, stepKey, attempt);
         return;
       }
+      case 'qa_capture': {
+        await this.runQaStep(run, stepKey, attempt, 'capture');
+        return;
+      }
+      case 'qa_final': {
+        await this.runQaStep(run, stepKey, attempt, 'final');
+        return;
+      }
       case 'register_artifacts': {
         const registered = this.registerArtifacts(run);
         this.writeCheckpoint(run, stepKey, 'step_done', { artifactIds: registered.artifactIds });
@@ -1323,6 +1552,310 @@ export class Orchestrator implements OrchestrationServicePort {
       default:
         throw new StepFailure('unexpected_error', `未知的进程内步骤：${stepKey}`, false);
     }
+  }
+
+  /**
+   * `qa_capture` / `qa_final` (Step 5D, docs/16 §6.1).
+   *
+   * The runner re-reads everything from disk; this method only describes what
+   * to judge, registers what the runner produced, and turns a `fail` verdict
+   * into a terminal `StepFailure`. A blocked `qa_capture` therefore never
+   * reaches TTS or the renderer, and a blocked `qa_final` never lets
+   * `register_artifacts` expose a deliverable MP4.
+   */
+  private async runQaStep(
+    run: OrchestrationRunV1,
+    stepKey: OrchestrationStepKey,
+    attempt: number,
+    stage: QaStage,
+  ): Promise<void> {
+    if (!this.qaRunner) {
+      throw new StepFailure(
+        'qa_execution_failed',
+        '服务端未接入独立 QA 执行器，无法执行隐私与质量复核。',
+        false,
+      );
+    }
+    const snapshot = this.requireWorkspace(run.workspaceId);
+    const video = this.requireVideo(snapshot, run.videoId);
+    const runDir = runDirFor(this.artifactDir, run.workspaceId, run.id);
+    const frozenFile = path.join(runDir, 'input.json');
+    if (!fileExists(frozenFile)) {
+      throw new StepFailure('artifact_mismatch', '缺少冻结输入 input.json，无法执行 QA。', false);
+    }
+    const inputDigest = run.inputDigest ?? '0'.repeat(64);
+    const artifacts = this.store.listArtifacts(run.id);
+    const artifactFile = (kind: OrchestrationArtifactV1['kind']): string | undefined => {
+      const artifact = artifacts.find((item) => item.kind === kind);
+      if (!artifact) return undefined;
+      try {
+        return resolveArtifactPath(this.artifactDir, artifact.storageRef);
+      } catch {
+        return undefined;
+      }
+    };
+    // `qa_final` runs before `register_artifacts`, so the render outputs are
+    // still only files on disk (docs/16 §6.1 item 4 names those paths).
+    const renderOutput = (name: string): string | undefined => {
+      const file = path.join(runDir, 'artifacts', name);
+      return fileExists(file) ? file : undefined;
+    };
+
+    let outcome: QaRunOutcome;
+    this.activeQaRunId = run.id;
+    try {
+      if (stage === 'capture') {
+        const receiptFile = artifactFile('capture_receipt');
+        const traceFile = artifactFile('capture_trace');
+        const clips = artifacts
+          .filter((artifact) => artifact.kind === 'capture_clip')
+          .map((artifact) => ({
+            ...(typeof artifact.metadata.assetId === 'string'
+              ? { assetId: artifact.metadata.assetId }
+              : {}),
+            file: resolveArtifactPath(this.artifactDir, artifact.storageRef),
+            sha256: artifact.sha256,
+            ...(typeof artifact.metadata.durationMs === 'number'
+              ? { durationMs: artifact.metadata.durationMs }
+              : {}),
+          }));
+        // The runner maps each screenshot back to its demo step by basename via
+        // the receipt, so no per-file metadata is invented here.
+        const screenshots: QaCaptureScreenshotInput[] = artifacts
+          .filter((artifact) => artifact.kind === 'capture_screenshot')
+          .map((artifact) => ({
+            file: resolveArtifactPath(this.artifactDir, artifact.storageRef),
+            ...(typeof artifact.metadata.stepId === 'string'
+              ? { stepId: artifact.metadata.stepId }
+              : {}),
+          }));
+        const captureInput: QaCaptureInput = {
+          runId: run.id,
+          workspaceId: run.workspaceId,
+          projectId: run.projectId,
+          videoId: run.videoId,
+          scriptVersion: video.scriptVersion,
+          inputDigest,
+          runDir,
+          frozenInputFile: frozenFile,
+          ...(receiptFile ? { captureReceiptFile: receiptFile } : {}),
+          ...(traceFile ? { captureTraceFile: traceFile } : {}),
+          clips,
+          screenshots,
+          ...(fileExists(path.join(runDir, 'demo-plan.json'))
+            ? { demoPlanFile: path.join(runDir, 'demo-plan.json') }
+            : {}),
+        };
+        outcome = await this.qaRunner.runCaptureQa(captureInput, this.qaCallbacks(run, stepKey));
+      } else {
+        const mp4 = artifactFile('video_mp4') ?? renderOutput(`${run.id}.mp4`);
+        const manifest = artifactFile('render_manifest') ?? renderOutput('manifest.json');
+        const receipt = artifactFile('artifact_receipt') ?? renderOutput('receipt.json');
+        if (!mp4 || !manifest || !receipt) {
+          throw new StepFailure(
+            'artifact_mismatch',
+            '缺少渲染产物（MP4/manifest/receipt），无法执行成片 QA。',
+            false,
+          );
+        }
+        const srtFile = artifactFile('subtitles_srt') ?? path.join(runDir, 'subtitles.srt');
+        const captureReceipt = artifactFile('capture_receipt');
+        const captureTrace = artifactFile('capture_trace');
+        const captureClips = artifacts
+          .filter((artifact) => artifact.kind === 'capture_clip')
+          .map((artifact) => ({
+            file: resolveArtifactPath(this.artifactDir, artifact.storageRef),
+            sha256: artifact.sha256,
+          }));
+        const captureScreenshots = artifacts
+          .filter((artifact) => artifact.kind === 'capture_screenshot')
+          .map((artifact) => ({ file: resolveArtifactPath(this.artifactDir, artifact.storageRef) }));
+        const finalInput: QaFinalInput = {
+          runId: run.id,
+          workspaceId: run.workspaceId,
+          projectId: run.projectId,
+          videoId: run.videoId,
+          scriptVersion: video.scriptVersion,
+          inputDigest,
+          runDir,
+          frozenInputFile: frozenFile,
+          videoFile: mp4,
+          manifestFile: manifest,
+          receiptFile: receipt,
+          ...(fileExists(srtFile) ? { subtitlesFile: srtFile } : {}),
+          ...(captureReceipt || captureTrace || captureClips.length > 0 || captureScreenshots.length > 0
+            ? {
+                capture: {
+                  runId: run.id,
+                  workspaceId: run.workspaceId,
+                  projectId: run.projectId,
+                  videoId: run.videoId,
+                  scriptVersion: video.scriptVersion,
+                  inputDigest,
+                  runDir,
+                  frozenInputFile: frozenFile,
+                  ...(captureReceipt ? { captureReceiptFile: captureReceipt } : {}),
+                  ...(captureTrace ? { captureTraceFile: captureTrace } : {}),
+                  clips: captureClips,
+                  screenshots: captureScreenshots,
+                },
+              }
+            : {}),
+          workspace: snapshot,
+        };
+        outcome = await this.qaRunner.runFinalQa(finalInput, this.qaCallbacks(run, stepKey));
+      }
+    } catch (error) {
+      if (error instanceof StepFailure) throw error;
+      throw new StepFailure(
+        'qa_execution_failed',
+        `独立 QA 执行失败：${error instanceof Error ? error.message : String(error)}`,
+        false,
+      );
+    } finally {
+      this.activeQaRunId = null;
+    }
+
+    // Persist the report first: even a blocked run must leave an auditable
+    // report behind, and Gate 3 reads it back for exactly this case.
+    const report = outcome.report;
+    const reportArtifact = this.registerQaArtifacts(run, stepKey, outcome);
+    const qaSummary: QaRunSummaryV1 = {
+      reportId: report.reportId,
+      stage: report.stage,
+      verdict: report.verdict,
+      policyVersion: report.policyVersion,
+      ...(reportArtifact ? { reportArtifactId: reportArtifact.id } : {}),
+      blockerCount: report.summary.blockerCount,
+      warningCount: report.summary.warningCount,
+      privacyBlockerCount: report.summary.privacyBlockerCount,
+      checkedAt: report.createdAt,
+    };
+    this.qaReports?.upsert({
+      report,
+      ...(reportArtifact ? { reportArtifactId: reportArtifact.id } : {}),
+      reportSha256: outcome.reportSha256,
+    });
+    const latest = this.store.getRun(run.id) ?? run;
+    this.store.updateRun({ ...latest, qaSummary, updatedAt: this.now().toISOString() });
+    this.writeCheckpoint(run, stepKey, stage === 'capture' ? 'qa_capture_checked' : 'qa_media_checked', {
+      reportId: report.reportId,
+      verdict: report.verdict,
+      blockerCount: report.summary.blockerCount,
+      reportSha256: outcome.reportSha256,
+    });
+    this.appendEvent(
+      run.id,
+      stepKey,
+      report.verdict === 'fail' ? 'warn' : 'info',
+      'qa',
+      `独立 QA（${stage}）判定 ${report.verdict}：阻断 ${report.summary.blockerCount} / 提醒 ${report.summary.warningCount}${
+        report.summary.privacyBlockerCount > 0
+          ? `（AC-07 隐私阻断 ${report.summary.privacyBlockerCount}）`
+          : ''
+      }。`,
+      { reportId: report.reportId, verdict: report.verdict },
+    );
+
+    if (report.verdict === 'fail') {
+      throw new StepFailure(
+        this.qaFailureCode(report),
+        this.qaFailureMessage(report),
+        false,
+      );
+    }
+    this.completeStep(run, stepKey, attempt, {
+      reportId: report.reportId,
+      verdict: report.verdict,
+      blockerCount: report.summary.blockerCount,
+      evidenceCount: outcome.evidenceFrames.length,
+    });
+  }
+
+  private qaCallbacks(run: OrchestrationRunV1, stepKey: OrchestrationStepKey) {
+    return {
+      onCheckpoint: (phase: string, payload: Record<string, unknown>): void => {
+        this.writeCheckpoint(run, stepKey, phase, payload);
+      },
+      onLog: (level: 'info' | 'warn' | 'error', message: string): void => {
+        this.appendEvent(run.id, stepKey, level === 'error' ? 'error' : level, 'qa', message);
+      },
+    };
+  }
+
+  /** Highest-priority category wins, so the failure code explains the worst. */
+  private qaFailureCode(report: QaRunOutcome['report']): string {
+    if (report.findings.some((finding) => finding.ruleId === 'privacy.ocr_unavailable')) {
+      return 'qa_ocr_unavailable';
+    }
+    const summary = report.summary;
+    if (summary.privacyBlockerCount > 0) return 'qa_privacy_blocked';
+    if (summary.technicalBlockerCount > 0) return 'qa_technical_blocked';
+    if (summary.factBlockerCount > 0) return 'qa_fact_blocked';
+    if (summary.contentBlockerCount > 0) return 'qa_content_blocked';
+    return 'qa_execution_failed';
+  }
+
+  private qaFailureMessage(report: QaRunOutcome['report']): string {
+    const parts: string[] = [];
+    if (report.summary.privacyBlockerCount > 0) {
+      parts.push(`AC-07 隐私阻断 ${report.summary.privacyBlockerCount} 项`);
+    }
+    if (report.summary.technicalBlockerCount > 0) {
+      parts.push(`技术阻断 ${report.summary.technicalBlockerCount} 项`);
+    }
+    if (report.summary.factBlockerCount > 0) {
+      parts.push(`事实阻断 ${report.summary.factBlockerCount} 项`);
+    }
+    if (report.summary.contentBlockerCount > 0) {
+      parts.push(`内容阻断 ${report.summary.contentBlockerCount} 项`);
+    }
+    const first = report.findings.find((finding) => finding.severity === 'blocker');
+    return `独立 QA（${report.stage}）未通过：${parts.join('、') || '存在阻断项'}。${
+      first ? `首个阻断：${first.title}（${first.ruleId}）。` : ''
+    }报告 ${report.reportId} 仅保留脱敏摘要，可在审核页查看定位详情。`;
+  }
+
+  /** Registers `qa_report` + every `qa_evidence_frame` the runner produced. */
+  private registerQaArtifacts(
+    run: OrchestrationRunV1,
+    stepKey: OrchestrationStepKey,
+    outcome: QaRunOutcome,
+  ): OrchestrationArtifactV1 | null {
+    const runDir = runDirFor(this.artifactDir, run.workspaceId, run.id);
+    const job = this.store.getJobForStep(run.id, stepKey);
+    const jobId = job?.jobId ?? `orchjob_qa_${stepKey}`;
+    const entries: Array<{
+      kind: OrchestrationArtifactV1['kind'];
+      file: string;
+      mimeType: string;
+      metadata: Record<string, unknown>;
+    }> = [
+      {
+        kind: 'qa_report',
+        file: outcome.reportFile,
+        mimeType: 'application/json',
+        metadata: {
+          stage: outcome.report.stage,
+          verdict: outcome.report.verdict,
+          blockerCount: outcome.report.summary.blockerCount,
+          privacyBlockerCount: outcome.report.summary.privacyBlockerCount,
+          policyVersion: outcome.report.policyVersion,
+        },
+      },
+      ...outcome.evidenceFrames.map((frame) => ({
+        kind: 'qa_evidence_frame' as const,
+        file: frame.file,
+        mimeType: 'image/png',
+        metadata: {
+          findingId: frame.findingId,
+          redacted: frame.redacted,
+          stage: outcome.report.stage,
+        },
+      })),
+    ];
+    const registered = this.registerCaptureArtifacts(run, stepKey, runDir, jobId, entries);
+    return registered.find((artifact) => artifact.kind === 'qa_report') ?? null;
   }
 
   /**
@@ -1741,7 +2274,9 @@ export class Orchestrator implements OrchestrationServicePort {
     const run = this.store.getRun(runId);
     if (!run) return;
     const timestamp = this.now().toISOString();
-    const keys = ['plan_demo', 'capture_demo'] as const;
+    // `qa_capture` depends on the two capture steps: with no recording there is
+    // nothing to scan, so it is skipped with them rather than running empty.
+    const keys = ['plan_demo', 'capture_demo', 'qa_capture'] as const;
     const steps = run.steps.map((step) =>
       keys.includes(step.stepKey as (typeof keys)[number])
         ? { ...step, status: 'skipped' as const, finishedAt: timestamp }
@@ -1760,7 +2295,7 @@ export class Orchestrator implements OrchestrationServicePort {
         });
       }
     }
-    this.appendEvent(runId, null, 'info', 'state_change', '未请求真实录屏：plan_demo / capture_demo 已标记为 skipped。');
+    this.appendEvent(runId, null, 'info', 'state_change', '未请求真实录屏：plan_demo / capture_demo / qa_capture 已标记为 skipped。');
   }
 
   private readNarrationRequest(run: OrchestrationRunV1): PersistedNarrationRequest {
@@ -2414,12 +2949,31 @@ export class Orchestrator implements OrchestrationServicePort {
           assertions: receipt.assertions,
         },
       },
-      ...receipt.screenshots.map((shot, index) => ({
-        kind: 'capture_screenshot' as const,
-        file: path.join(outDir, shot.file),
-        mimeType: 'image/png',
-        metadata: { index, assertions: receipt.assertions },
-      })),
+      // The success trace is QA evidence too (docs/16 §6.1): `qa_capture` scans
+      // it for leaked DOM text, headers and static resources. Registering it
+      // here means a successful capture leaves the same evidence shape a failed
+      // one does (`registerCaptureEvidence` already registers it on failure).
+      {
+        kind: 'capture_trace',
+        file: path.join(outDir, receipt.trace.file),
+        mimeType: 'application/zip',
+        metadata: { planId: demoPlan.planId, planDigest },
+      },
+      ...receipt.screenshots.map((shot, index) => {
+        const step = receipt.steps.find(
+          (item) => item.screenshot && path.basename(item.screenshot) === path.basename(shot.file),
+        );
+        return {
+          kind: 'capture_screenshot' as const,
+          file: path.join(outDir, shot.file),
+          mimeType: 'image/png',
+          metadata: {
+            index,
+            assertions: receipt.assertions,
+            ...(step ? { stepId: step.id, startedAtMs: step.startedAtMs } : {}),
+          },
+        };
+      }),
     ]);
 
     const latest = this.store.getRun(run.id) ?? run;

@@ -60,6 +60,11 @@
       "executor": "nx:run-commands",
       "options": { "command": "tsx src/scripts/verify-capture-orchestration.ts", "cwd": "apps/api" },
       "cache": false
+    },
+    "verify-qa-privacy": {
+      "executor": "nx:run-commands",
+      "options": { "command": "tsx src/scripts/verify-qa-privacy.ts", "cwd": "apps/api" },
+      "cache": false
     }
   }
 }

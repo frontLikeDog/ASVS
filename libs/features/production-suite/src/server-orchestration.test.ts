@@ -29,24 +29,26 @@ function run(overrides: Partial<OrchestrationRunV1> = {}): OrchestrationRunV1 {
   };
 }
 
-describe('buildServerStepViews · 5C 九步 DAG', () => {
-  it('即使运行还没有步骤，也渲染完整九步且顺序固定', () => {
+describe('buildServerStepViews · 5D 十一步 DAG', () => {
+  it('即使运行还没有步骤，也渲染完整十一步且顺序固定', () => {
     const views = buildServerStepViews(null);
     expect(views.map((view) => view.stepKey)).toEqual([
       'freeze_input',
       'verify_claims',
       'plan_demo',
       'capture_demo',
+      'qa_capture',
       'prepare_media',
       'synthesize_voice',
       'generate_subtitles',
       'render_video',
+      'qa_final',
       'register_artifacts',
     ]);
     expect(views.every((view) => view.status === 'pending')).toBe(true);
   });
 
-  it('未启用录屏时两步显示为 skipped，而不是从 DAG 消失', () => {
+  it('未启用录屏时 plan_demo / capture_demo / qa_capture 显示为 skipped，qa_final 仍待执行', () => {
     const views = buildServerStepViews(
       run({
         status: 'running',
@@ -55,6 +57,7 @@ describe('buildServerStepViews · 5C 九步 DAG', () => {
           { stepKey: 'verify_claims', status: 'succeeded', attempt: 1, checkpointPhases: [] },
           { stepKey: 'plan_demo', status: 'skipped', attempt: 0, checkpointPhases: [] },
           { stepKey: 'capture_demo', status: 'skipped', attempt: 0, checkpointPhases: [] },
+          { stepKey: 'qa_capture', status: 'skipped', attempt: 0, checkpointPhases: [] },
           { stepKey: 'prepare_media', status: 'running', attempt: 1, checkpointPhases: [] },
         ],
       }),
@@ -62,8 +65,10 @@ describe('buildServerStepViews · 5C 九步 DAG', () => {
     const byKey = new Map(views.map((view) => [view.stepKey, view.status]));
     expect(byKey.get('plan_demo')).toBe('skipped');
     expect(byKey.get('capture_demo')).toBe('skipped');
+    expect(byKey.get('qa_capture')).toBe('skipped');
     expect(byKey.get('prepare_media')).toBe('running');
     expect(byKey.get('render_video')).toBe('pending');
+    expect(byKey.get('qa_final')).toBe('pending');
   });
 
   it('Gate 2 暂停时 capture_demo 显示 awaiting_approval，并带上审批产生的 checkpoint', () => {
@@ -127,13 +132,16 @@ describe('buildServerStepViews · 5C 九步 DAG', () => {
   });
 });
 
-describe('checkpointLabel · 5C 新阶段', () => {
+describe('checkpointLabel · 5C/5D 新阶段', () => {
   it('已知阶段使用中文标签，未知阶段原样回显', () => {
     expect(checkpointLabel('plan_ready')).toBe('计划已生成');
     expect(checkpointLabel('plan_verified')).toBe('计划摘要已复检');
     expect(checkpointLabel('capture_started')).toBe('浏览器已启动');
     expect(checkpointLabel('capture_recorded')).toBe('录屏已录制');
     expect(checkpointLabel('clip_transcoded')).toBe('片段已转码');
+    expect(checkpointLabel('qa_capture_checked')).toBe('录屏 QA 已复核');
+    expect(checkpointLabel('qa_privacy_scanned')).toBe('隐私扫描完成');
+    expect(checkpointLabel('qa_report_written')).toBe('QA 报告已落盘');
     expect(checkpointLabel('something_new')).toBe('something_new');
   });
 });

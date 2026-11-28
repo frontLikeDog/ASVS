@@ -471,6 +471,34 @@ Gate 3 未通过 / 脚本版本变化 / 产物被篡改时导出返回 409
 
 ---
 
+## 7D. Step 5D · 独立 QA 与录屏隐私守门（WP-16 / AC-07）
+
+**目标**：录制与渲染不再「自证清白」。DAG 新增两个独立门禁 `qa_capture`（TTS/渲染前，早拦截）与 `qa_final`（`register_artifacts` 前，四维全量），产出绑定全部产物哈希的 `QaReportV1`；AC-07 对录屏帧、成片帧、断言截图 PNG 文本块、Playwright trace、SRT、镜头文案与计划值做邮箱 / Token / 密钥 / 私钥 / 敏感证件号扫描，命中即阻断运行与 Gate 3 导出，且报告 / SQLite / 日志 / HTTP / DOM 只出现掩码与 SHA256。
+
+### 工作项与执行状态（2026-11-29）
+
+| ID | 任务 | 状态 | 证据 |
+|---|---|---|---|
+| S5D-1 | 领域 QA 契约（`libs/domain/src/qa.ts`，不进初始包）+ 11 步 DAG + `qaRunSummaryV1Schema` | ✅ | `qa.ts` / `orchestration.test.ts`；`check-bundle-budget.mjs` 断言初始包无 `asvs.qa-report` |
+| S5D-2 | `QaRunnerPort` / `ImageOcrPort` + SQLite **v8** `qa_reports` + `QaReportStore` | ✅ | `database-v8.test.ts`（v7→v8 保留旧表数据）、`qa-report-store` 用例 |
+| S5D-3 | 9 条隐私规则（含 Luhn 与身份证校验位）、`matchRedacted` / `matchSha256`、域名白名单 | ✅ | `privacy-scanner.test.ts`（含零明文回显负向断言） |
+| S5D-4 | 安全 ZIP 读取（zip-bomb 防护）+ 分层 trace 扫描（跳过 JS/CSS/font/wasm） | ✅ | `zip-trace.test.ts`；`qa:verify` #5/#7 |
+| S5D-5 | 确定性抽帧、OCR 三适配器（tesseract / deterministic_test / unconfigured fail-closed）、`boxblur` 脱敏证据帧、`blackdetect` / `freezedetect` / `volumedetect`、镜头时间映射 | ✅ | `frame-extractor.test.ts`、`media-qa.test.ts`、`ocr-adapters.test.ts`；`qa:verify` #10/#12/#13/#14 |
+| S5D-6 | `IndependentQaRunner` 两阶段集成 + `ASVS_QA_*` 配置 | ✅ | `apps/api/src/qa/independent-qa-runner.ts`、`config.ts`、`apps/api/.env.example` |
+| S5D-7 | 编排器 `qa_capture` / `qa_final`、早拦截、成功态补登 `capture_trace`、`latest-qa-report`、`POST /exports` 第 5 道门 | ✅ | `orchestrator-qa.test.ts`、`routes/orchestration-qa.test.ts`；`qa:verify` #5/#6/#15/#16/#17/#18 |
+| S5D-8 | HTTP 客户端 `getRunQaReport` / `getLatestQaReport` / `health.qa` | ✅ | `http-orchestration-client.test.ts` |
+| S5D-9 | 审核页 `QaReportPanel`（`React.lazy`）定位级报告 + 双端导出闸门 + 生产页 11 步 + 编辑器 `?scene=` | ✅ | `qa-gate3-real-flow.spec.ts` 4 条；`pnpm build && pnpm budget` 全部达标 |
+| S5D-10 | `pnpm qa:verify` 18 项验收脚本 + fixture QA 双桩 + 浏览器 E2E | ✅ | `qa:verify` 16 通过 / 2 跳过（本机无 tesseract）；E2E 4/4 |
+| S5D-11 | CI：capture 作业安装 `tesseract-ocr`、先跑 `qa:verify` 再跑 `gate2:verify`、上传 `dist/qa-verify/**` | ✅ | `.github/workflows/ci.yml` |
+
+**验收**：`pnpm qa:verify` **16 通过 / 0 失败 / 2 跳过**（#8/#9 真实 OCR；本机无 tesseract 时显式 SKIPPED，CI 安装后执行）；`pnpm gate2:verify` **19/19**（真实录屏 8/8 UI 断言 · 成片 h264+aac 13,483 ms −24.1 dB）；`pnpm export:verify` **20/20**（交付包 5 文件含 `qa_report`）；`pnpm orchestration:verify` **23/23**（5A 恢复零回归）；`nx run-many -t lint typecheck test` 15 项目 / 66 文件 / 579 用例全绿；`pnpm build && pnpm budget` 初始 **229.6 kB** gzip（预算 230）全部达标；`pnpm test:e2e` **53/53**。详见 [docs/16](16-QA-PRIVACY-GATE-SLICE.md) §6。
+
+**验收过程挖出的六个真实问题**（详见 docs/16 §5）：抽帧端点越界导致干净录屏被判 `execution_error`；receipt 路径约定混用让截图 / trace 静默漏扫；`fact.capture_provenance` 只读 `visual.assetId` 导致每次真实录屏都被误报「缺少素材绑定」；fixture QA 双桩缺 `verdict` 被 schema 拒绝；5D 的 Gate 5 让既有「导出就绪」种子缺 `qa_final` 报告而被 409；5C 的 Gate 2 演示确实是静止画面（技术 QA 判 `freeze_frame` 属真阳性，已改为真实操作）。前三项均为**产品缺陷**并各配回归用例。
+
+**Step 5D 边界**：不做 LLM 质量打分 / 视觉大模型审核（5E）；不做自动视频打码重编码；不做增量 / 局部重渲染（5F）；未改 `libs/render` / `workers/render-worker` / `studio-store`；未改 Step 2 的 `web-studio-tour.yaml`；无登录 / 多租户 / 云存储。
+
+---
+
 ## 8. Step 4 · 真实知识源（3–4 周，对应 WP-10 / WP-11）
 
 **目标**：把 README 里「GitHub OAuth / API / 仓库读取是本地确定性模拟」换成真实只读连接。

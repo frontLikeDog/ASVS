@@ -5,6 +5,7 @@ import {
   orchestrationArtifactV1Schema,
   orchestrationRunDetailV1Schema,
   orchestrationRunV1Schema,
+  qaReportV1Schema,
   type ExportBundleDetailV1,
   type OrchestrationArtifactKind,
   type OrchestrationRunDetailV1,
@@ -64,6 +65,18 @@ const latestArtifactResponseSchema = z.object({
   downloadUrl: z.string().min(1),
 });
 
+/**
+ * Step 5D report envelope. Both QA routes return it; the report itself is
+ * re-validated by `qaReportV1Schema`, so a server bug cannot hand the UI a
+ * `pass` verdict with blockers in it.
+ */
+const qaReportResponseSchema = z.object({
+  run: orchestrationRunV1Schema,
+  report: qaReportV1Schema,
+  reportArtifact: orchestrationArtifactV1Schema,
+  evidenceArtifacts: z.array(orchestrationArtifactV1Schema),
+});
+
 const exportBundleListResponseSchema = z.object({
   bundles: z.array(exportBundleDetailV1Schema),
 });
@@ -88,6 +101,16 @@ const healthResponseSchema = z.object({
       allowedOrigins: z.array(z.string()),
       defaultBaseUrl: z.string(),
       allowAutoServe: z.boolean(),
+      policyVersion: z.string(),
+    })
+    .optional(),
+  // Absent on a pre-5D server; `ocrConfigured: false` means image privacy
+  // scanning fails closed, which the review page must say out loud.
+  qa: z
+    .object({
+      enabled: z.boolean(),
+      ocrProvider: z.string(),
+      ocrConfigured: z.boolean(),
       policyVersion: z.string(),
     })
     .optional(),
@@ -318,6 +341,32 @@ export class HttpOrchestrationClient implements OrchestrationClientPort {
     return latestArtifactResponseSchema.parse(await response.json());
   }
 
+  async getRunQaReport(
+    workspaceId: string,
+    runId: string,
+    stage?: 'capture' | 'final',
+  ): Promise<z.infer<typeof qaReportResponseSchema> | null> {
+    const query = stage ? `?stage=${stage}` : '';
+    const response = await this.request(
+      this.url(workspaceId, `/runs/${encodeURIComponent(runId)}/qa-report${query}`),
+    );
+    if (response.status === 404) return null;
+    if (!response.ok) throw await readError(response);
+    return qaReportResponseSchema.parse(await response.json());
+  }
+
+  async getLatestQaReport(
+    workspaceId: string,
+    videoId: string,
+  ): Promise<z.infer<typeof qaReportResponseSchema> | null> {
+    const response = await this.request(
+      this.url(workspaceId, `/videos/${encodeURIComponent(videoId)}/latest-qa-report`),
+    );
+    if (response.status === 404) return null;
+    if (!response.ok) throw await readError(response);
+    return qaReportResponseSchema.parse(await response.json());
+  }
+
   async getHealth(): Promise<{
     configured: boolean;
     provider: string;
@@ -328,6 +377,12 @@ export class HttpOrchestrationClient implements OrchestrationClientPort {
       allowedOrigins: string[];
       defaultBaseUrl: string;
       allowAutoServe: boolean;
+      policyVersion: string;
+    };
+    qa?: {
+      enabled: boolean;
+      ocrProvider: string;
+      ocrConfigured: boolean;
       policyVersion: string;
     };
   }> {
@@ -342,6 +397,7 @@ export class HttpOrchestrationClient implements OrchestrationClientPort {
       synthetic: body.tts.synthetic,
       license: body.tts.license,
       ...(body.capture ? { capture: body.capture } : {}),
+      ...(body.qa ? { qa: body.qa } : {}),
     };
   }
 

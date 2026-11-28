@@ -41,12 +41,12 @@ function pendingApproval(approvalId: string): OrchestrationApprovalV1 {
 }
 
 describe('migration v7 · Gate 2 审批账本', () => {
-  it('迁移版本递增到 7 且保持幂等', () => {
+  it('迁移版本递增到最新且保持幂等', () => {
     const db = new DatabaseSync(':memory:');
-    expect(migrateDatabase(db)).toBe(7);
-    expect(migrateDatabase(db)).toBe(7);
+    expect(migrateDatabase(db)).toBe(MIGRATIONS.at(-1)!.version);
+    expect(migrateDatabase(db)).toBe(MIGRATIONS.at(-1)!.version);
     const version = db.prepare('PRAGMA user_version').get() as { user_version: number };
-    expect(version.user_version).toBe(7);
+    expect(version.user_version).toBe(MIGRATIONS.at(-1)!.version);
     db.close();
   });
 
@@ -67,7 +67,7 @@ describe('migration v7 · Gate 2 审批账本', () => {
        VALUES ('k', 'p', 'm', 'v', 'zh-CN', 1, 't', 2, '/tmp/a.wav', 's', 1, 1, 48000, 1, 'l', 1, ?, ?, 0)`,
     ).run(ISO, ISO);
 
-    expect(migrateDatabase(db)).toBe(7);
+    expect(migrateDatabase(db)).toBe(MIGRATIONS.at(-1)!.version);
     expect(tableNames(db)).toContain('orchestration_approvals');
     const row = db.prepare("SELECT cache_key FROM speech_cache WHERE cache_key = 'k'").get() as {
       cache_key: string;

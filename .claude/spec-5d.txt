@@ -1,0 +1,707 @@
+<system-reminder>
+You are operating in a git worktree.
+Worktree path: D:\devFile\C1\.claude\worktrees\qa-privacy-gate-28558f
+Worktree name: qa-privacy-gate-28558f
+</system-reminder>
+
+
+
+<pasted_content id="6961">
+# 16 · Step 5D 实施文档：独立 QA 与录屏隐私守门（WP-16 / AC-07）
+
+> 状态：**待实施（交接规格书 v1.0）**｜日期：2026-11-28｜基线提交：`main` @ `e22a086`（Step 5C 合并后）
+> 对应规范：[docs/02](02-PRODUCT-REQUIREMENTS-PRD.md)（AC-07 / AC-10）、[docs/06](06-AGENT-WORKFLOWS-AND-ORCHESTRATION.md)（§1–§3）、[docs/07](07-VIDEO-CAPTURE-RENDER-AND-EDITOR.md)（§2 / §9）、[docs/08](08-SECURITY-EVIDENCE-AND-ATVG2-INTEGRATION.md)（§6 / §9 用例 8）、[docs/09](09-IMPLEMENTATION-ROADMAP-AND-ACCEPTANCE.md)（WP-16）
+> 读者对象：接手实施 5D 的研发工程师或 Coding Agent。实施完成后请按 [docs/09 §11](09-IMPLEMENTATION-ROADMAP-AND-ACCEPTANCE.md) 补齐真实命令、退出码与产物哈希验收记录，并同步更新 [docs/10](10-NEXT-PHASE-PLAN.md) §7D。
+
+---
+
+## 1. 目标与范围
+
+### 1.1 产品目标（为什么做 5D）
+
+在 Step 5A–5C 之后，服务端已经能把已审批的 `DemoPlan` 录制成真实片段，并与旁白、SRT、Remotion 动效合成为可交付的 MP4 交付包。但目前仍存在三个高风险缺口：
+
+1. **生产者自证**：当前只有 `browser-worker` 和 `render-worker` 各自声称“已完成”，缺少一个**独立于录制与渲染步骤的 QA 门禁**对黑屏、静帧、音画同步、声明资格与产物一致性做二次复核。
+2. **AC-07 隐私缺口**：5C 仅在 `DemoPlan` Schema 层禁用了敏感 `fixtures` 键名，**从未扫描真实录屏帧、断言截图、`trace.zip` 网络/DOM 轨迹、SRT 或成片帧**。一旦演示页面中意外露出真实邮箱、GitHub PAT、Bearer Token、JWT 或 API Key，会被直接渲染进 MP4 甚至导出交付。
+3. **Gate 3 无法定位问题与证据**：审核页目前仍主要依赖浏览器本地模拟的 `buildReviewBundle`，`ReviewArtifactPanel` 只拉取 `succeeded` 运行的 MP4；当服务端 QA 拦截某次运行时，审核员既看不到阻断原因，也无法定位到具体镜头、时间点、证据帧或 Trace 条目。
+
+### 1.2 三大核心交付
+
+1. **独立的录屏 / 成片 QA 步骤**：在服务端编排 DAG 中新增两个显式独立步骤——`qa_capture`（录屏后置、TTS/渲染前置，早拦截省成本）与 `qa_final`（渲染后置、`register_artifacts` 前置，覆盖技术/事实/隐私/内容四维全量复核），产出绑定全部产物哈希的 `QaReportV1`。
+2. **AC-07 隐私扫描与硬阻断**：对录屏抽帧、成片逐镜抽帧、断言截图 PNG、Playwright `trace.zip`（DOM/网络/请求头/HTML/JSON/去重截屏帧）、SRT 字幕、镜头文案与 `demo-plan.json` 值执行邮箱 / Token / 密钥 / 私钥 / 敏感证件号扫描；命中即阻断运行与 Gate 3 导出，且**报告/日志/UI 严禁明文回显敏感原值**。
+3. **审核页 Gate 3 定位级 QA 报告展示与导出硬门禁**：无论最新运行成功还是被 QA 阻断，Gate 3 审核页都能加载最新 `QaReportV1`，按镜头分组定位问题与证据（时间点、步骤 ID、Trace 路径、脱敏片段、服务端打码证据帧内联预览、一键跳编辑器对应镜头），并在服务端 `POST /exports` 与前端「批准视频」按钮双端强制阻断。
+
+### 1.3 明确不做（5D 严格边界）
+
+以下事项**严禁在本切片中顺手实现**，避免范围失控与回归：
+
+- **不做 LLM 质量打分或视觉大模型审核**（[docs/07 §9](07-VIDEO-CAPTURE-RENDER-AND-EDITOR.md) 明确要求规则/媒体检测优先，不能用 LLM 评分替代确定性门禁；LLM 能力留待 5E）。
+- **不做自动视频打码重编码替换原片**（AC-07 在 5D 的闭环是「精准扫描 → 证据帧打码展示 → 阻断发布 → 引导脱敏数据重录/编辑」；自动追踪区域打码渲染留待后续）。
+- **不做增量 / 局部重渲染**（留待 5F）。
+- **不改动 `libs/render`、`workers/render-worker`、`libs/state/src/studio-store.ts` 模拟生产链路**。
+- **不改动 Step 2 资产**（`workers/browser-worker/plans/web-studio-tour.yaml` 的断言与既有页面文案逐字节保持不变）。
+- **不引入用户登录、多租户鉴权或云对象存储**。
+
+---
+
+## 2. 当前代码事实与工程红线（动工前必读）
+
+以下是基于基线提交 `e22a086` 核查到的真实代码现状，实施时必须严格对齐：
+
+### 2.1 关键现状
+
+| 模块 | 现有位置 | 当前事实与 5D 接入点 |
+|---|---|---|
+| 编排 DAG 契约 | [libs/domain/src/orchestration.ts](file:///d:/devFile/C1/libs/domain/src/orchestration.ts) | 当前固定 9 步：`freeze_input → verify_claims → plan_demo → capture_demo → prepare_media → synthesize_voice → generate_subtitles → render_video → register_artifacts`。未启用的步骤在创建时即标 `skipped`。 |
+| 编排器实现 | [apps/api/src/orchestration/orchestrator.ts](file:///d:/devFile/C1/apps/api/src/orchestration/orchestrator.ts) | `backfillCapture`（L2307–2451）在录屏成功时登记了 `capture_clip` / `capture_receipt` / `capture_screenshot`，但**未登记成功态的 `trace.zip`**（仅失败时 `registerCaptureEvidence` 登记了 `capture_trace`）。5D 必须在成功态补登 `capture_trace` 或由 `qa_capture` 校验并登记，确保 trace 必被扫描且可溯源。 |
+| 录屏 Worker | [workers/browser-worker/src/capture.ts](file:///d:/devFile/C1/workers/browser-worker/src/capture.ts) | 成功与失败均已生成 `trace.zip`（`screenshots: true, snapshots: true, sources: false`），且 `capture-receipt.json` 已记录 `trace`、`screenshots[]`、`steps[].screenshot`、`clip`。 |
+| SQLite 数据库 | [apps/api/src/db/database.ts](file:///d:/devFile/C1/apps/api/src/db/database.ts) | 当前 `PRAGMA user_version = 7`（v7 为 `orchestration_approvals`）。只允许追加迁移 v8，绝不修改 v1–v7。 |
+| HTTP 路由 | [apps/api/src/routes/orchestration.ts](file:///d:/devFile/C1/apps/api/src/routes/orchestration.ts) | `GET .../artifacts/:artifactId?inline=1`（L321）当前仅允许 `capture_screenshot` 的 PNG 内联并强制 `X-Content-Type-Options: nosniff`。5D 需把 `qa_evidence_frame` 加入同一 PNG 白名单。 |
+| Gate 3 导出校验 | `orchestrator.ts` `createExportBundle`（L829–994） | 当前校验 4 项（审批态、run 存在、scriptVersion、4 个文件重算 SHA256），**尚未校验 QA 报告**。 |
+| 审核页 Gate 3 UI | [libs/features/production-suite/src/review-page.tsx](file:///d:/devFile/C1/libs/features/production-suite/src/review-page.tsx) 与 [review-artifact-panel.tsx](file:///d:/devFile/C1/libs/features/production-suite/src/review-artifact-panel.tsx) | `ReviewArtifactPanel` 只调 `getLatestVideoArtifact`（只返回 `succeeded` 运行）。若最新运行被 QA 阻断，`ReviewPage` 目前看不到任何服务端 QA 报错。 |
+| 编辑器镜头定位 | [libs/features/video-studio/src/editor-page.tsx](file:///d:/devFile/C1/libs/features/video-studio/src/editor-page.tsx) | 当前未读取 URL `?scene=<sceneId>` 参数；5D 需补一个轻量 `useSearchParams()` 钩子以支持从 Gate 3 QA 报告直达具体镜头。 |
+| 现有脱敏参考 | [apps/api/src/github/redact.ts](file:///d:/devFile/C1/apps/api/src/github/redact.ts) & [libs/mock-services/src/review-service.ts](file:///d:/devFile/C1/libs/mock-services/src/review-service.ts) | 仅覆盖 GitHub 日志脱敏与前端文本模拟扫描；无录屏帧/截图/trace 扫描。 |
+| 种子数据实测 | `libs/mock-data/`、`apps/web-studio/src/`、`libs/features/` | 已验证内置种子数据与 UI 文案中**不存在任何真实或模拟邮箱/token 字面量**，默认严格隐私策略不会对正常 `web-studio` 录屏产生误报。 |
+
+### 2.2 四条不可突破的工程红线
+
+> [!CAUTION]
+> **红线 1 · Bundle 预算极度紧张（最容易翻车）**
+> 5C 实测见 [docs/15 §6](15-CAPTURE-GATE2-SLICE.md)：
+> - `initial` 初始 JS：**229.3 / 230 kB gzip**（**仅剩 0.7 kB 余量！**）
+> - `production` 路由：**22.6 / 24 kB gzip**（**仅剩 1.4 kB 余量！**）
+> - `review` 路由：**15.8 / 22 kB gzip**（余量 6.2 kB）
+>
+> **强制实施纪律**：
+> 1. 完整的 `QaReportV1` / `QaFindingV1` 等重 Zod Schema 放进独立的 `libs/domain/src/qa.ts`，**绝不**被 `libs/domain/src/orchestration.ts` 里的运行时 `orchestrationRunV1Schema` 整块引入（`OrchestrationRunV1` 只挂一个极轻量的可选 `qaSummary` 对象，约 10 行 Zod）。
+> 2. 隐私正则规则库与扫描逻辑放在 `apps/api/src/qa/`，**绝不放进 `libs/domain`**，零前端体积开销。
+> 3. `libs/adapters-http/src/http-orchestration-client.ts` 由 `libs/state/src/orchestration.ts` 动态 `import()`，在其内部校验 `qaReportV1Schema` 不会增加初始包体积。
+> 4. 审核页新增的 `QaReportPanel` 必须参照 `Gate2ApprovalPanel` 使用 `React.lazy(() => import('./qa-report-panel'))` 独立分包。
+
+> [!IMPORTANT]
+> **红线 2 · Nx 模块边界（CI 强制拦截）**
+> 见 [eslint.config.mjs](file:///d:/devFile/C1/eslint.config.mjs) 与 [scripts/check-boundary-guard.mjs](file:///d:/devFile/C1/scripts/check-boundary-guard.mjs)：
+> - `apps/api`（`type:api`）只能依赖 `type:domain`、`type:port`、`type:adapter`，**绝不能 import `workers/*` 或 `@asvs/state`**。
+> - `libs/domain`（`type:domain`）零依赖，且必须浏览器可用（**禁用 `node:crypto`、`node:fs`、`node:zlib`**，哈希一律用 `libs/domain/src/canonical.ts` 的 WebCrypto）。
+> - `libs/features/*`（`type:feature`）只能依赖 `ui`、`state`、`domain`、`port`，禁止直接 import `@asvs/adapters-http` 或 `@asvs/mock-services`。
+
+> [!IMPORTANT]
+> **红线 3 · Fail-Closed 与诚实边界**
+> - **未执行 OCR 绝不可宣称图像已通过隐私检查**：当存在真实录屏/截图/成片帧需要扫描，而 OCR 未配置或进程异常时，必须输出 `privacy.ocr_unavailable`（`severity: 'blocker'`）并阻断运行，绝不静默跳过或返回 `pass`。
+> - **反向泄密防护**：`qa-report.json`、SQLite `qa_reports`、事件日志、HTTP 响应、前端 DOM **严禁写入或展示命中的明文密钥/token/完整邮箱**，一律只保留掩码摘要（`matchRedacted`）与不可逆哈希（`matchSha256`）。
+> - **证据帧打码**：因隐私规则命中的视频帧/截图，服务端必须先经 `ffmpeg` 叠加脱敏遮罩后再作为 `qa_evidence_frame` 供 Gate 3 内联预览，严禁把未打码的泄密截图直接内联展示。
+
+> [!NOTE]
+> **红线 4 · 兼容现有 5A/5B/5C 测试双桩（避免假 MP4 字节炸毁旧单测）**
+> 现有 `orchestrator.test.ts`、`orchestrator-narration.test.ts`、`orchestrator-capture.test.ts` 和 `e2e-fixture-api.ts` 注入了假 `RenderJobExecutorPort`，写出的 `.mp4` 是普通文本（如 `'e2e-gate2-double-film'`）。因此 QA 执行必须抽象在 `QaRunnerPort` 端口之后：`buildApp` 默认注入真实的 `IndependentQaRunner`，而上述使用假 MP4 双桩的旧测试与 E2E fixture 可注入确定性 `QaRunnerPort` 双桩；真实 MP4 + 真实 `ffmpeg`/`ffprobe`/ZIP/OCR 全链路由 `pnpm qa:verify`、`pnpm gate2:verify`、`pnpm export:verify` 证明。
+
+---
+
+## 3. 架构设计与数据流
+
+### 3.1 11 步编排 DAG（在 5C 9 步基础上新增 2 步）
+
+```mermaid
+flowchart TD
+  S1[1. freeze_input] --> S2[2. verify_claims]
+  S2 --> S3[3. plan_demo<br/>未开录屏则 skipped]
+  S3 --> G2{Gate 2 审批}
+  G2 -->|批准| S4[4. capture_demo<br/>未开录屏则 skipped]
+  S4 --> S5[5. qa_capture ★新增<br/>录屏独立 QA + AC-07 隐私守门<br/>未开录屏则 skipped]
+  S5 -->|阻断 qa_privacy_blocked / qa_technical_blocked| FAIL1[Run = failed<br/>落盘 QaReportV1 + 打码证据帧<br/>零 TTS / 零 Remotion 开销]
+  S5 -->|通过| S6[6. prepare_media]
+  S6 --> S7[7. synthesize_voice<br/>关旁白则 skipped]
+  S7 --> S8[8. generate_subtitles<br/>关旁白则 skipped]
+  S8 --> S9[9. render_video]
+  S9 --> S10[10. qa_final ★新增<br/>成片全量独立 QA<br/>技术 / 事实 / 隐私 / 内容]
+  S10 -->|阻断| FAIL2[Run = failed<br/>落盘 QaReportV1 + 证据帧<br/>不登记可交付成片]
+  S10 -->|通过| S11[11. register_artifacts<br/>登记 MP4/SRT/manifest/receipt + qa_report + 证据帧]
+  S11 --> G3{Gate 3 审核页<br/>展示定位级 QA 报告}
+  G3 -->|批准 + 服务端复验 QA 通过且哈希一致| EXP[POST /exports 交付包<br/>含 MP4 + SRT + manifest + receipt + qa-report.json]
+```
+
+**为什么必须拆成 `qa_capture` + `qa_final` 两步而非仅在末尾做 1 步？**
+1. **早拦截止损**：若真实录屏的 `trace.zip`、截图或录屏帧已出现真实邮箱/token，`qa_capture` 在 `synthesize_voice`（可能产生外部 TTS 费用）和 `render_video`（Remotion 耗时 1–3 分钟）之前立即阻断，且泄密片段永远不会被渲染进成片。
+2. **全场景兜底**：当 `capture.enabled = false` 时（如仅用已有真实录屏资产或动效出片），`qa_capture` 创建即标 `skipped`（与 `plan_demo`/`capture_demo` 保持完全一致的零回归语义），而 `qa_final` **对每一次运行必跑**，统一检查成片 MP4 抽帧、已引用的既有真实录屏素材、SRT、镜头文案、黑屏/静帧、音画同步与 Claim 资格。
+
+### 3.2 产物目录布局
+
+在 5C 目录布局上新增 `qa/` 子目录（标 `★`）：
+
+```text
+<artifactDir>/workspaces/<workspaceId>/runs/<runId>/
+  input.json                      # 冻结渲染输入 + capture 溯源块
+  demo-plan.json                  # Gate 2 计划
+  capture/
+    capture-receipt.json
+    <assetId>.mp4
+    screenshots/*.png
+    trace.zip                     # 5D：成功态也登记为 capture_trace，并由 qa_capture 扫描
+  narration.json
+  subtitles.srt
+  artifacts/
+    <runId>.mp4
+    manifest.json
+    receipt.json
+  qa/                             # ★ 5D 独立 QA 工作与产物目录
+    qa-capture-report.json        # ★ qa_capture 阶段报告（QaReportV1, stage='capture'）
+    qa-final-report.json          # ★ qa_final 阶段报告（QaReportV1, stage='final'）
+    frames-tmp/                   # ★ 临时抽帧目录（步骤结束自动清理，仅保留命中证据帧，防磁盘膨胀）
+    evidence/
+      <findingId>.png             # ★ 命中证据帧（隐私命中为打码警示图；黑屏/静帧为带时间戳标注帧）
+```
+
+### 3.3 端口抽象（解耦编排器、OCR 引擎与测试双桩）
+
+参考 5B `SpeechPort` 与 5C `CaptureJobExecutorPort`，在 `libs/ports/src/qa.ts` 定义两个端口：
+
+1. **`ImageOcrPort`**：单张 PNG 图像文本提取接口
+   - `isConfigured(): boolean`
+   - `health(): QaOcrHealth`（`{ provider, configured, language }`）
+   - `extractText(imagePath: string, options?: { signal?: AbortSignal; timeoutMs?: number }): Promise<OcrExtractionResult>`
+   - 三种实现（位于 `apps/api/src/qa/`）：
+     - `TesseractCliOcrAdapter`（默认生产实现）：`spawn('tesseract', [imagePath, 'stdout', '-l', lang, '--psm', '6'], { shell: false, windowsHide: true })`，零 npm 体积膨胀、零网络访问、单帧 1080p 约 150–350ms。
+     - `DeterministicTestOcrAdapter`（离线测试实现）：优先读取同路径旁路文件 `<imagePath>.ocr.txt` 或按注入的 fixture 映射表返回确定性文本，无旁路文件时返回空文本。`synthetic: true` 会在 `QaReportV1.coverage` 中明确标注「测试 OCR」，绝不冒充真实 OCR。
+     - `UnconfiguredOcrAdapter`：`isConfigured() === false`，调用 `extractText` 直接抛出 `QaOcrUnavailableError`（触发 fail-closed）。
+2. **`QaRunnerPort`**：独立 QA 执行端口
+   - `runCaptureQa(input: CaptureQaInput, callbacks?: QaRunnerCallbacks): Promise<QaRunOutcome>`
+   - `runFinalQa(input: FinalQaInput, callbacks?: QaRunnerCallbacks): Promise<QaRunOutcome>`
+   - `health(): QaHealth`
+   - `abort(): void`（中止进行中的 `ffmpeg`/`ffprobe`/`tesseract` 子进程，支撑 `Orchestrator.cancelRun` 与 `stop()`）
+   - `isRunning(): boolean`
+
+---
+
+## 4. 领域契约与数据库设计
+
+### 4.1 `libs/domain/src/qa.ts`（新增，全量 Zod 契约）
+
+> 注意：不要把以下重 Schema 静态引入 `orchestrationRunV1Schema`；只将极轻量的 `qaRunSummaryV1Schema` 引入 `orchestration.ts`。
+
+```ts
+export const QA_SCHEMA_VERSION = '1' as const;
+export const QA_POLICY_VERSION = 'qa-v1' as const;
+
+export const QA_STAGES = ['capture', 'final'] as const;
+export const QA_VERDICTS = ['pass', 'pass_with_warnings', 'fail'] as const;
+export const QA_CATEGORIES = ['privacy', 'technical', 'fact', 'content'] as const;
+export const QA_SEVERITIES = ['blocker', 'warning', 'info'] as const;
+
+export const QA_SOURCE_KINDS = [
+  'capture_frame',
+  'capture_screenshot',
+  'capture_trace',
+  'render_frame',
+  'subtitle_srt',
+  'scene_text',
+  'demo_plan',
+  'video_stream',
+  'audio_stream',
+  'claim_record',
+  'capture_receipt',
+] as const;
+
+export const QA_REMEDIATION_ACTIONS = ['editor', 'production', 'knowledge', 'none'] as const;
+```
+
+核心数据结构定义：
+
+1. **`QaLocationV1`**（精确定位到镜头与证据）：
+   - `scope`: `'scene' | 'global'`
+   - `sceneId?`: `string`（对应 `VideoProject.scenes[].id`）
+   - `sceneOrder?`: `number`（0-based，UI 显示 `第 sceneOrder + 1 镜`）
+   - `sceneTitle?`: `string`
+   - `timestampMs?`: `number`（在对应视频/片段中的毫秒时间点）
+   - `durationMs?`: `number`（异常持续时长，如黑屏/静帧持续毫秒数）
+   - `frameIndex?`: `number`（帧号）
+   - `stepId?`: `string`（DemoPlan 步骤 ID）
+   - `claimId?`: `string`
+   - `featureId?`: `string`
+   - `assetId?`: `string`
+   - `artifactId?`: `string`（关联的源产物 ID，如 `capture_screenshot`、`capture_trace`、`subtitles_srt`、`video_mp4`）
+   - `traceEntryPath?`: `string`（Trace 内部条目标识，如 `trace.network#42 (request.headers.authorization)` 或 `trace.trace#18`）
+   - `evidenceFrameArtifactId?`: `string`（指向登记的 `qa_evidence_frame` PNG 产物 ID，供 Gate 3 内联预览）
+
+2. **`QaFindingV1`**：
+   - `id`: `string`（如 `qaf_01`）
+   - `ruleId`: `string`（稳定机器码，见 §5 规则总表，如 `privacy.github_token`、`technical.black_frame`）
+   - `category`: `QaCategory`
+   - `severity`: `QaSeverity`
+   - `sourceKind`: `QaSourceKind`
+   - `title`: `string`（简洁产品语言标题，如「录屏截图中检测到疑似 GitHub Token」）
+   - `message`: `string`（具体说明，**严禁含原始敏感值**）
+   - `remediation`: `string`（明确可执行修复指引，如「请替换为脱敏测试账号后重新录屏」）
+   - `remediationAction`: `QaRemediationAction`
+   - `location`: `QaLocationV1`
+   - `matchRedacted?`: `string`（仅隐私/禁用词规则填写，如 `ghp_****9a2f`、`a***@corp.internal`）
+   - `matchSha256?`: `string`（原始命中字符串的 SHA256，用于审计与去重，不可逆推）
+   - `metrics?`: `Record<string, number | string | boolean>`（如 `{ blackDurationMs: 1450, meanVolumeDb: -92.3 }`）
+
+3. **`QaCheckSummaryV1`**（四维检查矩阵摘要，便于 Gate 3 顶部卡片直接渲染）：
+   - `category`: `QaCategory`
+   - `status`: `'pass' | 'warn' | 'fail'`
+   - `blockerCount`: `number`
+   - `warningCount`: `number`
+   - `infoCount`: `number`
+   - `summary`: `string`
+
+4. **`QaCoverageV1`**（诚实披露本次 QA 实际扫描了什么）：
+   - `scannedCaptureFrames`: `number`
+   - `scannedRenderFrames`: `number`
+   - `scannedScreenshots`: `number`
+   - `scannedTraceEntries`: `number`
+   - `skippedTraceStaticEntries`: `number`（跳过 JS/CSS/font 等静态打包资源的数量）
+   - `scannedScenes`: `number`
+   - `scannedSrtCues`: `number`
+   - `ocrProvider`: `string`（`'tesseract_cli' | 'deterministic_test' | 'unconfigured'`）
+   - `ocrExecuted`: `boolean`
+   - `ocrSynthetic`: `boolean`（`true` 时 UI 必须诚实标注「测试 OCR」）
+   - `allowlistedDomains`: `string[]`（若配置了允许的合成邮箱域名，公开披露）
+
+5. **`QaSubjectDigestsV1`**（强绑定哈希，防止旧报告冒充新成片）：
+   - `inputDigest`: `sha256`
+   - `scriptVersion`: `number`
+   - `capturePlanDigest?`: `sha256`
+   - `captureClipSha256?`: `sha256`
+   - `captureTraceSha256?`: `sha256`
+   - `mp4Sha256?`: `sha256`
+   - `srtSha256?`: `sha256`
+   - `manifestSha256?`: `sha256`
+
+6. **`QaReportV1`**（写入 `qa-capture-report.json` / `qa-final-report.json` 与 `qa_reports.payload`）：
+   - `schemaVersion`: `'1'`
+   - `kind`: `'asvs.qa-report'`
+   - `reportId`: `idSchema`（前缀 `qarep_`）
+   - `runId`, `workspaceId`, `projectId`, `videoId`: `idSchema`
+   - `stage`: `'capture' | 'final'`
+   - `policyVersion`: `'qa-v1'`
+   - `verdict`: `'pass' | 'pass_with_warnings' | 'fail'`
+   - `summary`: `{ totalFindings, blockerCount, warningCount, infoCount, privacyBlockerCount, technicalBlockerCount, factBlockerCount, contentBlockerCount }`
+   - `checks`: `QaCheckSummaryV1[]`（固定 4 项，覆盖 `privacy` / `technical` / `fact` / `content`）
+   - `findings`: `QaFindingV1[]`（按 `severity` 降序：`blocker → warning → info`，同级别按 `sceneOrder`、`timestampMs` 升序）
+   - `coverage`: `QaCoverageV1`
+   - `subject`: `QaSubjectDigestsV1`
+   - `durationMs`: `number`
+   - `createdAt`: `isoDateSchema`
+   - **Zod `superRefine` 不变量（必须硬约束）**：
+     - `blockerCount > 0` 时 `verdict` **必须**为 `'fail'`；
+     - `blockerCount === 0 && warningCount > 0` 时 `verdict` **必须**为 `'pass_with_warnings'`；
+     - `blockerCount === 0 && warningCount === 0` 时 `verdict` **必须**为 `'pass'`；
+     - 任一统计计数必须与 `findings` 实际计数精确一致，防止伪造通过报告。
+
+7. **`QaRunSummaryV1`**（轻量摘要，嵌入 `OrchestrationRunV1.qaSummary?`）：
+   ```ts
+   export const qaRunSummaryV1Schema = z.object({
+     reportId: idSchema,
+     stage: z.enum(['capture', 'final']),
+     verdict: z.enum(['pass', 'pass_with_warnings', 'fail']),
+     policyVersion: z.string().min(1),
+     reportArtifactId: idSchema.optional(),
+     blockerCount: z.number().int().nonnegative(),
+     warningCount: z.number().int().nonnegative(),
+     privacyBlockerCount: z.number().int().nonnegative(),
+     checkedAt: isoDateSchema,
+   });
+   ```
+
+### 4.2 `libs/domain/src/orchestration.ts` 增量改动
+
+| 枚举 / Schema | 新增项 | 说明 |
+|---|---|---|
+| `ORCHESTRATION_STEP_KEYS` & `ORCHESTRATION_STEPS` | `'qa_capture'`（位于 `capture_demo` 后、`prepare_media` 前，`executor: 'inline'`）、`'qa_final'`（位于 `render_video` 后、`register_artifacts` 前，`executor: 'inline'`） | DAG 变为 11 步；`qa_capture` 与 `plan_demo`/`capture_demo` 一同在 `capture.enabled=false` 时标为 `skipped` |
+| `ORCHESTRATION_FAILURE_CODES` | `'qa_privacy_blocked'`、`'qa_technical_blocked'`、`'qa_fact_blocked'`、`'qa_content_blocked'`、`'qa_ocr_unavailable'`、`'qa_execution_failed'` | 除 `qa_execution_failed` 可酌情标记外，其余均为确定性阻断 `retryable: false` |
+| `ORCHESTRATION_ARTIFACT_KINDS` | `'qa_report'`、`'qa_evidence_frame'` | 均可经 `/artifacts/:id/download` 校验下载；`qa_evidence_frame`（PNG）允许 `?inline=1` |
+| `ORCHESTRATION_EVENT_TYPES` | `'qa'` | 用于运行日志事件流分类 |
+| `CHECKPOINT_PHASES` | `'qa_capture_checked'`、`'qa_media_checked'`、`'qa_privacy_scanned'`、`'qa_report_written'` | 崩溃恢复与 UI 进度标签 |
+| `OrchestrationRunV1` | `qaSummary: qaRunSummaryV1Schema.optional()` | 轻量摘要，向后兼容旧 run 行 |
+| `ExportBundleV1` | `qaReportArtifactId: idSchema.optional()`、`qaReportSha256: sha256Schema.optional()` | 可选字段，向后兼容已有 v6 `export_bundles` 旧行；5D 生成的新交付包必带 |
+
+### 4.3 SQLite 迁移 v7 → v8（`apps/api/src/db/database.ts`）
+
+追加 `version: 8` 迁移（不修改任何已有表）：
+
+```sql
+CREATE TABLE IF NOT EXISTS qa_reports (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL REFERENCES orchestration_runs(id) ON DELETE CASCADE,
+  workspace_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  video_id TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  verdict TEXT NOT NULL,
+  policy_version TEXT NOT NULL,
+  blocker_count INTEGER NOT NULL,
+  warning_count INTEGER NOT NULL,
+  privacy_blocker_count INTEGER NOT NULL,
+  report_artifact_id TEXT,
+  report_sha256 TEXT NOT NULL,
+  input_digest TEXT NOT NULL,
+  script_version INTEGER NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_qa_reports_workspace_video
+  ON qa_reports(workspace_id, video_id, created_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_reports_run_stage
+  ON qa_reports(run_id, stage);
+```
+
+新增 `apps/api/src/db/qa-report-store.ts`（`QaReportStore`）：
+- `upsert(report: QaReportV1, meta: { reportArtifactId?: string; reportSha256: string }): void`（使用 `ON CONFLICT(run_id, stage) DO UPDATE`，支持同一步骤重试后原子覆盖该阶段报告）
+- `getByRun(workspaceId: string, runId: string, stage?: QaStage): StoredQaReport | null`（默认优先返回 `final`，若运行在 `qa_capture` 阻断则返回 `capture`）
+- `findLatestByVideo(workspaceId: string, videoId: string): StoredQaReport | null`（按 `created_at DESC` 取最近一份，**不限于 `run.status = 'succeeded'`**）
+- `listByRun(workspaceId: string, runId: string): StoredQaReport[]`
+
+---
+
+## 5. 核心引擎实施细则
+
+建议在 `apps/api/src/qa/` 下组织独立 QA 模块，清晰分层：
+
+```text
+apps/api/src/qa/
+  index.ts                 # 导出与工厂 createQaRunner(config)
+  privacy-scanner.ts       # 敏感模式规则库 + 校验位验证 + 脱敏掩码 + 文本扫描
+  zip-reader.ts            # 基于 node:zlib 的安全 ZIP 读取器（防 zip-bomb / 路径穿越）
+  trace-scanner.ts         # Playwright trace.zip 解析、静态资源降噪、步骤映射与扫描
+  ocr-adapters.ts          # TesseractCliOcrAdapter / DeterministicTestOcrAdapter / UnconfiguredOcrAdapter
+  frame-extractor.ts       # ffmpeg 抽帧 + 证据帧脱敏遮罩/标注绘制
+  media-qa.ts              # ffmpeg 解码 / ffprobe / blackdetect / freezedetect / volumedetect
+  scene-mapper.ts          # 冻结分镜帧时间轴 ↔ timestampMs ↔ sceneId 精确映射
+  fact-content-qa.ts       # Claim 资格、录屏溯源五方哈希、禁用词、品牌/文案检查
+  independent-qa-runner.ts # 实现 QaRunnerPort，编排 qa_capture 与 qa_final 并输出 QaReportV1
+```
+
+### 5.1 敏感信息扫描引擎（`privacy-scanner.ts` · AC-07）
+
+#### 规则总表（全部为 `category: 'privacy'`、`severity: 'blocker'`）
+
+| `ruleId` | 检测目标 | 正则 / 判定逻辑 | 脱敏输出示例 (`matchRedacted`) |
+|---|---|---|---|
+| `privacy.email` | 邮箱地址 | `/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\b/g`；后缀 TLD 长度 2–24 字母；若域名命中配置的 `allowlistedDomains` 则豁免并计入 `coverage.allowlistedDomains`（默认空，零豁免） | `a***@corp.internal` |
+| `privacy.github_token` | GitHub PAT / App Token | `/\b(?:ghp\|gho\|ghu\|ghs\|ghr)_[A-Za-z0-9_]{20,}\b/g`、`\bgithub_pat_[A-Za-z0-9_]{20,}\b` | `ghp_****9a2f` |
+| `privacy.api_key` | 主流云/AI/支付 API Key | OpenAI `sk-(?:proj-)?[A-Za-z0-9_-]{20,}`；Anthropic `sk-ant-[A-Za-z0-9_-]{20,}`；AWS `AKIA[0-9A-Z]{16}`；Google `AIza[0-9A-Za-z_-]{35}`；Stripe `(?:sk\|rk)_live_[A-Za-z0-9]{16,}`；Slack `xox[baprs]-[A-Za-z0-9-]{10,}` | `sk-****3f91` / `AKIA****7Q2X` |
+| `privacy.jwt` | JWT 令牌 | `/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g`（且前两段 base64url 解码以 `{` 开头，彻底消除误报） | `eyJ****.****.****` |
+| `privacy.bearer_or_cookie` | HTTP Bearer 认证头 / Session Cookie | `/\bBearer\s+[A-Za-z0-9._~+/-]{16,}\b/gi`；`/(?:^\|[\r\n])\s*(?:cookie\|set-cookie)\s*:\s*[^\r\n]*(?:session\|token\|auth\|jwt\|sid)[^\r\n]*/gi` | `Bearer ****8c1d` / `Cookie: [REDACTED]` |
+| `privacy.private_key` | PEM 私钥头 | `/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g` | `-----BEGIN PRIVATE KEY [REDACTED]-----` |
+| `privacy.secret_assignment` | 键值对形态凭证（如 URL query / JSON / 表单） | `/(?:\b(?:password\|passwd\|secret\|api[_-]?key\|access[_-]?token\|refresh[_-]?token\|private[_-]?key\|client[_-]?secret)\b)\s*[:=]\s*["']?([A-Za-z0-9._/+=-]{8,})["']?/gi`（忽略明显占位符如 `undefined`/`null`/`true`/`false`/`[REDACTED]`） | `api_key=****e41b` |
+| `privacy.sensitive_number` | 身份证号 / 银行卡号 | 18 位中国居民身份证号（正则 + **GB 11643 校验位精确验证**）；13–19 位纯数字/分隔银行卡号（**Luhn 算法校验通过**且非全 0/递增假号，大幅降低长订单号/时间戳误报） | `1101****123X` / `6222****8841` |
+| `privacy.ocr_unavailable` | OCR 未执行（fail-closed） | 当存在需要 OCR 的录屏帧或截图但 `ImageOcrPort` 未配置/超时/退出非 0 时触发 | 无 |
+
+#### 反向泄密硬性约束
+- `redactMatch(ruleId, raw)` 必须保证**任何规则都不保留超过 4 个前缀字符 + 4 个后缀字符**，且若原串长度 ≤ 8 则整体替换为 `[REDACTED]`。
+- `scanText(text, context)` 内部立刻丢弃 `raw` 字符串，只向上游返回 `{ ruleId, matchRedacted, matchSha256 }`。单元测试必须断言：序列化后的 `QaReportV1` JSON 字符串**绝不包含**测试注入的原始邮箱、原始 token 或原始密钥！
+
+### 5.2 Playwright `trace.zip` 安全解析与扫描（`zip-reader.ts` + `trace-scanner.ts`）
+
+#### 安全 ZIP 读取器（`zip-reader.ts`）
+使用 Node 内置 `node:zlib`（`inflateRawSync`）实现纯 TS ZIP 读取器（支持 Method 0 Stored 与 Method 8 Deflate，覆盖 100% Playwright `trace.zip`），无需新增原生或第三方依赖，且必须内置四重安全上限：
+- `maxEntries`: `2000`
+- `maxEntryUncompressedBytes`: `10 * 1024 * 1024`（10 MB）
+- `maxTotalUncompressedBytes`: `100 * 1024 * 1024`（100 MB）
+- 路径规范化检查：拒绝包含 `..`、绝对路径或空字节的条目名；任一超限均抛出结构化安全异常（不崩溃 API 进程）。
+
+#### Trace 精确扫描策略与降噪（关键避坑点！）
+Playwright `trace.zip` 包含 `vite preview` 提供的第三方前端打包 JS/CSS，**严禁无差别扫描全部条目**，否则第三方库的 license 邮箱或混淆代码会引发大量误报。必须按以下精确分层扫描：
+
+1. **`*.trace`（NDJSON）**：逐行解析事件：
+   - 动作事件（`before`/`action`）：检查 `params.url`、`params.value`（表单输入值）、`params.text`、`title`、`apiName`；并建立时间区间索引 `[startTime, endTime] → stepId/actionName`。
+   - DOM 快照事件（`frame-snapshot`）：提取 `snapshot.html` 中的文本节点与 `input`/`textarea` 的 `value` 属性值，送入 `privacy-scanner`。
+   - `console` / `error` 事件：扫描日志文本与错误消息。
+   - `screencast-frame` 事件：收集引用的 `resources/<sha1>.jpeg`，按哈希去重后取代表帧（受 `maxTraceFrames` 限制，默认 12 帧，均匀抽样）送入 `ImageOcrPort`。
+2. **`*.network`（NDJSON）**：逐行解析每个 HTTP `resourceSnapshot`：
+   - **必扫**：`request.url`（含 query string）、`request.headers`（重点 `authorization`、`cookie`、`x-api-key`、`x-auth-token`）、`request.postData.text`、`response.headers`（重点 `set-cookie`）。
+   - **响应体筛选**：依据 `response.content.mimeType` 决定是否扫描 `resources/<_sha1>`：
+     - **扫描白名单**：`text/html`、`application/json`、`text/plain`、`application/xml`、`text/xml`、`image/svg+xml`。
+     - **明确跳过（记入 `coverage.skippedTraceStaticEntries`）**：`application/javascript`、`text/javascript`、`text/css`、`font/*`、`application/wasm`、`video/*`、`audio/*`。
+3. **定位映射**：每条来自 `trace.zip` 的 Finding 必须携带 `traceEntryPath`（如 `trace.network#14 (request.headers.authorization)` 或 `trace.trace#82 (snapshot)`）、对应的 `artifactId`（`capture_trace`）、按时间戳关联的 `stepId`、以及引用该 `captureAssetId` 的 `sceneId` / `sceneOrder`。
+
+### 5.3 视频抽帧、OCR 与打码证据帧（`frame-extractor.ts` + `ocr-adapters.ts`）
+
+#### 确定性抽帧策略（全部经 `ffmpeg` async `spawn`，`shell: false`）
+1. **`qa_capture` 阶段（扫描 `capture_clip` MP4 + 断言截图 PNG）**：
+   - 全部 `capture/screenshots/*.png` **逐张必扫**（同时解析 PNG `tEXt` / `iTXt` / `zTXt` 文本元数据 chunk，防隐写泄露！），通过 `capture-receipt.json` 的 `steps[].screenshot` 绑定 `stepId` 与 `startedAtMs`。
+   - 对 `capture_clip` MP4 按 `1 fps`（`ffmpeg -i <clip> -vf fps=1 ...`）+ 首帧 + 尾帧抽帧，上限 `maxFrames`（默认 30 帧，超长片段等间隔自适应步长）。
+2. **`qa_final` 阶段（扫描最终成片 `video_mp4`）**：
+   - 按冻结 `input.json` 中每个镜头的帧区间 `[startMs, endMs]`：
+     - 非 `real_demo` 镜头（`title` / `motion` / `cta` / `generated`）：每镜固定抽取 3 帧（15% / 50% / 85% 位置）。
+     - `real_demo` 镜头：每秒 1 帧（或受 `maxFrames` 上限等间隔覆盖，默认总上限 60 帧）。
+   - 若该运行跳过了 `qa_capture`（例如 `capture.enabled = false` 但工作区引用了已有 `Asset.mock === false` 的真实录屏），`qa_final` 还要扫描该真实素材指向的 `captureReceiptRef` 对应的截图与 `trace.zip`（若存在）。
+3. **帧去重与清理**：对抽出的 PNG 计算 SHA256，相同帧只跑一次 OCR；QA 步骤结束后删除 `qa/frames-tmp/`，只把命中 Finding 的帧转存到 `qa/evidence/<findingId>.png`。
+
+#### 隐私证据帧打码策略（防止「展示证据导致二次泄密」）
+- 当某帧/截图命中**隐私规则**（`category === 'privacy'`）时：
+  - 使用 `ffmpeg` 将该 PNG 渲染为**脱敏警示证据帧**（对主体内容施加 `boxblur=18:3` 强模糊，并在底部叠加半透明警示栏或边框，如 `drawbox=x=0:y=0:w=iw:h=ih:color=red@0.8:t=8`；注意不依赖外部字体文件，仅用 `boxblur` + `drawbox` 滤镜即可跨 Windows/Linux 100% 稳定运行！）。
+  - 将脱敏后的 PNG 落盘为 `qa/evidence/<findingId>.png`，登记为 `qa_evidence_frame` 产物，并在 `Finding.location.evidenceFrameArtifactId` 中引用。
+  - **原图绝不作为 `qa_evidence_frame` 暴露给前端内联预览**。
+- 当某帧命中**技术异常**（如黑屏 `technical.black_frame`、静帧 `technical.freeze_frame`）时：
+  - 直接将该时刻截取的 PNG（可叠加红色边框 `drawbox`）落盘为 `qa/evidence/<findingId>.png`，供审核员直观确认黑屏/卡死现场。
+
+### 5.4 技术 / 事实 / 内容 QA 检查器
+
+#### 技术 QA（`media-qa.ts`）
+全部在 `qa_capture`（针对 `capture_clip`）和 `qa_final`（针对最终 `video_mp4` + `subtitles.srt` + `manifest.json`）独立重跑，**不信任 worker 上报的 JSON 字段**：
+
+1. **`technical.video_decodable`（blocker）**：`ffmpeg -v error -i <file> -f null -`，退出码非 0 或 stderr 非空即阻断。
+2. **`technical.probe_mismatch`（blocker）**：独立执行 `ffprobe` 复核 `h264`、16:9 尺寸、`fps`（容差 0.05）、`durationMs`（容差 250ms）、`frameCount` 以及磁盘文件 SHA256 与 `manifest.json`/`receipt.json` 一致。
+3. **`technical.black_frame`**：执行 `ffmpeg -i <file> -vf blackdetect=d=0.3:pix_th=0.10 -f null -`，解析 stderr 中每条 `black_start:X black_end:Y black_duration:Z`：
+   - 单段连续黑屏 `>= ASVS_QA_BLACK_BLOCK_MS`（默认 `1000ms`）或累计覆盖某镜头 ≥ 50% 时长 → **`blocker`**；
+   - `300ms <= duration < 1000ms` → **`warning`**；
+   - 按 `scene-mapper.ts` 精确映射到对应 `sceneId` / `sceneOrder`，并在 `(black_start + black_end) / 2` 截取证据帧登记为 `qa_evidence_frame`。
+4. **`technical.freeze_frame`**（**仅作用于 `capture_clip` 及 `real_demo` 镜头区间**，避免对 `title`/`cta` 静态动效板误报）：
+   - 执行 `ffmpeg -i <clip> -vf freezedetect=n=-60dB:d=3 -f null -`，解析 `freeze_start` / `freeze_end` / `freeze_duration`；
+   - 静帧持续 `>= ASVS_QA_FREEZE_BLOCK_MS`（默认 `6000ms` 或占片段总长 ≥ 80%）→ **`blocker`**；
+   - `>= 3000ms` → **`warning`**；截取中点证据帧。
+5. **`technical.audio_sync_and_level`（blocker/warning，启用旁白时必检）**：
+   - `ffprobe` 确认存在 `aac` 音轨、采样率 ≥ 22050Hz、1–2 声道、音画时长差 ≤ 500ms；
+   - `ffmpeg -af volumedetect` 确认 `mean_volume > -90 dB`（静音判 `blocker`）；若 `max_volume >= -0.1 dB` 产出爆音削波 `warning`。
+6. **`technical.subtitle_valid`（blocker，启用旁白时必检）**：
+   - 重新读取磁盘 `subtitles.srt`，校验 SHA256 与 `manifest.subtitles.sha256` 一致，并调用 `@asvs/domain` 的 `parseAndValidateSrt(onDisk, { totalDurationMs })`。
+
+#### 事实 QA（`fact-content-qa.ts`）
+1. **`fact.claim_eligibility`**：
+   - 从最新工作区快照读取当前视频引用的所有 `Claim` / `Feature`，逐条按所属 `sceneId` 复检：
+     - 调用 `evaluateClaimGate`：`blocked_unverified`（AC-03）/ `blocked_stale`（AC-09）/ `blocked_rejected` → **`blocker`**（定位到引用该 Claim 的每一个具体 `sceneId`！）。
+     - `needs_qualification`：检查对应镜头文案是否命中夸大词（`已上线|全面上线|现已上线|正式上线|全量可用|已全量开放`）→ **`blocker`**；是否缺少限定词 → **`blocker`**；已包含限定词 → **`warning`**（提醒审核员确认范围表述）。
+2. **`fact.capture_provenance`**：
+   - 遍历冻结分镜中所有 `real_demo` 镜头：
+     - 若 `asset.mock === true`（占位素材）→ 产出 **`warning`**（诚实提示该镜头仍为占位画面，尚未接入真实录屏）。
+     - 若 `asset.mock === false`（真实录屏）→ 独立复核 `capture-receipt.json`（`assertions.total >= 1 && assertions.failed === 0`）、磁盘 clip SHA256、`orchestration_approvals` 审批台账的 `approvedPlanDigest`（若本次运行含 Gate 2）以及 `manifest.json` 的素材哈希；任一不一致 → **`blocker`**。
+
+#### 内容与品牌 QA（`fact-content-qa.ts`）
+1. **`content.banned_phrase`（blocker）**：逐镜扫描 `title`/`narration`/`caption`/`notes` 是否包含 `video.brief.bannedPhrases`，精准定位到每个违规镜头。
+2. **`content.narration_and_caption`**：启用旁白但某镜旁白为空 → **`blocker`**；字幕为空 → **`warning`**。
+3. **`content.synthetic_voice_notice`（info/warning）**：若 `manifest.narration.synthetic === true`，写入一条 `info` 提醒「当前使用测试合成音轨，非真人商用配音」，与 5B 诚实标注保持一致。
+4. **`content.brand_kit`（warning）**：缺少品牌字标或 CTA 时输出提醒。
+
+### 5.5 镜头时间轴反查算法（`scene-mapper.ts`）
+
+```ts
+export interface SceneTimelineWindow {
+  sceneId: string;
+  sceneOrder: number;
+  sceneTitle: string;
+  visualType: string;
+  assetId?: string;
+  startMs: number;
+  endMs: number;
+  startFrame: number;
+  endFrame: number;
+}
+```
+
+- 直接消费冻结 `input.json` 中 `storyboard.scenes`（按 `order` 排序）与 `storyboard.fps`：
+  - `startFrame` 累加每个镜头的 `durationFrames`（经 5B `synthesize_voice` 延展后的最终冻结帧数！）
+  - `startMs = Math.round((startFrame / fps) * 1000)`，`endMs = Math.round((endFrame / fps) * 1000)`
+- `mapTimestampToScene(windows, timestampMs)` 返回满足 `startMs <= timestampMs < endMs` 的镜头（末尾边界钳位到最后一镜）。
+- `mapCaptureAssetToScenes(windows, assetId)` 返回引用该录屏 `assetId` 的所有 `real_demo` 镜头（用于把 `qa_capture` 阶段的截图/录屏帧/trace 问题同时关联到对应的分镜 `sceneId` 与 `sceneOrder`！）。
+
+---
+
+## 6. 编排器、API 路由与 Gate 3 强制门禁
+
+### 6.1 `Orchestrator` 改造要点（`apps/api/src/orchestration/orchestrator.ts`）
+
+1. **构造函数依赖注入**：`OrchestratorOptions` 新增 `qaRunner?: QaRunnerPort | null`、`qaReportStore?: QaReportStore | null`。
+2. **`createRun` 零回归**：
+   - 当 `capture.enabled === false` 时，`markCaptureStepsSkipped` 将 `['plan_demo', 'capture_demo', 'qa_capture']` 一并标为 `skipped`（`qa_final` 保持 `pending`，必跑）。
+3. **`backfillCapture` 补登 `trace.zip`**：
+   - 在 `registerCaptureArtifacts` 列表中新增 `capture_trace`（指向 `<outDir>/trace.zip`，`mimeType: 'application/zip'`），保证成功录屏的 trace 与截图/片段一起受控管理并供 `qa_capture` 扫描与溯源。
+4. **`executeInlineStep` 新增两个分支**：
+   - **`case 'qa_capture'`**：
+     - 读取 `capture-receipt.json`、`demo-plan.json`、`input.json` 与 `orchestration_artifacts` 中本次运行的 `capture_clip`/`capture_screenshot`/`capture_trace`。
+     - 调用 `qaRunner.runCaptureQa(...)`，将报告落盘 `<runDir>/qa/qa-capture-report.json`，登记 `qa_report` 与全部 `qa_evidence_frame` 产物，写入 `qa_reports` 表并更新 `run.qaSummary`。
+     - 若 `report.verdict === 'fail'`：按最高优先级阻断类别映射错误码（`privacyBlockerCount > 0` → `qa_privacy_blocked`，若存在 `privacy.ocr_unavailable` → `qa_ocr_unavailable`，否则 `qa_technical_blocked`），抛出 `new StepFailure(code, summaryMessage, false)`（终态失败，不进入 `prepare_media`/`synthesize_voice`/`render_video`）。
+   - **`case 'qa_final'`**：
+     - 读取 `artifacts/<runId>.mp4`、`artifacts/manifest.json`、`artifacts/receipt.json`、`subtitles.srt`（若有）、`input.json`、最新工作区快照与 `qa_capture` 报告（若有）。
+     - 调用 `qaRunner.runFinalQa(...)`，将报告落盘 `<runDir>/qa/qa-final-report.json`，登记 `qa_report` 与 `qa_evidence_frame`，写入 `qa_reports` 表并更新 `run.qaSummary`。
+     - 若 `report.verdict === 'fail'`：抛出对应 `StepFailure`（`qa_privacy_blocked` / `qa_ocr_unavailable` / `qa_technical_blocked` / `qa_fact_blocked` / `qa_content_blocked`，`retryable: false`），**阻止进入 `register_artifacts`**（因此不会暴露可交付 `video_mp4`，也不会令 `run.status = 'succeeded'`）。
+5. **`cancelRun` 与 `stop()`**：同步调用 `this.qaRunner?.abort()`，确保中止正在运行的 `ffmpeg`/`tesseract` 子进程。
+6. **`createExportBundle` 第 5 项硬门禁（Gate 3 服务端防绕过）**：
+   在校验完 `video_mp4` / `subtitles_srt` / `render_manifest` / `artifact_receipt` 哈希之后、落库 `export_bundles` 之前，强制校验：
+   1. `qaReportStore.getByRun(workspaceId, run.id, 'final')` 存在，且 `orchestration_artifacts` 中存在对应的 `qa_report` 产物；否则 `409 export_qa_missing`。
+   2. 调用 `rehashArtifact(workspaceId, qaReportArtifact)` 复算磁盘 `qa-final-report.json` SHA256，与 DB 与 `qa_reports.report_sha256` 逐字节一致；否则 `409 export_hash_mismatch`。
+   3. 用 `qaReportV1Schema.parse` 复读磁盘报告，校验：
+      - `report.verdict !== 'fail'` 且 `report.summary.blockerCount === 0` 且 `report.summary.privacyBlockerCount === 0`；否则 `409 export_qa_blocked`（`details` 带阻断列表摘要，不含敏感原文）。
+      - `report.subject.mp4Sha256 === verified.video_mp4.sha256`、`report.subject.manifestSha256 === verified.render_manifest.sha256`、且有字幕时 `report.subject.srtSha256 === verified.subtitles_srt.sha256`；否则 `409 export_qa_stale`。
+   4. 将 `qa_report` 加入交付包 `files` 数组（文件名 `${video.id}.qa-report.json`），并在 `ExportBundleV1` 中记录 `qaReportArtifactId` 与 `qaReportSha256`。
+
+### 6.2 HTTP API 变更清单
+
+| 方法与路径 | 用途 | 响应与错误码 |
+|---|---|---|
+| `GET /v1/health` | 扩展健康检查 | 新增 `qa: { enabled, ocrProvider, ocrConfigured, policyVersion }`（无路径、无凭证） |
+| `GET /v1/workspaces/:ws/orchestration/runs/:runId/qa-report` | 读取指定运行的最新 QA 报告（可选 `?stage=capture\|final`） | `200 { run, report, reportArtifact, evidenceArtifacts }`；无报告 `404 not_found`；磁盘篡改 `409 qa_report_tampered` |
+| `GET /v1/workspaces/:ws/orchestration/videos/:videoId/latest-qa-report` | **Gate 3 核心查询**：读取该视频最近一份 QA 报告（**包含因 QA 阻断而 `failed` 的运行**） | `200 { run, report, reportArtifact, evidenceArtifacts }`；无报告 `404 not_found`；磁盘篡改 `409 qa_report_tampered` |
+| `GET /v1/workspaces/:ws/orchestration/artifacts/:artifactId?inline=1` | 内联预览扩展 | `isPng` 条件扩展为 `(artifact.kind === 'capture_screenshot' \|\| artifact.kind === 'qa_evidence_frame') && artifact.mimeType === 'image/png' && /\.png$/i.test(artifact.fileName)`；保留 `X-Content-Type-Options: nosniff` |
+| `POST /v1/workspaces/:ws/orchestration/exports` | Gate 3 交付包硬门禁扩展 | 新增 `409 export_qa_missing` / `409 export_qa_blocked` / `409 export_qa_stale`；成功时 `files` 含 `qa-report.json` |
+
+### 6.3 服务端环境变量（`apps/api/src/config.ts` & `apps/api/.env.example`）
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `ASVS_QA_ENABLED` | `true` | 是否启用独立 QA；设为 `false` 时 `qa_capture`/`qa_final` 不会静默通过，仍按策略在健康检查中标明 |
+| `ASVS_QA_OCR_PROVIDER` | `tesseract_cli` | 可选：`tesseract_cli` / `deterministic_test` / `unconfigured`（设为 `unconfigured` 时图像扫描 fail-closed） |
+| `ASVS_QA_TESSERACT_BIN` | `tesseract` | Tesseract 可执行文件名或路径 |
+| `ASVS_QA_OCR_LANG` | `eng` | OCR 语言包（邮箱/token/API Key/JWT/卡号均为 ASCII，默认 `eng` 速度快且识别率最高） |
+| `ASVS_QA_OCR_TIMEOUT_MS` | `15000` | 单张图 OCR 超时毫秒数（1000–120000） |
+| `ASVS_QA_MAX_FRAMES` | `40` | 单次 QA 步骤最大抽帧数（5–200），防长视频资源耗尽 |
+| `ASVS_QA_BLACK_BLOCK_MS` | `1000` | 连续黑屏判 `blocker` 阈值（毫秒） |
+| `ASVS_QA_FREEZE_BLOCK_MS` | `6000` | 录屏连续静帧判 `blocker` 阈值（毫秒） |
+| `ASVS_QA_PRIVACY_ALLOWLIST_DOMAINS` | 空 | 逗号分隔的显式豁免测试邮箱域名（如 `example.invalid`）；空表示零豁免 |
+
+---
+
+## 7. 前端实施细则（Gate 3 定位级 QA 报告 + 预算守卫）
+
+### 7.1 模块拆分与 Bundle 预算保障
+
+| 文件 | 加载方式 | 预算影响 |
+|---|---|---|
+| `libs/domain/src/qa.ts` | 仅被 `apps/api` 与 `libs/adapters-http`（动态 chunk）运行时导入；UI 文件只做 `import type` | **初始 JS +0 kB** |
+| `libs/domain/src/orchestration.ts` | 新增 2 个步骤、错误码与 10 行 `qaRunSummaryV1Schema` | 初始 JS < +0.3 kB（需 `pnpm build && pnpm budget` 实测确认 ≤ 230 kB） |
+| `libs/ports/src/orchestration-client.ts` | 纯 TypeScript 类型（新增 `getRunQaReport` / `getLatestQaReport`） | **0 kB** |
+| `libs/adapters-http/src/http-orchestration-client.ts` | 已被 `libs/state/src/orchestration.ts` 懒加载 | **初始 JS +0 kB** |
+| `libs/features/production-suite/src/qa-report-panel.tsx`（新） | 在 `review-page.tsx` 通过 `React.lazy(() => import('./qa-report-panel'))` 独立分包 | **不计入 Review 静态首包**，且 chunk 体积预计 ~4–6 kB gzip |
+| `libs/features/production-suite/src/server-orchestration.ts` | 仅增加 `qa_capture`/`qa_final` 两条步骤定义与 4 个 checkpoint 中文标签 | Production 路由 < +0.3 kB（守住 24 kB） |
+| `libs/features/video-studio/src/editor-page.tsx` | 读取 `?scene=<sceneId>` 约 8 行代码 | Editor 路由 < +0.1 kB |
+
+### 7.2 审核页 Gate 3 交互与信息架构
+
+#### 数据加载与 Gate 3 联动（`review-page.tsx` + `review-artifact-panel.tsx`）
+1. 在 `ReviewPage` 中（当 `syncConfig.enabled` 时），拉取 `client.getLatestQaReport(workspaceId, videoId)`（**独立于 `getLatestVideoArtifact`**，这样即使最新运行在 `qa_capture` 或 `qa_final` 失败、没有新 MP4，Gate 3 依然展示这份阻断报告！）。
+2. 将服务端 QA 判定合并进 Gate 3 审批守门：
+   - 定义 `serverQaBlocked`：`latestQa !== null && latestQa.report.verdict === 'fail'`。
+   - 定义 `serverQaStale`：`latestQa !== null && latestQa.report.subject.scriptVersion !== video.scriptVersion`。
+   - **当 `serverQaBlocked === true` 时**：
+     - 顶部检查总览明确计入阻断（提示「服务端独立 QA 阻断：N 项阻断（含 M 项 AC-07 隐私守门）」）；
+     - 顶部与右侧「批准视频」按钮均 `disabled`，并在按钮下方说明「服务端独立 QA 未通过，必须修复阻断项并重新运行后才能批准」；
+     - `ReviewArtifactPanel` 的「生成交付包」按钮同步禁用（即便本地曾批准过旧版本，服务端 `POST /exports` 也会以 `409 export_qa_blocked` 兜底拒绝）。
+   - **当未连接服务端或该视频从未跑过服务端运行时**：
+     - 保持诚实提示（「当前未连接服务端独立 QA，下方检查仅覆盖浏览器内文案模拟扫描，不含录屏帧/截图/trace 隐私扫描」），不破坏现有本地离线审核体验与既有 E2E 用例（`review.spec.ts`）。
+
+#### `QaReportPanel` 展示结构（`libs/features/production-suite/src/qa-report-panel.tsx`）
+1. **报告头与总览条**：
+   - 判定徽章：`通过`（success）/ `通过 · 有提醒`（warn）/ `已阻断`（danger）
+   - 阶段标识：`成片独立 QA` 或 `录屏前置 QA（AC-07）`、关联 `runId`、脚本版本 `vN`（若与当前视频版本不符，显示醒目 `已过期` 警告徽章）
+   - 扫描覆盖条：`录屏帧 X · 成片帧 Y · 截图 Z · Trace 条目 W · OCR: Tesseract / 测试 OCR`（测试 OCR 必带 `warn` 徽章）
+   - 「下载 `qa-report.json`」按钮（经 `downloadVerifiedArtifact` 做 WebCrypto SHA256 校验后保存）
+2. **四维状态摘要 + 筛选条**：
+   - 4 个维度的状态胶囊：`隐私守门 (AC-07)`、`技术 QA`、`事实与声明`、`内容与品牌`，各自展示阻断/提醒计数。
+   - 筛选器：`全部` / `仅阻断` / `仅提醒` + 按维度切换。
+3. **按镜头分组的问题定位列表（核心交付）**：
+   - 先展示 `全局 / 成片级` 问题（若有），再按 `video.scenes` 顺序仅展开或高亮存在 Finding 的镜头（也可切「查看全部镜头」确认哪些镜头 0 问题）：
+     - 镜头头：`第 {order + 1} 镜 · {sceneTitle}` · 镜头时间窗 `00:06–00:18` · 该镜阻断/提醒计数徽章。
+     - 单条 Finding 卡片：
+       - 严重度徽章 + 维度标签 + 等宽 `ruleId`
+       - 标题、说明与修复建议（`remediation`）
+       - **精确定位元数据行**：时间点（`00:12.400` · 若有持续时长显示 `持续 1.4s`）、帧号、来源类型中文标签（`录屏帧`/`断言截图`/`Playwright Trace`/`成片帧`/`SRT 字幕`/`镜头文案`）、`stepId`、`traceEntryPath`、`claimId`
+       - **脱敏证据块**：存在 `matchRedacted` 时以等宽危险/警告样式框展示掩码片段（例如 `命中样本（已脱敏）：ghp_****9a2f · SHA256 9f2c...`）
+       - **可视化证据帧**：存在 `location.evidenceFrameArtifactId` 时，渲染内联缩略图 `<img src={client.artifactInlineUrl(ws, id)} />`（隐私命中帧旁显式标注「证据帧已服务端模糊脱敏」），点击可在 `@asvs/ui` `Dialog` 中放大查看，并提供校验下载按钮
+       - **一键直达修复**：
+         - `remediationAction === 'editor'` → `<Link to={`/videos/${video.id}/editor?scene=${finding.location.sceneId}`}>定位到第 N 镜</Link>`
+         - `remediationAction === 'production'` → `<Link to={`/videos/${video.id}/production`}>去生产监控重录</Link>`
+         - `remediationAction === 'knowledge'` → `<Link to={`/projects/${project.id}/knowledge`}>去知识中心核验</Link>`
+
+### 7.3 生产监控页轻量增强（`server-orchestration-panel.tsx`）
+
+- DAG 步骤列表自动展示 11 步（`qa_capture` 与 `qa_final`，未开录屏时 `qa_capture` 显式标「已跳过」）。
+- 当运行因 `qa_*` 失败时，失败 Callout 内增加「前往审核页查看定位报告 →」按钮（链接 `/videos/${videoId}/review`），形成「生产监控发现阻断 → 审核页定位具体镜头与证据 → 编辑器/重录修复」完整闭环。
+
+---
+
+## 8. 分步实施计划（Task Breakdown）
+
+建议按以下顺序推进，每一步都有独立单测护栏：
+
+| 编号 | 工作项 | 涉及 Nx 项目与主要文件 | 依赖 | 完成标志（单测/校验） |
+|---|---|---|---|---|
+| **S5D-1** | 领域 QA 契约与编排步骤扩展 | `libs/domain/src/qa.ts`（新）、`orchestration.ts`、`index.ts`、`qa.test.ts`（新） | 无 | Zod `superRefine` 拒绝不自洽报告；11 步 DAG 与状态机单测全绿 |
+| **S5D-2** | 端口定义与 SQLite v8 迁移 | `libs/ports/src/qa.ts`（新）、`orchestration.ts`、`orchestration-client.ts`、`index.ts`；`apps/api/src/db/database.ts`、`qa-report-store.ts`（新）、`database-v8.test.ts`（新） | S5D-1 | v7→v8 升级保留全部旧表数据；`QaReportStore` upsert/按视频查最新单测通过 |
+| **S5D-3** | 敏感信息规则引擎与脱敏器 | `apps/api/src/qa/privacy-scanner.ts`（新）、`privacy-scanner.test.ts`（新） | S5D-1 | 覆盖 8 类敏感模式、身份证校验位、Luhn 算法、零明文回显断言、域名白名单 |
+| **S5D-4** | 安全 ZIP 解包器与 Trace 扫描器 | `apps/api/src/qa/zip-reader.ts`、`trace-scanner.ts`、`trace-scanner.test.ts`（新） | S5D-3 | 覆盖真实 Playwright `trace.zip` 结构、zip-bomb 防护、跳过 JS/CSS 降噪、命中 `Authorization`/DOM/query/screencast 帧定位 |
+| **S5D-5** | 抽帧、OCR 适配器、打码证据帧与媒体技术 QA | `apps/api/src/qa/ocr-adapters.ts`、`frame-extractor.ts`、`media-qa.ts`、`scene-mapper.ts`、`fact-content-qa.ts` + 对应单测 | S5D-3 | 真实 `ffmpeg` 生成黑屏/正常测试 MP4，验证 `blackdetect`、`freezedetect`、抽帧、打码 PNG 与镜头时间映射；OCR unconfigured fail-closed 单测 |
+| **S5D-6** | `IndependentQaRunner` 集成 | `apps/api/src/qa/independent-qa-runner.ts`、`index.ts`、`independent-qa-runner.test.ts`（新）；`apps/api/src/config.ts`、`.env.example` | S5D-4, S5D-5 | 端到端产出 `QaReportV1`（`capture` 与 `final` 两阶段）与 `qa_evidence_frame` |
+| **S5D-7** | 编排器与 Gate 3 路由/导出硬门禁 | `apps/api/src/orchestration/orchestrator.ts`、`apps/api/src/routes/orchestration.ts`、`apps/api/src/app.ts`、`orchestrator-qa.test.ts`（新）、`routes/orchestration-qa.test.ts`（新） | S5D-2, S5D-6 | `qa_capture` 早阻断零 TTS/渲染、`backfillCapture` 补登 `capture_trace`、`latest-qa-report` 返回阻断报告、`POST /exports` 409 防绕过、旧 5A/5B/5C 单测零回归 |
+| **S5D-8** | HTTP 客户端适配器扩展 | `libs/adapters-http/src/http-orchestration-client.ts`、`http-orchestration-client.test.ts` | S5D-2, S5D-7 | `getRunQaReport` / `getLatestQaReport` / `getHealth().qa` 全量 Zod 校验单测通过 |
+| **S5D-9** | Web 审核页 Gate 3 QA 报告 + 生产页 11 步 + 编辑器 `?scene=` | `libs/features/production-suite/src/qa-report-panel.tsx`（新）、`review-page.tsx`、`review-artifact-panel.tsx`、`server-orchestration.ts`、`server-orchestration-panel.tsx`、`server-orchestration.test.ts`；`libs/features/video-studio/src/editor-page.tsx` | S5D-8 | `pnpm build && pnpm budget` **全部预算达标**（尤其 `initial <= 230 kB`、`production <= 24 kB`、`review <= 22 kB`） |
+| **S5D-10** | 真实端到端验收脚本与 Playwright E2E | `apps/api/src/scripts/verify-qa-privacy.ts`（新）、`apps/api/project.json`、`package.json`（`pnpm qa:verify`）；`apps/api/src/scripts/e2e-fixture-api.ts`、`apps/web-studio/e2e/qa-gate3-real-flow.spec.ts`（新） | S5D-7, S5D-9 | `pnpm qa:verify` 全部真实断言通过；`pnpm test:e2e` 全绿（含既有 49 条 + 新增 QA E2E） |
+| **S5D-11** | CI 集成与验收文档闭环 | `.github/workflows/ci.yml`、`docs/10-NEXT-PHASE-PLAN.md`、`docs/16-QA-PRIVACY-GATE-SLICE.md`（验收记录） | S5D-10 | CI `validate`/`render`/`capture`/`e2e` 全绿，上传 `dist/qa-verify/**` |
+
+---
+
+## 9. 测试与验收标准（Exit Gate）
+
+### 9.1 真实端到端验收脚本：`pnpm qa:verify`（必须真实执行，不 mock 核心扫描）
+
+在 `apps/api/src/scripts/verify-qa-privacy.ts` 实现，使用真实 SQLite、真实 `ffmpeg`/`ffprobe`、真实 ZIP 解包、真实 `tesseract` OCR（通过 `ffmpeg` 将测试文本绘制或用 Playwright 渲染含敏感信息的真实 HTML 截图/视频帧！）与真实 `IndependentQaRunner`，至少验证以下 **18 项断言**：
+
+| # | 场景 | 必须通过的断言 |
+|---|---|---|
+| 1 | 健康检查 | `GET /v1/health` 返回 `qa.enabled=true`、`qa.ocrProvider='tesseract_cli'`、`qa.ocrConfigured=true`、`qa.policyVersion='qa-v1'` |
+| 2 | 正常真录屏 + 真渲染 | 干净录屏 + 旁白 + 渲染 → `qa_capture` 与 `qa_final` 均为 `succeeded`，`verdict` 为 `pass` 或 `pass_with_warnings`（0 blockers） |
+| 3 | 成功态 Trace 登记与扫描 | 成功运行登记了 `capture_trace`，且 `qa_capture` 报告 `coverage.scannedTraceEntries > 0`、`scannedScreenshots > 0`、`scannedCaptureFrames > 0` |
+| 4 | 正常 Gate 3 交付包 | 批准后 `POST /exports` 返回 `201`，交付包包含 `qa-report.json`，其 SHA256 与 `qa_reports` 及下载字节一致 |
+| 5 | **AC-07 · Trace 隐私阻断** | 构造含 `Authorization: Bearer eyJ...` 与 `alice.secret@corp.internal` 的真实 `trace.zip` → `qa_capture` 失败 `qa_privacy_blocked`（`retryable=false`） |
+| 6 | 早拦截止损验证 | 上述用例中 `synthesize_voice` 与 `render_video` 均为 `pending`（0 次 TTS 调用、0 个成片 MP4 文件） |
+| 7 | **反向泄密零明文断言** | 读取磁盘 `qa-capture-report.json` 与 `GET /latest-qa-report` 响应全文，**不得出现**原始 Bearer Token 或原始邮箱，只出现 `matchRedacted` 与 `matchSha256` |
+| 8 | **AC-07 · 截图 PNG 真实 OCR 阻断** | 使用真实 PNG（画面清晰渲染 `ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxx` 或 `ceo@acme-internal.io`）运行真实 `tesseract` OCR → `qa_capture` 命中并阻断 |
+| 9 | **AC-07 · 录屏视频帧真实 OCR 阻断** | 使用真实 MP4 片段（某秒画面出现 `sk-proj-...` 或邮箱）→ `ffmpeg` 抽帧 + 真实 OCR 命中 → 精准定位 `timestampMs` 与对应 `sceneId` |
+| 10 | 隐私证据帧脱敏验证 | 命中隐私的 `qa_evidence_frame` PNG 存在且可经 `?inline=1` 下载（含 `X-Content-Type-Options: nosniff`），其 SHA256 **不等于**原始未打码截图/帧（证明已做脱敏处理） |
+| 11 | **AC-07 · 字幕/文案隐私阻断** | `capture.enabled=false` 时在某镜头字幕放入邮箱/密钥 → `qa_final` 命中 `scene_text` / `subtitle_srt` 并阻断，不登记 `video_mp4` |
+| 12 | **技术 QA · 黑屏检测定位** | 构造第 2 镜含 1.5s 纯黑帧的真实 MP4 → `qa_final` 命中 `technical.black_frame`（`blocker`），精确定位到第 2 镜 `sceneId`、`timestampMs` 与黑屏证据帧 |
+| 13 | **技术 QA · 录屏静帧检测** | 构造全程静止 7s 的 `capture_clip` MP4 → `qa_capture` 命中 `technical.freeze_frame` |
+| 14 | **Fail-Closed · OCR 不可用** | `ASVS_QA_OCR_PROVIDER=unconfigured` 跑含真实录屏/成片帧的运行 → 必须阻断 `qa_ocr_unavailable`，绝不放行 `pass` |
+| 15 | **Gate 3 接口可见失败报告** | `GET /videos/:videoId/latest-qa-report` 对被 QA 阻断的运行返回 `200` 及完整定位报告与证据帧列表 |
+| 16 | **Gate 3 防绕过 1（QA 阻断）** | 即使视频在工作区被标记 `approved`，对 QA 失败的运行调 `POST /exports` 返回 `409`（`export_run_missing` 或 `export_qa_blocked`） |
+| 17 | **Gate 3 防绕过 2（篡改报告）** | 篡改磁盘 `qa-final-report.json` 任意 1 字节 → `GET /qa-report` 返回 `409 qa_report_tampered`，`POST /exports` 返回 `409 export_hash_mismatch` |
+| 18 | **5A/5B 零回归** | `capture.enabled=false`、`narration.enabled=false` 时 `plan_demo`/`capture_demo`/`qa_capture`/`synthesize_voice`/`generate_subtitles` 全部创建即 `skipped`，`qa_final` 正常执行并通过 |
+
+### 9.2 Playwright 浏览器 E2E（`apps/web-studio/e2e/qa-gate3-real-flow.spec.ts`）
+
+在 `e2e-fixture-api.ts` 扩展支持注入可控的 QA 通过 / AC-07 隐私阻断报告及测试 PNG 证据帧，至少覆盖 4 条浏览器用例：
+1. **隐私阻断流（AC-07）**：运行在 `qa_capture` 命中邮箱/token 阻断 → 生产页显示失败并可跳转审核页 → 审核页 Gate 3 展示「独立 QA 报告（已阻断）」、定位到具体镜头卡片、显示脱敏片段（不含原文）、内联加载经 `nosniff` 保护的 `qa_evidence_frame` 缩略图、**「批准视频」与「生成交付包」按钮均处于禁用状态**。
+2. **定位直达编辑流**：点击 QA 报告卡片中的「定位到第 N 镜」→ 跳转到 `/videos/:videoId/editor?scene=<sceneId>` 并自动选中对应镜头。
+3. **通过与交付流**：QA 全部通过（含 1 条非阻断提醒）→ 审核页展示通过报告与覆盖统计 → 批准视频 → 生成交付包 → 交付包内可见 `qa-report.json` 并可完成 SHA256 校验下载。
+4. **未连接服务端降级**：离线模式下审核页不崩溃，诚实提示当前未连接服务端独立 QA，本地模拟审核流程保持不变。
+
+### 9.3 最终提交前必跑验证命令（全部必须退出码 0）
+
+```powershell
+pnpm lint:boundary-check
+pnpm exec nx run-many -t lint typecheck test --skip-nx-cache
+pnpm qa:verify
+pnpm gate2:verify
+pnpm export:verify
+pnpm render:fixture; pnpm verify:render
+pnpm build; pnpm budget
+pnpm test:e2e
+```
+
+---
+
+## 10. 关键风险与避坑指南
+
+| 风险 | 表现与后果 | 必须落实的防线 |
+|---|---|---|
+| **初始 JS 突破 230 kB 预算** | 5C 仅余 0.7 kB；把 `qa.ts` Schema 或正则规则塞进静态导入链会直接让 CI `build` 变红 | 规则库仅放 `apps/api/src/qa/`；`QaReportPanel` 强制 `React.lazy`；`OrchestrationRunV1` 只挂极简 `qaSummary`；每次改前端必跑 `pnpm build && pnpm budget` |
+| **Trace 扫描误报打包 JS** | `vite preview` 提供的 React/Lucide bundle 中可能含作者邮箱或关键字，导致正常录屏必挂 | `trace-scanner.ts` 严格按 `mimeType` 跳过 JS/CSS/font/wasm，只扫 `.trace`/`.network`/HTML/JSON/TXT/SVG 与去重截屏帧 |
+| **QA 报告自身造成二次泄密** | 明文把抓到的 `ghp_...` 或未打码截图写进 JSON / DB / API / UI | 扫描器内部即刻脱敏 + 哈希，报告与日志单测做负向全文断言；隐私证据帧经 `ffmpeg boxblur+drawbox` 脱敏后再登记 `qa_evidence_frame` |
+| **旧 5A/5B/5C 单测假 MP4 失败** | 旧单测写出 `'fake-mp4'` 文本字节，直接跑真 `ffprobe`/`ffmpeg` 会全部报错 | 编排器通过 `QaRunnerPort` 调用 QA；旧单测与 `e2e-fixture-api.ts` 注入轻量测试双桩，真实媒体/OCR 由 `qa:verify` / `gate2:verify` / `export:verify` 证明 |
+| **Windows 与 Linux CI 路径/工具差异** | Windows 无预装 `tesseract` 或路径分隔符 `\` 导致 `storageRef` 校验失败 | 全部子进程使用 `spawn(..., { shell: false, windowsHide: true })`；`storageRef` 统一 POSIX `/`；CI 在 `validate`/`render`/`capture` 安装 `tesseract-ocr`；本地无 `tesseract` 时用 `ASVS_QA_OCR_PROVIDER=deterministic_test` 跑单测，真实录屏环境必须装 `tesseract`（否则 fail-closed 报错而非假绿） |
+| **静态标题页误报静帧** | `title` / `cta` 镜头本来就会静止数秒，对整片跑 `freezedetect` 会疯狂误报 | `freezedetect` **仅**作用于 `capture_clip`（`qa_capture`）或 `real_demo` 镜头区间，绝不对整片无区分执行 |
+| **临时抽帧打爆磁盘** | 每次跑 QA 抽几十张 1080p PNG 约数十 MB，反复运行堆积 | 抽帧写入 `qa/frames-tmp/`，在 `try/finally` 中强制清理，只保留命中 Finding 的少数 `qa/evidence/*.png` |
+
+---
+
+## 11. 关联文档
+
+- [docs/02 产品需求 PRD](02-PRODUCT-REQUIREMENTS-PRD.md)：AC-07、AC-10
+- [docs/06 Agent 工作流](06-AGENT-WORKFLOWS-AND-ORCHESTRATION.md)：Quality Reviewer 角色、Independent QA 节点与 Gate 3
+- [docs/07 录屏、渲染与编辑器](07-VIDEO-CAPTURE-RENDER-AND-EDITOR.md)：§2 录屏脱敏检查、§9 四维质量门禁
+- [docs/08 安全与证据](08-SECURITY-EVIDENCE-AND-ATVG2-INTEGRATION.md)：§6 数据治理、§9 安全验收用例 8
+- [docs/09 实施路线与验收](09-IMPLEMENTATION-ROADMAP-AND-ACCEPTANCE.md)：WP-16、§5 DoD、§6 Agent 协作协议、§11 阶段评审模板
+- [docs/14 配音与交付包切片](14-AUDIO-EXPORT-SLICE.md) / [docs/15 Demo Planner 与 Gate 2 切片](15-CAPTURE-GATE2-SLICE.md)：复用其端口模式、SQLite 迁移规范、SHA256 校验下载与懒加载分包模式
+</pasted_content id="6961">

@@ -19,6 +19,8 @@ import type {
 import { openDatabase } from '../db/database';
 import { OrchestrationApprovalStore } from '../db/orchestration-approval-store';
 import { SqliteOrchestrationStore } from '../db/orchestration-store';
+import { QaReportStore } from '../db/qa-report-store';
+import { DeterministicQaRunner } from '../qa/testing/deterministic-qa-runner';
 import { Orchestrator } from './orchestrator';
 import { OrchestrationHttpError } from './errors';
 
@@ -121,6 +123,8 @@ class FakeExecutor implements RenderJobExecutorPort {
   calls = 0;
   aborted = false;
   running = false;
+  /** The default double leaves fake render outputs on disk for `qa_final`. */
+  writeOnSuccess = true;
   behaviour: (call: number, callbacks: RenderJobExecutorCallbacks) => Promise<RenderJobExecutionResult>;
 
   constructor(behaviour?: FakeExecutor['behaviour']) {
@@ -156,16 +160,24 @@ class FakeExecutor implements RenderJobExecutorPort {
   }
 
   async execute(
-    _job: unknown,
+    job: unknown,
     _inputFile: string,
-    _outDir: string,
+    outDir: string,
     _checkpointFile: string,
     callbacks: RenderJobExecutorCallbacks,
   ): Promise<RenderJobExecutionResult> {
     this.calls += 1;
     this.running = true;
     try {
-      return await this.behaviour(this.calls, callbacks);
+      const result = await this.behaviour(this.calls, callbacks);
+      // `qa_final` (5D) reads the render outputs from disk before
+      // `register_artifacts` registers them, so the fake leaves the same files
+      // the real worker would. Tests that write them themselves (via
+      // `writeArtifacts`) overwrite identical bytes.
+      if (result.ok && this.writeOnSuccess) {
+        writeArtifacts(outDir, (job as { runId: string }).runId, (job as { jobId: string }).jobId, outDir);
+      }
+      return result;
     } finally {
       this.running = false;
     }
@@ -200,6 +212,10 @@ function createHarness(
     artifactDir,
     loadWorkspace: () => snapshot,
     executor,
+    // 5D: `qa_capture` is skipped without capture and `qa_final` always runs;
+    // the deterministic double proves the wiring without real media (red line 4).
+    qaRunner: new DeterministicQaRunner(),
+    qaReportStore: new QaReportStore(db),
     instanceId: options.instanceId ?? 'api_test',
     maxAttempts: options.maxAttempts ?? 3,
     schedulerIntervalMs: 60_000,
@@ -234,8 +250,14 @@ async function waitForRun(
 }
 
 /** Writes a JSON file where the fake worker claims its artifacts live. */
-function writeArtifacts(artifactDir: string, runId: string, jobId: string): void {
-  const outDir = path.join(artifactDir, 'workspaces', WORKSPACE_ID, 'runs', runId, 'artifacts');
+function writeArtifacts(
+  artifactDir: string,
+  runId: string,
+  jobId: string,
+  outDirOverride?: string,
+): void {
+  const outDir =
+    outDirOverride ?? path.join(artifactDir, 'workspaces', WORKSPACE_ID, 'runs', runId, 'artifacts');
   mkdirSync(outDir, { recursive: true });
   const mp4 = path.join(outDir, `${runId}.mp4`);
   writeFileSync(mp4, 'fake-mp4-bytes');
@@ -390,17 +412,20 @@ describe('编排器 · DAG 推进', () => {
 
     const detail = await waitForRun(orchestrator, created.run.id, (run) => run.status === 'succeeded');
     // 5C inserts plan_demo + capture_demo (skipped here because capture is
-    // off) and 5B inserts synthesize_voice + generate_subtitles (skipped here
-    // because narration is off); render_video crashed once before succeeding.
+    // off), 5D inserts qa_capture (skipped alongside capture) + qa_final, and
+    // 5B inserts synthesize_voice + generate_subtitles (skipped because
+    // narration is off); render_video crashed once before succeeding.
     expect(detail.run.steps.map((step) => `${step.stepKey}:${step.status}`)).toEqual([
       'freeze_input:succeeded',
       'verify_claims:succeeded',
       'plan_demo:skipped',
       'capture_demo:skipped',
+      'qa_capture:skipped',
       'prepare_media:succeeded',
       'synthesize_voice:skipped',
       'generate_subtitles:skipped',
       'render_video:succeeded',
+      'qa_final:succeeded',
       'register_artifacts:succeeded',
     ]);
     expect(detail.run.steps.find((step) => step.stepKey === 'render_video')!.attempt).toBe(2);
@@ -415,6 +440,7 @@ describe('编排器 · DAG 推进', () => {
     ).toEqual(expect.arrayContaining(['bundle_ready', 'verified_receipt']));
     expect(detail.artifacts.map((artifact) => artifact.kind).sort()).toEqual([
       'artifact_receipt',
+      'qa_report',
       'render_manifest',
       'video_mp4',
     ]);
@@ -562,7 +588,19 @@ describe('编排器 · DAG 推进', () => {
   });
 
   it('非法状态迁移返回 409：成功运行不能取消/重试，未审批运行不能重试', async () => {
-    const { orchestrator } = createHarness();
+    // A deterministic (non-retryable) render failure leaves a terminal `failed`
+    // run without burning retries, which is what this test needs.
+    const executor = new FakeExecutor(async () => ({
+      ok: false,
+      workerPid: 1,
+      exitCode: 1,
+      signal: null,
+      crashed: false,
+      code: 'invalid_input',
+      message: '确定性输入错误',
+      checkpoints: [],
+    }));
+    const { orchestrator } = createHarness({ executor });
     await orchestrator.start();
     const created = await orchestrator.createRun(WORKSPACE_ID, RUN_INPUT);
     await waitForRun(orchestrator, created.run.id, (run) => run.status === 'failed');
@@ -629,6 +667,8 @@ describe('编排器 · 重启与租约回收', () => {
         abort: () => secondExecutor.abort(),
         isRunning: () => secondExecutor.isRunning(),
       },
+      qaRunner: new DeterministicQaRunner(),
+      qaReportStore: new QaReportStore(first.store.database),
       instanceId: 'api_second',
       schedulerIntervalMs: 60_000,
     });
@@ -637,7 +677,8 @@ describe('编排器 · 重启与租约回收', () => {
     expect(detail.events.some((event) => event.eventType === 'heartbeat_lost')).toBe(true);
     // The dead lease's attempt survived; the reclaim increments it again.
     expect(detail.run.steps.find((step) => step.stepKey === 'render_video')?.attempt).toBe(2);
-    expect(detail.artifacts).toHaveLength(3);
+    // 5D: the passing `qa_final` report is registered alongside the 3 render files.
+    expect(detail.artifacts.filter((item) => item.kind === 'qa_report')).toHaveLength(1);
     await second.stop();
   });
 
@@ -682,7 +723,8 @@ describe('编排器 · 重启与租约回收', () => {
     // resetJobsForRetry zeroes the counter; the next lease increments it to 1.
     expect(store.getJobForStep(created.run.id, 'render_video')?.attempt).toBeLessThanOrEqual(1);
     const detail = await waitForRun(orchestrator, created.run.id, (run) => run.status === 'succeeded');
-    expect(detail.artifacts).toHaveLength(3);
+    // 5D: the passing `qa_final` report is registered alongside the 3 render files.
+    expect(detail.artifacts.filter((item) => item.kind === 'qa_report')).toHaveLength(1);
   });
 
   it('findLatestSucceededVideo 返回最新成功运行的 MP4 产物', async () => {

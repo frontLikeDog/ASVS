@@ -152,6 +152,24 @@ async function main() {
     compare(route, actual, limit);
   }
 
+  // docs/16 red line 1 · the full `QaReportV1` zod contract must never reach the
+  // initial closure. Size limits alone would not catch it: the schema is small
+  // enough to hide inside the initial budget while still costing every visitor.
+  // The marker is the report's literal `kind`, which only `libs/domain/src/qa.ts`
+  // emits, so this is a precise check rather than a heuristic.
+  const QA_SCHEMA_MARKER = 'asvs.qa-report';
+  for (const key of initialKeys) {
+    const entry = manifest[key];
+    if (!entry?.file?.endsWith('.js')) continue;
+    const source = await readFile(path.join(dist, entry.file), 'utf8');
+    if (source.includes(QA_SCHEMA_MARKER)) {
+      failures.push(
+        `initial: the QA report schema (${QA_SCHEMA_MARKER}) is in ${entry.file} — ` +
+          'red line 1 forbids it; keep it behind the lazy `qa-report-panel` chunk',
+      );
+    }
+  }
+
   // Largest emitted chunk (deduplicated by file).
   const chunkSizes = new Map();
   for (const [, entry] of entries) {

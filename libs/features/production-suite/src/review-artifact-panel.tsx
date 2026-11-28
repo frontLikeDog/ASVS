@@ -35,6 +35,8 @@ const FILE_LABEL: Record<string, string> = {
   subtitles_srt: 'SRT',
   render_manifest: 'manifest.json',
   artifact_receipt: 'receipt.json',
+  // 5D: the bundle now carries the QA report it was released under.
+  qa_report: 'QA 报告',
 };
 
 /**
@@ -372,8 +374,10 @@ export function ReviewArtifactPanel({
             </Button>
           </div>
           <p className="mt-1.5 text-[9px] leading-4 text-faint">
-            需要视频已通过 Gate 3（stage = approved/exported 且审核通过）。服务端会重新核对脚本版本、重新计算每个文件的
-            SHA256，任一不符返回 409，不会放行过期或篡改的产物。
+            需要视频已通过 Gate 3（stage = approved/exported 且审核通过），并且当前脚本版本有一份通过的独立 QA
+            报告。服务端会重新核对脚本版本、QA 结论与每个文件的 SHA256，任一不符返回 409（
+            <span className="font-mono">export_qa_missing / export_qa_blocked / export_qa_stale / export_hash_mismatch</span>
+            ），不会放行过期或篡改的产物。
           </p>
         </div>
 

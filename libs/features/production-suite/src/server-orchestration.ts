@@ -34,7 +34,7 @@ export interface ServerStepView {
   errorMessage?: string;
 }
 
-/** A UI row per DAG step — always all nine, even before the server reports them. */
+/** A UI row per DAG step — always all eleven, even before the server reports them. */
 export function buildServerStepViews(
   run: OrchestrationRunV1 | null,
   jobs: OrchestrationJobV1[] = [],
@@ -44,10 +44,12 @@ export function buildServerStepViews(
     { stepKey: 'verify_claims', name: '核验功能声明', description: '按 4D 规则阻断未核验/过期/驳回的 Claim' },
     { stepKey: 'plan_demo', name: '生成演示计划', description: '按模板生成 DemoPlanDraftV1 与 digest，挂起 Gate 2 审批' },
     { stepKey: 'capture_demo', name: '受控真实录屏', description: '已批准的 DemoPlan 驱动 browser-worker；断言全过才回填' },
+    { stepKey: 'qa_capture', name: '录屏独立 QA', description: '独立扫描录屏帧 / 截图 / trace 隐私与技术问题，命中即早阻断' },
     { stepKey: 'prepare_media', name: '准备真实素材', description: '校验录屏文件与 SHA256，缺失时明确标记占位' },
     { stepKey: 'synthesize_voice', name: '合成旁白音频', description: '按镜头合成 48kHz 旁白；内容哈希命中缓存时不重复计费' },
     { stepKey: 'generate_subtitles', name: '生成并校验 SRT', description: '按冻结帧时间轴生成 SRT，并独立校验序号/单调/无重叠' },
     { stepKey: 'render_video', name: '渲染视频', description: '独立子进程渲染 H.264 + AAC，ffprobe 校验音画与非静音' },
+    { stepKey: 'qa_final', name: '成片独立 QA', description: '对成片、SRT、声明与文案做技术/事实/隐私/内容四维复核' },
     { stepKey: 'register_artifacts', name: '登记产物', description: '复核 MP4 / SRT / 回执 / 清单并登记可下载产物' },
   ];
   return definitions.map((definition) => {
@@ -90,6 +92,14 @@ export function checkpointLabel(phase: string): string {
       return '视频已写出';
     case 'verified_receipt':
       return '回执已核验';
+    case 'qa_capture_checked':
+      return '录屏 QA 已复核';
+    case 'qa_media_checked':
+      return '成片技术检查完成';
+    case 'qa_privacy_scanned':
+      return '隐私扫描完成';
+    case 'qa_report_written':
+      return 'QA 报告已落盘';
     default:
       return phase;
   }

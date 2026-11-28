@@ -18,9 +18,14 @@ import type {
   CaptureJobExecutionResult,
   CaptureJobExecutorCallbacks,
   CaptureJobExecutorPort,
+  QaRuntimeConfig,
   SpeechRuntimeConfig,
 } from '@asvs/ports';
 import { openDatabase } from '../db/database';
+import { QaReportStore } from '../db/qa-report-store';
+import { loadQaConfig } from '../config';
+import { IndependentQaRunner } from '../qa/independent-qa-runner';
+import { DeterministicTestOcrAdapter } from '../qa/ocr-adapters';
 import { SqliteOrchestrationStore } from '../db/orchestration-store';
 import { Orchestrator } from '../orchestration/orchestrator';
 import { RenderProcessExecutor } from '../orchestration/render-process-executor';
@@ -239,9 +244,23 @@ function validateSrt(content: string, totalDurationMs: number): string[] {
 // ── Workspace fixture ───────────────────────────────────────────────────────
 
 /**
- * Three real landmarks on the dashboard. The dwell matters: the worker cuts
- * the clip 800 ms after the first assertion and requires at least 17 s
- * (`REAL_DEMO_SECONDS - 1`), so the plan must record long enough to pass.
+ * The demo a real reviewer approves. It must *move*.
+ *
+ * Step 5D made `qa_capture` mandatory, and its `technical.freeze_frame` check
+ * reads the captured clip with `freezedetect`: a demo that dwells on a static
+ * dashboard for seconds records runs of identical frames and is blocked —
+ * correctly, because that is what a stuck capture looks like (AC-07/technical
+ * QA). The web-studio shell has no ambient animation, so the motion has to
+ * come from genuine interaction: navigation mounts pages with a 220 ms
+ * entrance, and the command palette / library filters repaint as the query
+ * changes.
+ *
+ * The worker cuts the clip 800 ms after the first assertion and requires
+ * ≥17 s of footage (`REAL_DEMO_SECONDS - 1`), so this tour visits the
+ * dashboard, the command palette, the video library and the video workspace
+ * with ~1 s per stop. Every stop is under `freezedetect`'s 3 s minimum, which
+ * is the honest shape of a lively product tour rather than a recording that
+ * simply happens to avoid the threshold.
  */
 const DEMO_STEPS: DemoStep[] = [
   {
@@ -250,29 +269,183 @@ const DEMO_STEPS: DemoStep[] = [
     target: 'heading=把可信的产品事实，变成可审阅的视频。',
     assertion: { kind: 'visible', match: 'contains' },
     timeoutMs: 30_000,
-    dwellMs: 7000,
+    dwellMs: 1200,
     state: 'visible',
     description: '工作台首屏必须真实渲染出来',
   },
   {
-    id: 'featured-video',
-    action: 'assert',
-    target: 'text=继续上次工作',
-    assertion: { kind: 'visible', match: 'contains' },
+    id: 'open-command-palette',
+    action: 'click',
+    target: 'role=button,name=搜索项目',
     timeoutMs: 20_000,
-    dwellMs: 7000,
+    dwellMs: 900,
     state: 'visible',
-    description: '首屏的“继续上次工作”入口证明演示数据已加载',
+    description: '打开命令面板（真实快捷键入口）',
   },
   {
-    id: 'sidebar-videos',
+    id: 'type-palette-query-1',
+    action: 'fill',
+    target: 'placeholder=输入功能名',
+    value: '视',
+    timeoutMs: 20_000,
+    dwellMs: 600,
+    state: 'visible',
+    description: '输入第一个字，面板立即重新过滤',
+  },
+  {
+    id: 'type-palette-query-2',
+    action: 'fill',
+    target: 'placeholder=输入功能名',
+    value: '视频',
+    timeoutMs: 20_000,
+    dwellMs: 800,
+    state: 'visible',
+    description: '补全关键词：结果集继续收敛',
+  },
+  {
+    id: 'palette-filtered',
     action: 'assert',
-    target: 'role=link,name="视频工程"',
+    target: 'text=创建一个新视频',
     assertion: { kind: 'visible', match: 'contains' },
     timeoutMs: 20_000,
-    dwellMs: 7000,
+    dwellMs: 900,
     state: 'visible',
-    description: '侧边栏导航必须存在，证明真实应用外壳已挂载',
+    description: '过滤后仍列出真实命令',
+  },
+  {
+    id: 'dismiss-palette',
+    action: 'press',
+    target: 'placeholder=输入功能名',
+    key: 'Escape',
+    timeoutMs: 20_000,
+    dwellMs: 700,
+    state: 'visible',
+    description: 'Esc 关闭面板',
+  },
+  {
+    id: 'open-videos',
+    action: 'click',
+    target: 'role=link,name="视频工程"',
+    timeoutMs: 20_000,
+    dwellMs: 1100,
+    state: 'visible',
+    description: '点击侧边栏「视频工程」，演示真实导航而不是静态截图',
+  },
+  {
+    id: 'videos-mounted',
+    action: 'assert',
+    target: 'heading=视频工程',
+    assertion: { kind: 'visible', match: 'contains' },
+    timeoutMs: 20_000,
+    dwellMs: 1000,
+    state: 'visible',
+    description: '视频工程页真实挂载',
+  },
+  {
+    id: 'search-library',
+    action: 'fill',
+    target: 'label=搜索视频',
+    value: 'Lumen',
+    timeoutMs: 20_000,
+    dwellMs: 900,
+    state: 'visible',
+    description: '在视频库里搜索，列表随输入重新过滤',
+  },
+  {
+    id: 'search-applied',
+    action: 'assert',
+    target: 'text=1 条结果',
+    assertion: { kind: 'visible', match: 'contains' },
+    timeoutMs: 20_000,
+    dwellMs: 800,
+    state: 'visible',
+    description: '过滤结果数量真实更新为 1',
+  },
+  {
+    id: 'clear-search',
+    action: 'fill',
+    target: 'label=搜索视频',
+    value: '',
+    timeoutMs: 20_000,
+    dwellMs: 700,
+    state: 'visible',
+    description: '清空搜索，列表恢复',
+  },
+  {
+    id: 'filter-review',
+    action: 'click',
+    target: 'role=button,name=待审核',
+    timeoutMs: 20_000,
+    dwellMs: 900,
+    state: 'visible',
+    description: '按「待审核」筛选视频库',
+  },
+  {
+    id: 'review-filter-applied',
+    action: 'assert',
+    target: 'text=1 条结果',
+    assertion: { kind: 'visible', match: 'contains' },
+    timeoutMs: 20_000,
+    dwellMs: 800,
+    state: 'visible',
+    description: '筛选后的结果数量真实更新',
+  },
+  {
+    id: 'filter-all',
+    action: 'click',
+    target: 'role=button,name=全部',
+    timeoutMs: 20_000,
+    dwellMs: 800,
+    state: 'visible',
+    description: '恢复「全部」筛选',
+  },
+  {
+    id: 'all-filter-applied',
+    action: 'assert',
+    target: 'text=2 条结果',
+    assertion: { kind: 'visible', match: 'contains' },
+    timeoutMs: 20_000,
+    dwellMs: 800,
+    state: 'visible',
+    description: '两条视频重新出现',
+  },
+  {
+    id: 'open-video',
+    action: 'click',
+    target: 'role=link,name="Lumen 2.8 · 让问题更快被看见"',
+    timeoutMs: 20_000,
+    dwellMs: 1200,
+    state: 'visible',
+    description: '打开真实的视频工程（进入审核页）',
+  },
+  {
+    id: 'review-landing',
+    action: 'assert',
+    target: 'heading=审核与导出',
+    assertion: { kind: 'visible', match: 'contains' },
+    timeoutMs: 20_000,
+    dwellMs: 1100,
+    state: 'visible',
+    description: '审核与导出页真实渲染',
+  },
+  {
+    id: 'open-storyboard',
+    action: 'click',
+    target: 'role=link,name="分镜剧本"',
+    timeoutMs: 20_000,
+    dwellMs: 1100,
+    state: 'visible',
+    description: '在视频工作区内切换到分镜剧本',
+  },
+  {
+    id: 'storyboard-ready',
+    action: 'assert',
+    target: 'heading=镜头序列',
+    assertion: { kind: 'visible', match: 'contains' },
+    timeoutMs: 20_000,
+    dwellMs: 1100,
+    state: 'visible',
+    description: '分镜序列真实挂载',
   },
 ];
 
@@ -545,11 +718,35 @@ function openStack(dbPath: string, options: StackOptions): Stack {
       allowAutoServe: true,
     },
     speech,
+    // Step 5D made QA a mandatory step in the DAG: without a runner the run
+    // stops at `qa_execution_failed`. This script proves the *capture* path, so
+    // it uses the real runner over the real clip with the labelled
+    // deterministic OCR — never a pass-by-default double. The full AC-07
+    // privacy proof (real secrets, real ffmpeg) is `pnpm qa:verify`.
+    qaRunner: new IndependentQaRunner({
+      config: gate2QaConfig(),
+      ocr: new DeterministicTestOcrAdapter(),
+      logger: { warn: () => undefined },
+    }),
+    qaReportStore: new QaReportStore(db),
     instanceId: 'api_gate2_verify',
     maxAttempts: 1,
     schedulerIntervalMs: 150,
   });
   return { db, store, orchestrator };
+}
+
+/**
+ * QA settings for the Gate 2 acceptance script.
+ *
+ * `deterministic_test` is the honest choice here: this machine may have no
+ * Tesseract, and a real-OCR run would fail closed on the first captured
+ * screenshot — turning a capture acceptance script red for an OCR reason it is
+ * not testing. The provider is recorded as `synthetic` in every report, so
+ * nothing downstream can mistake it for a real image scan.
+ */
+function gate2QaConfig(): QaRuntimeConfig {
+  return loadQaConfig({ ...process.env, ASVS_QA_OCR_PROVIDER: 'deterministic_test' });
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
@@ -993,7 +1190,7 @@ async function main(): Promise<void> {
     );
     await stack.orchestrator.stop();
 
-    // ── 8. Zero regression: no capture request still skips both steps ─────
+    // ── 8. Zero regression: no capture request still skips the capture steps ─
     // The scheduler is deliberately *not* started: the contract under test is
     // what `createRun` persists, so launching a full Remotion render here
     // would only add minutes and a child process to shut down.
@@ -1009,9 +1206,10 @@ async function main(): Promise<void> {
       .filter((step) => step.status === 'skipped')
       .map((step) => step.stepKey);
     record(
-      '未请求录屏时 plan_demo / capture_demo 在创建时即标记 skipped（5A/5B 零回归）',
+      '未请求录屏时 plan_demo / capture_demo / qa_capture 在创建时即标记 skipped（5A/5B 零回归）',
       skipped.includes('plan_demo') &&
         skipped.includes('capture_demo') &&
+        skipped.includes('qa_capture') &&
         silent.run.input.capture?.enabled === false,
       `skipped=${skipped.join(',')} capture.enabled=${String(silent.run.input.capture?.enabled)}`,
     );

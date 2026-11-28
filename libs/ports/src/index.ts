@@ -6,3 +6,4 @@ export * from './github-knowledge-client';
 export * from './orchestration';
 export * from './orchestration-client';
 export * from './speech';
+export * from './qa';

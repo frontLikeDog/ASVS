@@ -369,6 +369,44 @@ const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 8,
+    up(db) {
+      // Step 5D · independent QA reports (WP-16 / AC-07). One row per
+      // (run, stage): a retried `qa_capture` / `qa_final` atomically replaces
+      // the previous report for that stage, while the other stage survives.
+      // `payload` holds the full validated `QaReportV1`; the indexed columns
+      // exist for Gate 3 lookups ("latest report for this video, even when the
+      // run failed") without parsing every payload.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS qa_reports (
+          id TEXT PRIMARY KEY,
+          run_id TEXT NOT NULL REFERENCES orchestration_runs(id) ON DELETE CASCADE,
+          workspace_id TEXT NOT NULL,
+          project_id TEXT NOT NULL,
+          video_id TEXT NOT NULL,
+          stage TEXT NOT NULL,
+          verdict TEXT NOT NULL,
+          policy_version TEXT NOT NULL,
+          blocker_count INTEGER NOT NULL,
+          warning_count INTEGER NOT NULL,
+          privacy_blocker_count INTEGER NOT NULL,
+          report_artifact_id TEXT,
+          report_sha256 TEXT NOT NULL,
+          input_digest TEXT NOT NULL,
+          script_version INTEGER NOT NULL,
+          payload TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_qa_reports_workspace_video
+          ON qa_reports(workspace_id, video_id, created_at DESC);
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_qa_reports_run_stage
+          ON qa_reports(run_id, stage);
+      `);
+    },
+  },
 ];
 
 function readUserVersion(db: DatabaseSync): number {

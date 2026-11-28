@@ -440,3 +440,170 @@ function exportDetail() {
     },
   };
 }
+
+describe('HttpOrchestrationClient · 独立 QA（Step 5D）', () => {
+  const sha = (char: string) => char.repeat(64);
+
+  function qaArtifact(kind: 'qa_report' | 'qa_evidence_frame') {
+    return {
+      schemaVersion: '1' as const,
+      id: `artifact_qa_${kind}`,
+      runId: 'orchrun_0123456789abcdef01234567',
+      workspaceId: WORKSPACE_ID,
+      jobId: 'orchjob_qa',
+      kind,
+      fileName: kind === 'qa_report' ? 'qa-final-report.json' : 'evidence-1.png',
+      mimeType: kind === 'qa_report' ? 'application/json' : 'image/png',
+      byteSize: 128,
+      sha256: sha('b'),
+      storageRef: `workspaces/${WORKSPACE_ID}/runs/r/qa/${kind}`,
+      metadata: {},
+      createdAt: ISO,
+    };
+  }
+
+  function qaReport(overrides: Record<string, unknown> = {}) {
+    const checks = (['privacy', 'technical', 'fact', 'content'] as const).map((category) => ({
+      category,
+      status: 'pass' as const,
+      blockerCount: 0,
+      warningCount: 0,
+      infoCount: 0,
+      summary: '无问题',
+    }));
+    return {
+      schemaVersion: '1',
+      kind: 'asvs.qa-report',
+      reportId: 'qarep_final_demo',
+      runId: 'orchrun_0123456789abcdef01234567',
+      workspaceId: WORKSPACE_ID,
+      projectId: 'proj_lumen',
+      videoId: 'vid_lumen_release',
+      stage: 'final',
+      policyVersion: 'qa-v1',
+      verdict: 'pass',
+      summary: {
+        totalFindings: 0,
+        blockerCount: 0,
+        warningCount: 0,
+        infoCount: 0,
+        privacyBlockerCount: 0,
+        technicalBlockerCount: 0,
+        factBlockerCount: 0,
+        contentBlockerCount: 0,
+      },
+      checks,
+      findings: [],
+      coverage: {
+        scannedCaptureFrames: 0,
+        scannedRenderFrames: 10,
+        scannedScreenshots: 0,
+        scannedTraceEntries: 0,
+        skippedTraceStaticEntries: 0,
+        scannedScenes: 3,
+        scannedSrtCues: 4,
+        ocrProvider: 'tesseract_cli',
+        ocrExecuted: true,
+        ocrSynthetic: false,
+        allowlistedDomains: [],
+      },
+      subject: { inputDigest: sha('c'), scriptVersion: 1, mp4Sha256: sha('a') },
+      durationMs: 2500,
+      createdAt: ISO,
+      ...overrides,
+    };
+  }
+
+  it('getRunQaReport 按 stage 拼查询并校验报告；404 返回 null', async () => {
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      response({
+        run: run({ status: 'succeeded' }),
+        report: qaReport(),
+        reportArtifact: qaArtifact('qa_report'),
+        evidenceArtifacts: [qaArtifact('qa_evidence_frame')],
+      }),
+    );
+    const found = await client(fetchImpl).getRunQaReport(WORKSPACE_ID, 'orchrun_0123456789abcdef01234567', 'final');
+    expect(found?.report.verdict).toBe('pass');
+    expect(found?.evidenceArtifacts).toHaveLength(1);
+
+    const missing = vi.fn(async () => response({ error: { code: 'not_found' } }, 404));
+    await expect(
+      client(missing).getRunQaReport(WORKSPACE_ID, 'orchrun_nope'),
+    ).resolves.toBeNull();
+  });
+
+  it('getLatestQaReport 打 video 路由，阻断报告也解析成功', async () => {
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      response({
+        run: run({ status: 'failed' }),
+        report: qaReport({
+          verdict: 'fail',
+          summary: {
+            totalFindings: 1,
+            blockerCount: 1,
+            warningCount: 0,
+            infoCount: 0,
+            privacyBlockerCount: 1,
+            technicalBlockerCount: 0,
+            factBlockerCount: 0,
+            contentBlockerCount: 0,
+          },
+          checks: [
+            { category: 'privacy', status: 'fail', blockerCount: 1, warningCount: 0, infoCount: 0, summary: '阻断 1 项' },
+            { category: 'technical', status: 'pass', blockerCount: 0, warningCount: 0, infoCount: 0, summary: '无问题' },
+            { category: 'fact', status: 'pass', blockerCount: 0, warningCount: 0, infoCount: 0, summary: '无问题' },
+            { category: 'content', status: 'pass', blockerCount: 0, warningCount: 0, infoCount: 0, summary: '无问题' },
+          ],
+          findings: [
+            {
+              id: 'qaf_01',
+              ruleId: 'privacy.email',
+              category: 'privacy',
+              severity: 'blocker',
+              sourceKind: 'render_frame',
+              title: '成片帧命中邮箱',
+              message: '帧中出现疑似邮箱。',
+              remediation: '替换为脱敏账号后重录。',
+              remediationAction: 'production',
+              location: { scope: 'global' },
+              matchRedacted: 'c***@corp.internal',
+            },
+          ],
+        }),
+        reportArtifact: qaArtifact('qa_report'),
+        evidenceArtifacts: [],
+      }),
+    );
+    const found = await client(fetchImpl).getLatestQaReport(WORKSPACE_ID, 'vid_lumen_release');
+    expect(found?.run.status).toBe('failed');
+    expect(found?.report.summary.privacyBlockerCount).toBe(1);
+    expect(fetchImpl.mock.calls[0]![0]).toBe(
+      `/api/v1/workspaces/${WORKSPACE_ID}/orchestration/videos/vid_lumen_release/latest-qa-report`,
+    );
+  });
+
+  it('getHealth 透传 qa 块；旧服务器缺省时为 undefined', async () => {
+    const withQa = vi.fn(async () =>
+      response({
+        ok: true,
+        tts: { configured: true, provider: 'deterministic_test', synthetic: true, license: 'x' },
+        qa: { enabled: true, ocrProvider: 'tesseract_cli', ocrConfigured: true, policyVersion: 'qa-v1' },
+      }),
+    );
+    const health = await client(withQa).getHealth();
+    expect(health.qa).toEqual({
+      enabled: true,
+      ocrProvider: 'tesseract_cli',
+      ocrConfigured: true,
+      policyVersion: 'qa-v1',
+    });
+    const withoutQa = vi.fn(async () =>
+      response({
+        ok: true,
+        tts: { configured: false, provider: 'unconfigured', synthetic: false, license: 'none' },
+      }),
+    );
+    expect((await client(withoutQa).getHealth()).qa).toBeUndefined();
+  });
+});

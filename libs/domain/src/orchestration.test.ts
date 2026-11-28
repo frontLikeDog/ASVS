@@ -38,31 +38,38 @@ function claim(partial: Partial<Claim>): Claim {
 }
 
 describe('编排状态机 · Run', () => {
-  it('覆盖 9 个固定步骤且顺序固定（5C 在 verify_claims 与 prepare_media 之间插入 plan/capture）', () => {
+  it('覆盖 11 个固定步骤且顺序固定（5D 在 capture 后与 render 后各插入一个 QA 步骤）', () => {
     expect(ORCHESTRATION_STEPS.map((step) => step.stepKey)).toEqual([
       'freeze_input',
       'verify_claims',
       'plan_demo',
       'capture_demo',
+      'qa_capture',
       'prepare_media',
       'synthesize_voice',
       'generate_subtitles',
       'render_video',
+      'qa_final',
       'register_artifacts',
     ]);
-    expect(buildInitialRunSteps()).toHaveLength(9);
+    expect(buildInitialRunSteps()).toHaveLength(11);
     expect(buildInitialRunSteps().every((step) => step.status === 'pending')).toBe(true);
   });
 
-  it('capture 步骤使用独立的 capture 执行器，plan 步骤在进程内执行', () => {
+  it('capture 步骤使用独立的 capture 执行器，plan/QA 步骤在进程内执行', () => {
     const byKey = new Map(ORCHESTRATION_STEPS.map((step) => [step.stepKey, step]));
     expect(byKey.get('plan_demo')?.executor).toBe('inline');
     expect(byKey.get('capture_demo')?.executor).toBe('capture');
+    expect(byKey.get('qa_capture')?.executor).toBe('inline');
+    expect(byKey.get('qa_final')?.executor).toBe('inline');
     expect(byKey.get('render_video')?.executor).toBe('worker');
-    // The two capture steps sit between claim verification and media prep, so
-    // a backfilled clip is what `prepare_media` resolves.
+    // Capture QA sits between the clip and the media prep that resolves it;
+    // final QA sits between the render and the artifact registration it gates.
     const keys = ORCHESTRATION_STEPS.map((step) => step.stepKey);
-    expect(keys.indexOf('capture_demo')).toBe(keys.indexOf('prepare_media') - 1);
+    expect(keys.indexOf('qa_capture')).toBe(keys.indexOf('capture_demo') + 1);
+    expect(keys.indexOf('qa_capture')).toBe(keys.indexOf('prepare_media') - 1);
+    expect(keys.indexOf('qa_final')).toBe(keys.indexOf('render_video') + 1);
+    expect(keys.indexOf('qa_final')).toBe(keys.indexOf('register_artifacts') - 1);
   });
 
   it('合法迁移通过，非法迁移抛错', () => {
@@ -116,14 +123,14 @@ describe('进度计算', () => {
     const steps = buildInitialRunSteps();
     steps[0]!.status = 'succeeded';
     steps[1]!.status = 'succeeded';
-    // 2 of 9 steps → 22%.
-    expect(runProgressPercent({ status: 'running', steps })).toBe(22);
+    // 2 of 11 steps → 18%.
+    expect(runProgressPercent({ status: 'running', steps })).toBe(18);
     steps[2]!.status = 'skipped';
     steps[3]!.status = 'skipped';
-    // Skipped steps are complete by definition: 4 of 9 → 44%.
-    expect(runProgressPercent({ status: 'running', steps })).toBe(44);
+    // Skipped steps are complete by definition: 4 of 11 → 36%.
+    expect(runProgressPercent({ status: 'running', steps })).toBe(36);
     expect(runProgressPercent({ status: 'succeeded', steps })).toBe(100);
-    expect(runProgressPercent({ status: 'failed', steps })).toBe(44);
+    expect(runProgressPercent({ status: 'failed', steps })).toBe(36);
   });
 });
 

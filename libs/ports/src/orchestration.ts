@@ -9,15 +9,18 @@ import type {
   OrchestrationArtifactV1,
   OrchestrationRunDetailV1,
   OrchestrationRunV1,
+  QaReportEnvelopeV1,
+  QaStage,
   RenderJobInputV1,
   RenderProfile,
   WorkerEvent,
 } from '@asvs/domain';
+import type { QaHealth } from './qa';
 import type { SpeechHealth } from './speech';
 
 /**
  * Step 5C capture options. Omitting `capture` (or `enabled: false`) keeps the
- * 5A/5B behaviour: `plan_demo` and `capture_demo` are recorded as skipped at
+ * 5A/5B behaviour: `plan_demo`, `capture_demo` and `qa_capture` are recorded as skipped at
  * creation time. `enabled: true` on a video without `real_demo` scenes fails
  * closed at creation with `no_real_demo_scenes` — never a silent skip.
  */
@@ -283,6 +286,23 @@ export interface OrchestrationServicePort {
   speechHealth(): SpeechHealth;
   /** Capture capability for `/v1/health`; never exposes full worker paths. */
   captureHealth(): CaptureHealth;
+  /** 5D · independent QA capability for `/v1/health`; no paths, no keys. */
+  qaHealth(): QaHealth;
+  /**
+   * 5D · report for one run (`stage` omitted → `final`, falling back to
+   * `capture`). Re-hashes the report file: a tampered file is a 409
+   * `qa_report_tampered`, never a silently served stale verdict.
+   */
+  getRunQaReport(
+    workspaceId: string,
+    runId: string,
+    stage?: QaStage,
+  ): Promise<QaReportEnvelopeV1 | null>;
+  /**
+   * Gate 3 core query: newest report for a video **regardless of the run's
+   * terminal status**, so a QA-blocked failure still surfaces to the reviewer.
+   */
+  getLatestQaReport(workspaceId: string, videoId: string): Promise<QaReportEnvelopeV1 | null>;
   /** Starts the scheduler loop and recovers orphaned leases. Idempotent. */
   start(): Promise<void>;
   /** Stops the loop, aborts the active worker and waits for it to exit. */

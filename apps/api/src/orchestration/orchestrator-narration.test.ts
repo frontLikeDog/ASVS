@@ -20,6 +20,8 @@ import type {
 import { openDatabase } from '../db/database';
 import { ExportBundleStore } from '../db/export-bundle-store';
 import { SqliteOrchestrationStore } from '../db/orchestration-store';
+import { QaReportStore } from '../db/qa-report-store';
+import { DeterministicQaRunner } from '../qa/testing/deterministic-qa-runner';
 import {
   DeterministicTestSpeechAdapter,
   SpeechCacheStore,
@@ -327,6 +329,8 @@ function createHarness(
     executor,
     speech,
     exportStore,
+    qaRunner: new DeterministicQaRunner(),
+    qaReportStore: new QaReportStore(db),
     instanceId: 'api_narr_test',
     maxAttempts: 2,
     schedulerIntervalMs: 25,
@@ -556,7 +560,14 @@ describe('编排器 · Gate 3 导出（AC-10）', () => {
     expect(bundle.bundle.srtSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(bundle.bundle.manifestSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(bundle.files.map((file) => file.kind).sort()).toEqual(
-      ['artifact_receipt', 'render_manifest', 'subtitles_srt', 'video_mp4'].sort(),
+      // 5D: the passing QA report ships inside the bundle and is bound into it.
+      ['artifact_receipt', 'qa_report', 'render_manifest', 'subtitles_srt', 'video_mp4'].sort(),
+    );
+    expect(bundle.bundle.qaReportArtifactId).toBe(
+      bundle.files.find((file) => file.kind === 'qa_report')!.artifactId,
+    );
+    expect(bundle.bundle.qaReportSha256).toBe(
+      bundle.files.find((file) => file.kind === 'qa_report')!.sha256,
     );
     const srtFile = bundle.files.find((file) => file.kind === 'subtitles_srt')!;
     expect(srtFile.fileName.endsWith('.srt')).toBe(true);

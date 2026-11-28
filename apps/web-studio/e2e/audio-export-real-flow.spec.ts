@@ -202,13 +202,20 @@ test('批准后生成交付包：MP4 / SRT / manifest 下载均通过 SHA256 校
       ]);
       expect(manifestDownload.suggestedFilename()).toBe(`${VIDEO_ID}.manifest.json`);
 
-      // Exactly one bundle with exactly four files exists on the server.
+      // Exactly one bundle exists on the server. 5D added the `qa_final` report
+      // to every bundle (Gate 5), so the file count is five.
       const listed = await fixture.request.get(
         `/v1/workspaces/${workspaceId}/orchestration/exports?videoId=${VIDEO_ID}`,
       );
-      const bundles = (await listed.json()).bundles as Array<{ files: unknown[] }>;
+      const bundles = (await listed.json()).bundles as Array<{ files: Array<{ kind: string }> }>;
       expect(bundles).toHaveLength(1);
-      expect(bundles[0]!.files).toHaveLength(4);
+      expect(bundles[0]!.files.map((file) => file.kind).sort()).toEqual([
+        'artifact_receipt',
+        'qa_report',
+        'render_manifest',
+        'subtitles_srt',
+        'video_mp4',
+      ]);
     } finally {
       await context.close();
     }
