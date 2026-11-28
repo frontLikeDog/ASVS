@@ -624,6 +624,13 @@ export const exportRecordSchema = z.object({
   simulated: z.boolean(),
   note: z.string().optional(),
   fileName: z.string().optional(),
+  /** 5B: server-side export bundle bound to this record (all optional). */
+  runId: idSchema.optional(),
+  bundleId: idSchema.optional(),
+  sha256: z.string().optional(),
+  srtSha256: z.string().optional(),
+  manifestSha256: z.string().optional(),
+  downloadUrl: z.string().optional(),
   createdAt: isoDateSchema,
 });
 export type ExportRecord = z.infer<typeof exportRecordSchema>;

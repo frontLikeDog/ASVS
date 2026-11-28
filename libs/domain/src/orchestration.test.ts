@@ -38,15 +38,17 @@ function claim(partial: Partial<Claim>): Claim {
 }
 
 describe('编排状态机 · Run', () => {
-  it('覆盖 5 个固定步骤且顺序固定', () => {
+  it('覆盖 7 个固定步骤且顺序固定', () => {
     expect(ORCHESTRATION_STEPS.map((step) => step.stepKey)).toEqual([
       'freeze_input',
       'verify_claims',
       'prepare_media',
+      'synthesize_voice',
+      'generate_subtitles',
       'render_video',
       'register_artifacts',
     ]);
-    expect(buildInitialRunSteps()).toHaveLength(5);
+    expect(buildInitialRunSteps()).toHaveLength(7);
     expect(buildInitialRunSteps().every((step) => step.status === 'pending')).toBe(true);
   });
 
@@ -101,9 +103,10 @@ describe('进度计算', () => {
     const steps = buildInitialRunSteps();
     steps[0]!.status = 'succeeded';
     steps[1]!.status = 'succeeded';
-    expect(runProgressPercent({ status: 'running', steps })).toBe(40);
+    // 2 of 7 steps → 29%.
+    expect(runProgressPercent({ status: 'running', steps })).toBe(29);
     expect(runProgressPercent({ status: 'succeeded', steps })).toBe(100);
-    expect(runProgressPercent({ status: 'failed', steps })).toBe(40);
+    expect(runProgressPercent({ status: 'failed', steps })).toBe(29);
   });
 });
 

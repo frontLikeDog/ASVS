@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { parseGitHubRepoRef, type GitHubRepoRef } from '@asvs/domain';
-import type { GitHubReadOnlyPort } from '@asvs/ports';
+import type { GitHubReadOnlyPort, SpeechRuntimeConfig } from '@asvs/ports';
 import {
   GitHubAppReadOnlyClient,
   UnconfiguredGitHubReadOnlyClient,
@@ -22,6 +22,8 @@ export interface ApiConfig {
   corsOrigins: string[];
   logLevel: string;
   github: GitHubEnvConfig;
+  /** Narration (TTS) configuration; `unconfigured` fails closed with 503. */
+  speech: SpeechRuntimeConfig;
   /** Root for server-rendered MP4 / manifest / receipt artifacts. */
   artifactDir: string;
   /** How many render subprocesses may run at once (SQLite single writer). */
@@ -34,6 +36,37 @@ export interface ApiConfig {
   schedulerIntervalMs: number;
   /** Explicit worker script path; defaults to the in-repo tsx entry. */
   workerScript?: string;
+}
+
+const SPEECH_PROVIDERS = ['unconfigured', 'openai_compatible', 'deterministic_test'] as const;
+
+/**
+ * Reads TTS settings. Nothing here ever surfaces the key: it is only used to
+ * build the Authorization header, and `isConfigured()` is false without it.
+ */
+export function loadSpeechConfig(env: NodeJS.ProcessEnv = process.env): SpeechRuntimeConfig {
+  const rawProvider = env.ASVS_TTS_PROVIDER?.trim() || 'unconfigured';
+  const provider = SPEECH_PROVIDERS.find((item) => item === rawProvider);
+  if (!provider) {
+    throw new Error(
+      `ASVS_TTS_PROVIDER 无效：${rawProvider}（可选 ${SPEECH_PROVIDERS.join(' / ')}）`,
+    );
+  }
+  return {
+    provider,
+    apiUrl: env.ASVS_TTS_API_URL?.trim() || undefined,
+    apiKey: env.ASVS_TTS_API_KEY?.trim() || undefined,
+    model: env.ASVS_TTS_MODEL?.trim() || 'tts-1',
+    voiceZh: env.ASVS_TTS_VOICE_ZH?.trim() || 'alloy',
+    voiceEn: env.ASVS_TTS_VOICE_EN?.trim() || 'alloy',
+    license:
+      env.ASVS_TTS_LICENSE?.trim() ||
+      (provider === 'deterministic_test'
+        ? 'internal-deterministic-test-only'
+        : 'provider-terms'),
+    timeoutMs: readPositiveInt(env, 'ASVS_TTS_TIMEOUT_MS', 30_000, { min: 1_000, max: 300_000 }),
+    maxRetries: readPositiveInt(env, 'ASVS_TTS_MAX_RETRIES', 3, { min: 0, max: 5 }),
+  };
 }
 
 const DEFAULT_CORS_ORIGINS = ['http://localhost:4200', 'http://127.0.0.1:4200'];
@@ -85,6 +118,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
       defaultRepo,
       apiBaseUrl: env.GITHUB_API_BASE_URL?.trim() || undefined,
     },
+    speech: loadSpeechConfig(env),
     artifactDir,
     maxConcurrentRenders: readPositiveInt(env, 'ASVS_MAX_CONCURRENT_RENDERS', 1, { min: 1, max: 8 }),
     leaseTtlMs: readPositiveInt(env, 'ASVS_LEASE_TTL_MS', 15_000, { min: 3_000, max: 600_000 }),

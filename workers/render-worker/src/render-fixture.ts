@@ -87,6 +87,7 @@ async function main(): Promise<void> {
     runId: `run_fixture_${artifactSlug}`,
     input,
     media: fixture.media,
+    audio: [],
     outputFileName,
     jobDigest,
     createdAt: new Date().toISOString(),

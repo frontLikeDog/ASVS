@@ -2,7 +2,7 @@
 
 一个前端优先、可完整走通的产品视频工作台：把可信的软件事实（功能、Claim、证据）变成可编辑、可生产、可审核的视频工程。
 
-当前版本包含三部分：可交互的商业级前端原型、真实可运行的渲染切片，以及真实可运行的录屏切片。项目、知识、分镜、审核与导出数据会真实写入浏览器本地存储；GitHub 授权、AI 模型、配音与 Web 内导出仍是明确标注的模拟能力。渲染切片通过 CLI 把固定 Storyboard 用 Remotion 真实渲染成可播放的 30 秒 MP4，并输出 SHA256 回执与 ffprobe 校验结果（见 [docs/11](docs/11-RENDER-SLICE.md)）。录屏切片用已批准的 DemoPlan 驱动 Playwright 录制 web-studio 自身，断言全部通过后才写回执，并把真实片段接回渲染管线（见 [docs/12](docs/12-CAPTURE-SLICE.md)）。服务端编排切片把生产运行迁到 SQLite 队列 + 独立 worker 子进程：崩溃或 API 重启后按 checkpoint 续跑，审核页可下载真实 MP4（见 [docs/13](docs/13-ORCHESTRATION-SLICE.md)）。
+当前版本包含三部分：可交互的商业级前端原型、真实可运行的渲染切片，以及真实可运行的录屏切片。项目、知识、分镜、审核与导出数据会真实写入浏览器本地存储；AI 模型、浏览器内的配音预览与 Web 内导出仍是明确标注的模拟能力。渲染切片通过 CLI 把固定 Storyboard 用 Remotion 真实渲染成可播放的 30 秒 MP4，并输出 SHA256 回执与 ffprobe 校验结果（见 [docs/11](docs/11-RENDER-SLICE.md)）。录屏切片用已批准的 DemoPlan 驱动 Playwright 录制 web-studio 自身，断言全部通过后才写回执，并把真实片段接回渲染管线（见 [docs/12](docs/12-CAPTURE-SLICE.md)）。服务端编排切片把生产运行迁到 SQLite 队列 + 独立 worker 子进程：崩溃或 API 重启后按 checkpoint 续跑，审核页可下载真实 MP4（见 [docs/13](docs/13-ORCHESTRATION-SLICE.md)）。配音与交付包切片把成片升级为可交付包：真实旁白音轨（H.264 + AAC）、同步 SRT，以及 Gate 3 审核通过后的 MP4 + SRT + manifest 下载与 SHA256 回执（见 [docs/14](docs/14-AUDIO-EXPORT-SLICE.md)）。
 
 ---
 
@@ -15,7 +15,7 @@
 - **可编辑分镜与时间线**：拖拽 / 键盘排序、字幕与时长编辑、画面预览、播放头、撤销 / 重做、自动保存。
 - **确定性生产监控**：8 步 DAG，支持成功、失败重试、人工审批 Gate、暂停 / 取消与 4× 加速；没有随机假进度。
 - **有牙齿的审核**：证据过期、待验证声明、敏感信息、禁用表述、品牌缺失、生产版本不一致都会阻断或提醒。
-- **真实文件导出**：工程 JSON 与 SRT 字幕通过 Blob 真实下载；`pnpm render:fixture` 用 Remotion 真实渲染 30 秒 MP4 并写回执 / 清单（CLI，不在 Web UI 内）；Web 内的 MP4 / WebM 仍只展示模拟任务状态。
+- **真实文件导出**：工程 JSON 与 SRT 字幕通过 Blob 真实下载；`pnpm render:fixture` 用 Remotion 真实渲染 30 秒 MP4 并写回执 / 清单（CLI，不在 Web UI 内）；服务端模式开启旁白后，审核页可下载带 AAC 音轨的 MP4 + SRT + manifest 交付包（SHA256 校验）；Web 内的 MP4 / WebM 仍只展示模拟任务状态。
 - **品牌与设置**：品牌字标、主辅色、字体、视觉风格、片头 / CTA 实时预览；品牌变更会使已审核视频失效并需要重新审核。
 
 ---
@@ -187,7 +187,7 @@ workers/browser-worker          CLI：DemoPlan → Playwright 录屏 / 断言 / 
 - **渲染回执可独立复核**。MP4 的 SHA256、ffprobe 结果与输入 / 场景 / 素材 digest 同时写入 receipt 与 manifest，`pnpm verify:render` 会重新计算并比对。
 - **所有列表选择器使用 `useShallow`**，避免 Zustand v5 返回新数组导致的重复渲染。
 - **审核与生产均绑定当前工程版本**；工程修改后审核自动失效。
-- **导出 JSON / SRT 使用真实 Blob**，不经过后端；MP4 导出仍是模拟任务。
+- **浏览器内导出 JSON / SRT 使用真实 Blob**（草稿，不经过服务端校验）；服务端 Gate 3 交付包是经过 SHA256 校验的真实文件；Web 内的 MP4 导出仍是模拟任务。
 
 ---
 
@@ -209,7 +209,8 @@ workers/browser-worker          CLI：DemoPlan → Playwright 录屏 / 断言 / 
 | 工作区版本迁移 | v1 快照与 Zustand 备份迁移到 v2；API 读取旧行时升级；数据库迁移保留运行记录 |
 | CLI 真实渲染 | Remotion → 30 秒 MP4；ffprobe + 全片解码 + SHA256 回执（`pnpm render:fixture`） |
 | CLI 真实录屏 | Playwright 执行已批准 DemoPlan（20 步：11 条断言 + 9 条交互），断言 11/11 通过后写 `CaptureReceipt`；重复 3 次通过率 100%；真实片段进入渲染管线（`pnpm capture:demo`） |
-| 服务端真实渲染与崩溃恢复 | 生产页启用工作区同步后可「启动服务端渲染」：SQLite 任务队列 + 独立 `render-worker` 子进程产出真实 16:9 MP4（无音轨），关闭页面后继续；`SIGKILL` / API 重启按 checkpoint 续跑；审核页可下载经 SHA256 校验的 MP4 与 manifest（`pnpm orchestration:verify`，见 [docs/13](docs/13-ORCHESTRATION-SLICE.md)） |
+| 服务端真实渲染与崩溃恢复 | 生产页启用工作区同步后可「启动服务端渲染」：SQLite 任务队列 + 独立 `render-worker` 子进程产出真实 16:9 MP4，关闭页面后继续；`SIGKILL` / API 重启按 checkpoint 续跑；审核页可下载经 SHA256 校验的 MP4 与 manifest（`pnpm orchestration:verify`，见 [docs/13](docs/13-ORCHESTRATION-SLICE.md)） |
+| 配音、SRT 与 Gate 3 交付包 | 生产页可开启旁白（TTS 音色 / 语速 / 溢出策略）：服务端合成旁白、把旁白混入 MP4（H.264 + AAC 48kHz）、按冻结帧时间轴生成 SRT；同一文本重跑命中内容寻址缓存，**不重复计费**。审核通过（Gate 3）后可生成交付包并下载 MP4 + SRT + manifest，下载前校验 SHA256（`pnpm export:verify`，20 项断言；见 [docs/14](docs/14-AUDIO-EXPORT-SLICE.md)）。离线确定性音色全程标注 `测试合成音轨 · 非真人配音` |
 | 品牌套件与主题 | 真实写入并影响所有预览 |
 | 演示数据重置 | 真实恢复种子快照 |
 
@@ -220,7 +221,7 @@ workers/browser-worker          CLI：DemoPlan → Playwright 录屏 / 断言 / 
 | 演示项目来源同步 / 未配置凭证降级 | 内置 `demo: true` 演示项目（如 `Lumen Analytics`）与无源码 AC-08 文档入门仍使用本地确定性模拟；未在 `apps/api/.env.local` 配置 GitHub App 凭证时，真实接入诚实提示 503，绝不伪造已连接状态 |
 | AI 模型调用 / Mastra / Agent 运行时 | 不请求外部模型，使用确定性意图解析与确定性 PR 分类规则 |
 | Web UI 内的录屏 / 生产执行 | 生产监控的「模拟 DAG」仍是浏览器内模拟，不启动浏览器或录制；服务端模式走真实的 SQLite 队列 + 子进程渲染，但只有 5 个编排步骤（不含录屏步骤）；真实录屏只能通过 CLI `pnpm capture:demo` 触发 |
-| 配音 / TTS | 只有文本与时间轴，不播放或生成音频；样片与服务端 MP4 都是静音视频 |
+| 配音 / TTS（浏览器内） | 浏览器预览与 Web 内导出仍只有文本与时间轴，不播放或生成音频；**服务端模式**已能合成旁白并产出带 AAC 音轨的 MP4。离线确定性测试音色（`ASVS_TTS_PROVIDER=deterministic_test`）明确标注 `测试合成音轨 · 非真人配音`；未配置 TTS 时服务端 fail-closed（503），绝不静默降级为无声 |
 | Web 内 FFmpeg / Remotion / 服务端渲染 | Web UI 只发起任务与展示产物，Worker 在服务端；CLI `workers/render-worker` 与 `apps/api` 编排器均已能真实渲染（见 §7、docs/11、docs/13） |
 | Web 内 MP4 / WebM 导出 | 仅任务状态与进度，不产生媒体文件；CLI 样片是真实文件 |
 | 局部重渲染 / 转场 / 多画幅 | 未实现；当前每次全片渲染，仅 16:9 |
@@ -408,11 +409,11 @@ pnpm build
 5. **面包屑使用视频 ID**：分镜 / 编辑器等页面的面包屑会显示 `vid_...`，而不是视频标题。
 6. **预览依赖前台标签页**：`requestAnimationFrame` 在后台标签页会被节流，播放进度不会按真实时间推进；这是浏览器行为，未做 Web Worker 时钟兜底。
 7. **模拟 DAG 只在页面打开时推进**：这是刻意设计，用于避免后台伪造进度；刷新后运行状态按已持久化快照恢复，不会在后台继续。服务端模式（5A）的任务由 SQLite 队列推进，与模拟 DAG 并存。
-8. **模拟预览没有音频**：只有字幕与时间轴，没有真实配音；这是当前边界，不应被误解为成片。
+8. **浏览器内模拟预览没有音频**：编辑器预览只有字幕与时间轴，不播放旁白；真实音轨只存在于服务端渲染出的 MP4（5B），预览不应被误解为成片。
 9. **建议弹窗文案不够精确**：部分“接受建议会升级 Claim 状态”的说明可能高估实际状态变化，需要按建议类型细化。
 10. **CI 覆盖范围**：`.github/workflows/ci.yml` 的 `validate` / `build` / `e2e`（含 API webServer）/ `render` / `capture` 均已在 GitHub Actions Linux runner 跑通；仍未覆盖文档类 PR 跳门禁的回归验证。
-11. **渲染切片与 Web UI 的边界**：服务端模式（5A）可从生产页启动真实渲染、在审核页下载经 SHA256 校验的 MP4（无音轨）；但「模拟 DAG」与 Web 内 MP4 / WebM 导出仍是模拟状态，两者在 UI 上分别标注。
-12. **渲染只支持 16:9、无音频、字体未打包**：竖屏需要单独布局；没有 TTS / 配乐；依赖系统 CJK 字体，跨机器字形可能不同。服务端 MP4 同样无音轨，配音与 SRT 留待 5B。
+11. **渲染切片与 Web UI 的边界**：服务端模式可从生产页启动真实渲染，开启旁白时产出带 AAC 音轨的 MP4 + SRT，审核通过后在审核页下载 Gate 3 交付包（MP4 + SRT + manifest，均校验 SHA256）；但「模拟 DAG」、浏览器预览与 Web 内 MP4 / WebM 导出仍是模拟状态，两者在 UI 上分别标注。
+12. **渲染只支持 16:9，无 BGM、字体未打包**：竖屏需要单独布局；旁白只支持单轨纯语音（无背景音乐 / ducking），词级卡拉 OK 字幕与多语言未实现；依赖系统 CJK 字体，跨机器字形可能不同。未配置 TTS 时服务端 fail-closed（503），不会静默产出无声成片。
 13. **Remotion 许可**：个人或 ≤3 员工公司可免费使用；更大组织商用前需要公司许可。
 14. **渲染耗时无基线**：单次全片渲染在本机约数分钟，尚未采集成功率与耗时分布。
 15. **工作区 API 无鉴权 / 租户隔离**：默认只监听 `127.0.0.1`，CORS 只允许本地 4200；不能直接暴露到公网。

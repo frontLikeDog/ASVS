@@ -1,4 +1,5 @@
 import type {
+  ExportBundleDetailV1,
   OrchestrationApprovalV1,
   OrchestrationArtifactKind,
   OrchestrationArtifactV1,
@@ -6,11 +7,18 @@ import type {
   OrchestrationRunV1,
   RenderProfile,
 } from '@asvs/domain';
+import type { CreateExportBundleInput, ExportBundleListOptions } from './orchestration';
 
 export interface CreateOrchestrationRunRequest {
   videoId: string;
   idempotencyKey: string;
   renderProfile?: Partial<RenderProfile>;
+  narration?: {
+    enabled?: boolean;
+    voiceId?: string;
+    speed?: number;
+    timingPolicy?: 'extend_scene' | 'fail_on_overflow';
+  };
 }
 
 export interface CreateOrchestrationRunResponse {
@@ -63,6 +71,22 @@ export interface OrchestrationClientPort {
     artifactId: string,
     kind?: OrchestrationArtifactKind,
   ): string;
+  /** Gate 3 bound export; 409 when the video is not approved for this run. */
+  createExportBundle(
+    workspaceId: string,
+    input: CreateExportBundleInput,
+  ): Promise<ExportBundleDetailV1>;
+  listExportBundles(
+    workspaceId: string,
+    options?: ExportBundleListOptions,
+  ): Promise<ExportBundleDetailV1[]>;
+  /** TTS availability from `/v1/health`; never contains credentials. */
+  getHealth(): Promise<{
+    configured: boolean;
+    provider: string;
+    synthetic: boolean;
+    license: string;
+  }>;
   /** Cheap reachability probe; resolves false instead of throwing. */
   isReachable(): Promise<boolean>;
 }

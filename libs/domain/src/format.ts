@@ -8,13 +8,24 @@ export function formatTimecode(totalSeconds: number, withTenths = false): string
   return `${base}.${tenths}`;
 }
 
-export function formatSrtTime(totalSeconds: number): string {
-  const safe = Math.max(0, totalSeconds);
-  const hours = Math.floor(safe / 3600);
-  const minutes = Math.floor((safe % 3600) / 60);
-  const seconds = Math.floor(safe % 60);
-  const milliseconds = Math.round((safe % 1) * 1000);
+/**
+ * Formats an integer millisecond value as an SRT timestamp.
+ *
+ * Keeping the entire calculation in integer milliseconds avoids the carry bug
+ * where `Math.floor(2.9996 % 60)` and `Math.round((2.9996 % 1) * 1000)` were
+ * computed independently and produced the illegal `00:00:02,1000`.
+ */
+export function formatSrtTimeFromMs(totalMilliseconds: number): string {
+  const safeMs = Math.max(0, Math.round(totalMilliseconds));
+  const hours = Math.floor(safeMs / 3_600_000);
+  const minutes = Math.floor((safeMs % 3_600_000) / 60_000);
+  const seconds = Math.floor((safeMs % 60_000) / 1000);
+  const milliseconds = safeMs % 1000;
   return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')},${String(milliseconds).padStart(3, '0')}`;
+}
+
+export function formatSrtTime(totalSeconds: number): string {
+  return formatSrtTimeFromMs(Math.round(Math.max(0, totalSeconds) * 1000));
 }
 
 export function formatDuration(seconds: number): string {

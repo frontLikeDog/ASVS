@@ -1,4 +1,6 @@
 import type {
+  ExportBundleDetailV1,
+  NarrationTimingPolicy,
   OrchestrationApprovalV1,
   OrchestrationArtifactV1,
   OrchestrationRunDetailV1,
@@ -7,13 +9,35 @@ import type {
   RenderProfile,
   WorkerEvent,
 } from '@asvs/domain';
+import type { SpeechHealth } from './speech';
 
 /** Body accepted by `POST /v1/workspaces/:id/orchestration/runs`. */
 export interface CreateOrchestrationRunInput {
   videoId: string;
   idempotencyKey: string;
   renderProfile?: Partial<RenderProfile>;
+  /** 5B voice options; omitted means narration enabled with server defaults. */
+  narration?: {
+    enabled?: boolean;
+    voiceId?: string;
+    speed?: number;
+    timingPolicy?: NarrationTimingPolicy;
+  };
 }
+
+/** Body accepted by `POST /v1/workspaces/:id/orchestration/exports`. */
+export interface CreateExportBundleInput {
+  videoId: string;
+  runId?: string;
+  approvalNote?: string;
+}
+
+export interface ExportBundleListOptions {
+  videoId?: string;
+  limit?: number;
+}
+
+export type { ExportBundleDetailV1 };
 
 export interface CreateOrchestrationRunResult {
   run: OrchestrationRunV1;
@@ -116,6 +140,21 @@ export interface OrchestrationServicePort {
     workspaceId: string,
     videoId: string,
   ): { run: OrchestrationRunV1; artifact: OrchestrationArtifactV1 } | null;
+  /**
+   * Gate 3 bound export (AC-10): verifies the video is approved for the exact
+   * script version, re-hashes MP4 + SRT + manifest, persists the bundle.
+   * Throws a 409 `OrchestrationHttpError` when any gate fails.
+   */
+  createExportBundle(
+    workspaceId: string,
+    input: CreateExportBundleInput,
+  ): Promise<ExportBundleDetailV1>;
+  listExportBundles(
+    workspaceId: string,
+    options?: ExportBundleListOptions,
+  ): Promise<ExportBundleDetailV1[]>;
+  /** TTS availability for `/v1/health`; never exposes credentials. */
+  speechHealth(): SpeechHealth;
   /** Starts the scheduler loop and recovers orphaned leases. Idempotent. */
   start(): Promise<void>;
   /** Stops the loop, aborts the active worker and waits for it to exit. */

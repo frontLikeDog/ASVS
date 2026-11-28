@@ -33,7 +33,7 @@ export interface ServerStepView {
   errorMessage?: string;
 }
 
-/** A UI row per DAG step — always all five, even before the server reports them. */
+/** A UI row per DAG step — always all seven, even before the server reports them. */
 export function buildServerStepViews(
   run: OrchestrationRunV1 | null,
   jobs: OrchestrationJobV1[] = [],
@@ -41,9 +41,11 @@ export function buildServerStepViews(
   const definitions: Array<{ stepKey: OrchestrationStepKey; name: string; description: string }> = [
     { stepKey: 'freeze_input', name: '冻结渲染输入', description: '冻结 RenderInputV1 并计算 digest' },
     { stepKey: 'verify_claims', name: '核验功能声明', description: '按 4D 规则阻断未核验/过期/驳回的 Claim' },
-    { stepKey: 'prepare_media', name: '准备真实素材', description: '校验录屏文件与 SHA256，缺失时标记载荷占位' },
-    { stepKey: 'render_video', name: '渲染视频', description: '独立子进程渲染 16:9 H.264 MP4，支持断点续跑' },
-    { stepKey: 'register_artifacts', name: '登记产物', description: '复核回执与清单并登记可下载产物' },
+    { stepKey: 'prepare_media', name: '准备真实素材', description: '校验录屏文件与 SHA256，缺失时明确标记占位' },
+    { stepKey: 'synthesize_voice', name: '合成旁白音频', description: '按镜头合成 48kHz 旁白；内容哈希命中缓存时不重复计费' },
+    { stepKey: 'generate_subtitles', name: '生成并校验 SRT', description: '按冻结帧时间轴生成 SRT，并独立校验序号/单调/无重叠' },
+    { stepKey: 'render_video', name: '渲染视频', description: '独立子进程渲染 H.264 + AAC，ffprobe 校验音画与非静音' },
+    { stepKey: 'register_artifacts', name: '登记产物', description: '复核 MP4 / SRT / 回执 / 清单并登记可下载产物' },
   ];
   return definitions.map((definition) => {
     const state: OrchestrationStepStateV1 | undefined = run?.steps.find(
@@ -65,6 +67,10 @@ export function checkpointLabel(phase: string): string {
   switch (phase) {
     case 'step_done':
       return '步骤完成';
+    case 'narration_ready':
+      return '旁白已就绪';
+    case 'subtitles_ready':
+      return '字幕已校验';
     case 'bundle_ready':
       return '打包完成';
     case 'video_rendered':
@@ -94,6 +100,37 @@ export function shortSha(sha: string, length = 12): string {
   return sha.length > length ? `${sha.slice(0, length)}…` : sha;
 }
 
+/**
+ * Downloads an artifact and verifies its bytes against the registered SHA256
+ * before the browser saves it. A mismatch is treated as a failure, never as a
+ * warning: a tampered MP4 must not reach the user's disk silently.
+ */
+export async function downloadVerifiedArtifact(
+  url: string,
+  artifact: { fileName: string; mimeType: string; sha256: string },
+): Promise<void> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`下载失败（HTTP ${response.status}）`);
+  const buffer = await response.arrayBuffer();
+  const digest = await crypto.subtle.digest('SHA-256', buffer);
+  const hex = Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+  if (hex !== artifact.sha256) {
+    throw new Error(
+      `下载内容 SHA256 不匹配（${hex.slice(0, 12)}… vs ${artifact.sha256.slice(0, 12)}…）`,
+    );
+  }
+  const objectUrl = URL.createObjectURL(new Blob([buffer], { type: artifact.mimeType }));
+  const anchor = document.createElement('a');
+  anchor.href = objectUrl;
+  anchor.download = artifact.fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1200);
+}
+
 interface ServerOrchestrationState {
   availability: ServerModeAvailability;
   workspaceId: string;
@@ -103,10 +140,37 @@ interface ServerOrchestrationState {
   busy: boolean;
 }
 
+/** Narration options surfaced on the production page (5B). */
+export interface NarrationOptions {
+  enabled: boolean;
+  voiceId: string;
+  /** 0.85–1.2 × in the UI; the domain allows 0.75–1.35. */
+  speed: number;
+  timingPolicy: 'extend_scene' | 'fail_on_overflow';
+}
+
+export const DEFAULT_NARRATION_OPTIONS: NarrationOptions = {
+  enabled: true,
+  voiceId: '',
+  speed: 1,
+  timingPolicy: 'extend_scene',
+};
+
+/** Server-reported TTS availability; `configured: false` means fail closed. */
+export interface SpeechHealthView {
+  configured: boolean;
+  provider: string;
+  synthetic: boolean;
+  license: string;
+}
+
 export interface ServerOrchestrationApi extends ServerOrchestrationState {
   steps: ServerStepView[];
   events: OrchestrationEventV1[];
   canCreate: boolean;
+  speech: SpeechHealthView | null;
+  narration: NarrationOptions;
+  setNarration: (options: NarrationOptions) => void;
   start: () => Promise<void>;
   cancel: () => Promise<void>;
   retry: () => Promise<void>;
@@ -129,6 +193,8 @@ export function useServerOrchestration(videoId: string): ServerOrchestrationApi 
   const [detail, setDetail] = useState<OrchestrationRunDetailV1 | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [speech, setSpeech] = useState<SpeechHealthView | null>(null);
+  const [narration, setNarration] = useState<NarrationOptions>(DEFAULT_NARRATION_OPTIONS);
   // Keeps the idempotency key stable across a double click.
   const pendingKey = useRef<string | null>(null);
   const mounted = useRef(true);
@@ -158,6 +224,12 @@ export function useServerOrchestration(videoId: string): ServerOrchestrationApi 
           return;
         }
         setAvailability('ready');
+        void client.getHealth().then(
+          (health) => {
+            if (!cancelled) setSpeech(health);
+          },
+          () => undefined,
+        );
         const runs = await client.listRuns(workspaceId, { videoId });
         if (cancelled) return;
         const latest = runs[0] ?? null;
@@ -217,6 +289,12 @@ export function useServerOrchestration(videoId: string): ServerOrchestrationApi 
       const created = await client.createRun(workspaceId, {
         videoId,
         idempotencyKey: pendingKey.current,
+        narration: {
+          enabled: narration.enabled,
+          ...(narration.voiceId ? { voiceId: narration.voiceId } : {}),
+          speed: narration.speed,
+          timingPolicy: narration.timingPolicy,
+        },
       });
       pendingKey.current = null;
       if (!mounted.current) return;
@@ -224,7 +302,7 @@ export function useServerOrchestration(videoId: string): ServerOrchestrationApi 
       const loaded = await client.getRun(workspaceId, created.run.id);
       if (mounted.current) setDetail(loaded);
     });
-  }, [guarded, syncConfig.baseUrl, workspaceId, videoId]);
+  }, [guarded, syncConfig.baseUrl, workspaceId, videoId, narration]);
 
   const cancel = useCallback(async () => {
     if (!run) return;
@@ -271,6 +349,9 @@ export function useServerOrchestration(videoId: string): ServerOrchestrationApi 
     steps,
     events,
     canCreate: availability === 'ready' && !isActiveServerRun(run),
+    speech,
+    narration,
+    setNarration,
     start,
     cancel,
     retry,

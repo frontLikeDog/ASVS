@@ -17,6 +17,7 @@ import {
   type SceneVisual,
   type VideoProject,
 } from './schemas';
+import { narrationInputV1Schema } from './narration';
 import { orderedScenes } from './timeline';
 
 /** Version of the frozen render IR. Bump only with a migration. */
@@ -50,6 +51,24 @@ export const renderMediaAssetV1Schema = z.object({
   durationMs: z.number().int().positive(),
 });
 export type RenderMediaAssetV1 = z.infer<typeof renderMediaAssetV1Schema>;
+
+/**
+ * A real audio file (normalized WAV) backing a narration clip. Hashed and
+ * copied by the worker exactly like `renderMediaAssetV1` video files, so the
+ * renderer only ever reads `staticFile(src)`.
+ */
+export const renderAudioAssetV1Schema = z.object({
+  sceneId: idSchema,
+  sourceFile: z.string().min(1),
+  /** Remotion public-relative path; must start with `audio/` and have no `..`. */
+  src: z.string().min(1),
+  sha256: sha256Schema,
+  mimeType: z.literal('audio/wav'),
+  durationMs: z.number().int().positive(),
+  sampleRate: z.number().int().positive(),
+  channels: z.number().int().min(1).max(2),
+});
+export type RenderAudioAssetV1 = z.infer<typeof renderAudioAssetV1Schema>;
 
 /**
  * A scene as the renderer sees it. This is docs/05 `VideoSceneV1` plus the
@@ -94,6 +113,11 @@ export const renderInputV1Schema = z.object({
   features: z.array(featureSchema),
   assets: z.array(assetSchema),
   renderProfile: renderProfileSchema,
+  /**
+   * 5B narration. Optional so the Step 1/2 silent fixtures stay valid without
+   * any migration; when present the renderer mounts one `<Audio>` per clip.
+   */
+  narration: narrationInputV1Schema.optional(),
 });
 export type RenderInputV1 = z.infer<typeof renderInputV1Schema>;
 
@@ -109,6 +133,8 @@ export const renderFixtureV1Schema = z.object({
   assets: z.array(assetSchema),
   /** Real files referenced by `Asset.media`; empty for the Step 1 fixture. */
   media: z.array(renderMediaAssetV1Schema).default([]),
+  /** Normalized narration WAV files; empty for the silent Step 1/2 fixtures. */
+  audio: z.array(renderAudioAssetV1Schema).default([]),
 });
 export type RenderFixtureV1 = z.infer<typeof renderFixtureV1Schema>;
 
@@ -172,7 +198,58 @@ export const renderManifestV1Schema = z.object({
     height: z.number().int().positive(),
     fps: z.number().positive(),
     frameCount: z.number().int().nonnegative().optional(),
+    /** Present only when the file actually carries an audio stream (5B). */
+    audio: z
+      .object({
+        codecName: z.string(),
+        sampleRate: z.number().int().positive(),
+        channels: z.number().int().min(1).max(2),
+        durationMs: z.number().int().nonnegative(),
+        meanVolumeDb: z.number().optional(),
+      })
+      .optional(),
   }),
+  /** 5B provenance of the narration track; absent for silent renders. */
+  narration: z
+    .object({
+      provider: z.string().min(1),
+      model: z.string().min(1),
+      voiceId: z.string().min(1),
+      language: z.string().min(1),
+      license: z.string().min(1),
+      synthetic: z.boolean(),
+      timingPolicy: z.string().min(1),
+      adjustments: z.array(
+        z.object({
+          sceneId: idSchema,
+          originalDurationFrames: z.number().int().min(1),
+          effectiveDurationFrames: z.number().int().min(1),
+          audioDurationMs: z.number().int().min(1),
+          overflowMs: z.number().int().min(0),
+        }),
+      ),
+      clips: z.array(
+        z.object({
+          sceneId: idSchema,
+          sha256: sha256Schema,
+          durationMs: z.number().int().positive(),
+          startMs: z.number().int().min(0),
+          endMs: z.number().int().min(0),
+        }),
+      ),
+    })
+    .optional(),
+  /** 5B sidecar SRT bound to the same frozen timeline. */
+  subtitles: z
+    .object({
+      fileName: z.string().min(1),
+      mimeType: z.literal('application/x-subrip'),
+      byteSize: z.number().int().positive(),
+      sha256: sha256Schema,
+      cueCount: z.number().int().min(1),
+      durationMs: z.number().int().positive(),
+    })
+    .optional(),
   createdAt: isoDateSchema,
 });
 export type RenderManifestV1 = z.infer<typeof renderManifestV1Schema>;

@@ -162,6 +162,17 @@ async function start() {
     artifactDir,
     renderExecutor: new BlockingExecutor(),
     orchestrationInstanceId: 'api_route_test',
+    // Tests run offline: the deterministic voice keeps narration requests
+    // valid without a provider while staying honestly labelled synthetic.
+    speechConfig: {
+      provider: 'deterministic_test',
+      model: 'tone-v1',
+      voiceZh: 'test-voice-zh',
+      voiceEn: 'test-voice-en',
+      license: 'internal-deterministic-test-only',
+      timeoutMs: 5_000,
+      maxRetries: 0,
+    },
   });
   app = built.app;
   const put = await built.app.inject({
@@ -176,16 +187,108 @@ async function start() {
 const BASE = `/v1/workspaces/${WORKSPACE_ID}/orchestration`;
 
 describe('编排路由', () => {
-  it('health 报告 orchestrationReady', async () => {
+  it('health 报告 orchestrationReady 与 tts 状态（不泄露凭证）', async () => {
     await start();
     const response = await app!.inject({ method: 'GET', url: '/v1/health' });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ orchestrationReady: true });
+    expect(response.json()).toMatchObject({
+      orchestrationReady: true,
+      tts: {
+        configured: true,
+        provider: 'deterministic_test',
+        synthetic: true,
+        license: 'internal-deterministic-test-only',
+      },
+    });
+    expect(response.body).not.toMatch(/api[_-]?key/i);
+  });
+
+  it('旁白请求在 TTS 未配置时返回 503（fail-closed）', async () => {
+    artifactDir = mkdtempSync(path.join(os.tmpdir(), 'asvs-orch-route-'));
+    const built = await buildApp({
+      dbPath: ':memory:',
+      artifactDir,
+      renderExecutor: new BlockingExecutor(),
+      orchestrationInstanceId: 'api_route_test',
+      speechConfig: {
+        provider: 'unconfigured',
+        model: 'none',
+        voiceZh: '',
+        voiceEn: '',
+        license: 'none',
+        timeoutMs: 5_000,
+        maxRetries: 0,
+      },
+    });
+    app = built.app;
+    await built.app.inject({
+      method: 'PUT',
+      url: `/v1/workspaces/${WORKSPACE_ID}`,
+      payload: { schemaVersion: 2, baseRevision: 0, workspace: SNAPSHOT },
+    });
+    const health = await app.inject({ method: 'GET', url: '/v1/health' });
+    expect((health.json() as { tts: { configured: boolean } }).tts.configured).toBe(false);
+    const response = await app.inject({
+      method: 'POST',
+      url: `${BASE}/runs`,
+      payload: { videoId: 'vid_route', idempotencyKey: 'route-idem-tts-0001' },
+    });
+    expect(response.statusCode).toBe(503);
+    expect((response.json() as { error: { code: string } }).error.code).toBe('tts_not_configured');
+    // Explicitly disabling narration still works — silence is allowed when asked.
+    const silent = await app.inject({
+      method: 'POST',
+      url: `${BASE}/runs`,
+      payload: {
+        videoId: 'vid_route',
+        idempotencyKey: 'route-idem-tts-0002',
+        narration: { enabled: false },
+      },
+    });
+    expect(silent.statusCode).toBe(201);
+  });
+
+  it('非法旁白语速返回 400', async () => {
+    await start();
+    const response = await app!.inject({
+      method: 'POST',
+      url: `${BASE}/runs`,
+      payload: {
+        videoId: 'vid_route',
+        idempotencyKey: 'route-idem-speed-01',
+        narration: { enabled: false, speed: 3 },
+      },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it('导出门禁：未审批返回 409，未知视频返回 404，非法请求体 400', async () => {
+    await start();
+    const unapproved = await app!.inject({
+      method: 'POST',
+      url: `${BASE}/exports`,
+      payload: { videoId: 'vid_route' },
+    });
+    expect(unapproved.statusCode).toBe(409);
+    expect((unapproved.json() as { error: { code: string } }).error.code).toBe(
+      'export_not_approved',
+    );
+    const missing = await app!.inject({
+      method: 'POST',
+      url: `${BASE}/exports`,
+      payload: { videoId: 'vid_nope' },
+    });
+    expect(missing.statusCode).toBe(404);
+    const invalid = await app!.inject({ method: 'POST', url: `${BASE}/exports`, payload: {} });
+    expect(invalid.statusCode).toBe(400);
+    const listed = await app!.inject({ method: 'GET', url: `${BASE}/exports` });
+    expect(listed.statusCode).toBe(200);
+    expect((listed.json() as { bundles: unknown[] }).bundles).toEqual([]);
   });
 
   it('创建运行：201，重复 idempotencyKey 返回 200 + created=false', async () => {
     await start();
-    const payload = { videoId: 'vid_route', idempotencyKey: 'route-idem-000001' };
+    const payload = { videoId: 'vid_route', idempotencyKey: 'route-idem-000001', narration: { enabled: false } };
     const first = await app!.inject({ method: 'POST', url: `${BASE}/runs`, payload });
     expect(first.statusCode).toBe(201);
     const created = first.json() as { run: { id: string; status: string }; created: boolean };
@@ -209,7 +312,7 @@ describe('编排路由', () => {
     const unknown = await app!.inject({
       method: 'POST',
       url: `${BASE}/runs`,
-      payload: { videoId: 'vid_missing', idempotencyKey: 'route-idem-000002' },
+      payload: { videoId: 'vid_missing', idempotencyKey: 'route-idem-000002', narration: { enabled: false } },
     });
     expect(unknown.statusCode).toBe(404);
     expect((unknown.json() as { error: { code: string } }).error.code).toBe('video_not_found');
@@ -219,6 +322,7 @@ describe('编排路由', () => {
       payload: {
         videoId: 'vid_route',
         idempotencyKey: 'route-idem-000003',
+        narration: { enabled: false },
         renderProfile: { width: 1080, height: 1920 },
       },
     });
@@ -233,7 +337,7 @@ describe('编排路由', () => {
     const created = await app!.inject({
       method: 'POST',
       url: `${BASE}/runs`,
-      payload: { videoId: 'vid_route', idempotencyKey: 'route-idem-000010' },
+      payload: { videoId: 'vid_route', idempotencyKey: 'route-idem-000010', narration: { enabled: false } },
     });
     const runId = (created.json() as { run: { id: string } }).run.id;
 
@@ -257,7 +361,7 @@ describe('编排路由', () => {
     const created = await app!.inject({
       method: 'POST',
       url: `${BASE}/runs`,
-      payload: { videoId: 'vid_route', idempotencyKey: 'route-idem-000020' },
+      payload: { videoId: 'vid_route', idempotencyKey: 'route-idem-000020', narration: { enabled: false } },
     });
     const runId = (created.json() as { run: { id: string } }).run.id;
     const cancelled = await app!.inject({ method: 'POST', url: `${BASE}/runs/${runId}/cancel` });
@@ -275,7 +379,7 @@ describe('编排路由', () => {
     const created = await app!.inject({
       method: 'POST',
       url: `${BASE}/runs`,
-      payload: { videoId: 'vid_route', idempotencyKey: 'route-idem-000030' },
+      payload: { videoId: 'vid_route', idempotencyKey: 'route-idem-000030', narration: { enabled: false } },
     });
     const runId = (created.json() as { run: { id: string } }).run.id;
     const badBody = await app!.inject({
@@ -313,7 +417,7 @@ describe('编排路由', () => {
     const seeded = await built.app.inject({
       method: 'POST',
       url: `${BASE}/runs`,
-      payload: { videoId: 'vid_route', idempotencyKey: 'route-idem-traversal' },
+      payload: { videoId: 'vid_route', idempotencyKey: 'route-idem-traversal', narration: { enabled: false } },
     });
     const seededRunId = (seeded.json() as { run: { id: string } }).run.id;
     built.orchestrationStore.insertArtifact({

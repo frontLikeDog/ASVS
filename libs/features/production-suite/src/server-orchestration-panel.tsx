@@ -10,6 +10,7 @@ import {
   CircleDashed,
   Clock3,
   Download,
+  FileText,
   HardDrive,
   Loader2,
   RotateCcw,
@@ -25,20 +26,35 @@ import {
   Panel,
   PanelHeader,
   ProgressBar,
+  Field,
+  Input,
+  Select,
+  Switch,
   cn,
 } from '@asvs/ui';
 import { getOrchestrationClient, useUiStore } from '@asvs/state';
 import {
   checkpointLabel,
+  downloadVerifiedArtifact,
   formatArtifactSize,
   formatDurationMs,
   isActiveServerRun,
   shortSha,
+  type NarrationOptions,
   type ServerOrchestrationApi,
   type ServerStepView,
 } from './server-orchestration';
 
-const NO_AUDIO_NOTE = '16:9 · H.264 · 无音轨（5B 接入配音与 SRT）';
+/** UI-bounded speed range; the domain allows 0.75–1.35 but 0.85–1.2 is sane. */
+const SPEED_OPTIONS = [0.85, 0.9, 1, 1.1, 1.2] as const;
+
+/**
+ * Format line for a server render. Never claims audio the file does not have:
+ * the manifest decides, not the user's narration toggle.
+ */
+function formatLine(hasAudio: boolean): string {
+  return hasAudio ? '16:9 · H.264 + AAC 48kHz · 含旁白音轨' : '16:9 · H.264 · 无音轨';
+}
 
 const STEP_TONE: Record<ServerStepView['status'], { label: string; tone: 'neutral' | 'accent' | 'success' | 'warn' | 'danger' }> = {
   pending: { label: '待执行', tone: 'neutral' },
@@ -66,10 +82,10 @@ function runProgressPercent(run: OrchestrationRunV1 | null): number {
 /**
  * Server-authoritative production panel.
  *
- * Renders the five-step DAG the Fastify orchestrator actually executes, polls
+ * Renders the seven-step DAG the Fastify orchestrator actually executes, polls
  * it while it runs, and keeps working after a reload (the run lives in SQLite,
- * not in this tab). States the UI does not implement yet (approval Gate, 5B
- * audio) are labelled instead of implied.
+ * not in this tab). The audio metadata shown here comes from the worker's own
+ * ffprobe result in the manifest — never from the requested narration options.
  */
 export function ServerOrchestrationPanel({ api }: { api: ServerOrchestrationApi }) {
   const pushToast = useUiStore((state) => state.pushToast);
@@ -85,26 +101,23 @@ export function ServerOrchestrationPanel({ api }: { api: ServerOrchestrationApi 
   const progress = runProgressPercent(run);
   const videoArtifact = detail?.artifacts.find((artifact) => artifact.kind === 'video_mp4') ?? null;
   const manifestArtifact = detail?.artifacts.find((artifact) => artifact.kind === 'render_manifest') ?? null;
+  const srtArtifact = detail?.artifacts.find((artifact) => artifact.kind === 'subtitles_srt') ?? null;
+  const videoHasAudio = videoArtifact?.metadata.hasAudio === true;
+  const syntheticVoice = videoArtifact?.metadata.narration
+    ? (videoArtifact.metadata.narration as { synthetic?: boolean }).synthetic === true
+    : api.speech?.synthetic === true;
+  const narrationEnabled = run?.input.narration?.enabled ?? api.narration.enabled;
+  const speechUnavailable = api.speech !== null && !api.speech.configured;
 
   const download = async (artifact: OrchestrationArtifactV1) => {
     setDownloading(true);
     try {
       const client = await getOrchestrationClient();
-      const response = await fetch(client.artifactDownloadUrl(api.workspaceId, artifact.id));
-      if (!response.ok) throw new Error(`下载失败（HTTP ${response.status}）`);
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = artifact.fileName;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 1200);
+      await downloadVerifiedArtifact(client.artifactDownloadUrl(api.workspaceId, artifact.id), artifact);
       pushToast({
         tone: 'success',
         title: `已下载 ${artifact.fileName}`,
-        description: `SHA256 ${shortSha(artifact.sha256)} · ${formatArtifactSize(artifact.byteSize)}`,
+        description: `SHA256 ${shortSha(artifact.sha256)} 已校验 · ${formatArtifactSize(artifact.byteSize)}`,
       });
     } catch (caught) {
       pushToast({
@@ -156,22 +169,39 @@ export function ServerOrchestrationPanel({ api }: { api: ServerOrchestrationApi 
           <>
             <div className="grid gap-2 sm:grid-cols-2">
               <FactCard label="渲染器" value="Remotion · 独立子进程" />
-              <FactCard label="产物" value="MP4 · receipt.json · manifest.json" />
-              <FactCard label="格式" value={NO_AUDIO_NOTE} />
+              <FactCard label="产物" value="MP4（含 AAC 旁白） · SRT · receipt.json · manifest.json" />
+              <FactCard label="格式" value="16:9 · H.264 + AAC 48kHz" />
               <FactCard label="恢复策略" value="SIGKILL / API 重启后按 checkpoint 续跑" />
             </div>
+
+            <NarrationOptionsPanel
+              options={api.narration}
+              onChange={api.setNarration}
+              speech={api.speech}
+              disabled={busy}
+            />
+
+            {api.error ? (
+              <div className="flex items-start gap-1.5 text-[9.5px] leading-4 text-danger">
+                <AlertTriangle size={11} className="mt-0.5 shrink-0" />
+                {api.error}
+              </div>
+            ) : null}
+
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 variant="primary"
                 size="sm"
                 icon={<Server size={12} />}
-                disabled={busy}
+                disabled={busy || (narrationEnabled && speechUnavailable)}
                 onClick={() => void api.start()}
               >
                 {busy ? '正在创建…' : '启动服务端渲染'}
               </Button>
               <span className="text-[9px] text-faint">
-                真实的 16:9 MP4 会写入服务器产物目录；不依赖浏览器定时器。
+                {narrationEnabled && speechUnavailable
+                  ? '未配置 TTS：旁白已启用时服务端会拒绝创建运行（503），不会静默降级为无声。'
+                  : '真实的 16:9 MP4 会写入服务器产物目录；不依赖浏览器定时器。'}
               </span>
             </div>
           </>
@@ -187,6 +217,21 @@ export function ServerOrchestrationPanel({ api }: { api: ServerOrchestrationApi 
                 hint={run.input.usingPlaceholder ? '缺失录屏的镜头已明确标注' : 'SHA256 已校验'}
               />
             </div>
+            {run.input.narration?.enabled ? (
+              <div className="flex flex-wrap items-center gap-2 text-[9.5px] text-faint">
+                <span>
+                  旁白 {run.input.narration.clipCount} 段 · 缓存命中 {run.input.narration.cacheHits} 段 ·{' '}
+                  时长调整 {run.input.narration.adjustments} 处（{run.input.narration.timingPolicy}）
+                </span>
+                {run.input.narration.synthetic ? (
+                  <Badge tone="warn" dot={false}>测试合成音轨 · 非真人配音</Badge>
+                ) : (
+                  <Badge tone="success" dot={false}>真实商用配音</Badge>
+                )}
+              </div>
+            ) : (
+              <div className="text-[9.5px] text-faint">本运行未启用旁白（无声 MP4，不生成 SRT）。</div>
+            )}
             <div>
               <ProgressBar
                 value={progress}
@@ -265,6 +310,17 @@ export function ServerOrchestrationPanel({ api }: { api: ServerOrchestrationApi 
                   {downloading ? '下载中…' : `下载 MP4 · ${formatArtifactSize(videoArtifact.byteSize)}`}
                 </Button>
               ) : null}
+              {run.status === 'succeeded' && srtArtifact ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={<FileText size={12} />}
+                  disabled={downloading}
+                  onClick={() => void download(srtArtifact)}
+                >
+                  下载 SRT · {String(srtArtifact.metadata.cueCount ?? '?')} 条
+                </Button>
+              ) : null}
               {run.status === 'succeeded' && manifestArtifact ? (
                 <Button
                   variant="ghost"
@@ -283,12 +339,18 @@ export function ServerOrchestrationPanel({ api }: { api: ServerOrchestrationApi 
 
             {run.status === 'succeeded' && videoArtifact ? (
               <div className="rounded-sm border border-success/25 bg-success-soft/20 p-3">
-                <div className="flex items-center gap-1.5 text-[10.5px] font-medium text-success">
+                <div className="flex flex-wrap items-center gap-1.5 text-[10.5px] font-medium text-success">
                   <CheckCircle2 size={12} /> 真实 MP4 已生成
+                  {syntheticVoice ? (
+                    <Badge tone="warn" dot={false} className="ml-1">测试合成音轨 · 非真人配音</Badge>
+                  ) : null}
                 </div>
                 <div className="mt-1.5 grid gap-x-4 gap-y-1 text-[9.5px] sm:grid-cols-2">
                   <ArtifactFact label="文件" value={videoArtifact.fileName} mono />
-                  <ArtifactFact label="分辨率" value={`${String(videoArtifact.metadata.width ?? '?')}×${String(videoArtifact.metadata.height ?? '?')} · ${NO_AUDIO_NOTE}`} />
+                  <ArtifactFact
+                    label="分辨率"
+                    value={`${String(videoArtifact.metadata.width ?? '?')}×${String(videoArtifact.metadata.height ?? '?')} · ${formatLine(videoHasAudio)}`}
+                  />
                   <ArtifactFact
                     label="时长"
                     value={typeof videoArtifact.metadata.durationMs === 'number' ? formatDurationMs(videoArtifact.metadata.durationMs) : '—'}
@@ -297,6 +359,27 @@ export function ServerOrchestrationPanel({ api }: { api: ServerOrchestrationApi 
                   <ArtifactFact label="大小" value={formatArtifactSize(videoArtifact.byteSize)} mono />
                   <ArtifactFact label="SHA256" value={shortSha(videoArtifact.sha256, 20)} mono />
                   <ArtifactFact label="编码" value={String(videoArtifact.metadata.codecName ?? 'h264')} mono />
+                  {videoHasAudio ? (
+                    <ArtifactFact
+                      label="音轨"
+                      value={`${String(videoArtifact.metadata.audioCodecName ?? 'aac')} · ${String(videoArtifact.metadata.audioSampleRate ?? 48000)}Hz · ${String(videoArtifact.metadata.audioChannels ?? 1)}ch`}
+                      mono
+                    />
+                  ) : null}
+                  {typeof videoArtifact.metadata.audioMeanVolumeDb === 'number' ? (
+                    <ArtifactFact
+                      label="响度"
+                      value={`mean ${videoArtifact.metadata.audioMeanVolumeDb.toFixed(1)} dB`}
+                      mono
+                    />
+                  ) : null}
+                  {srtArtifact ? (
+                    <ArtifactFact
+                      label="字幕"
+                      value={`${srtArtifact.fileName} · ${String(srtArtifact.metadata.cueCount ?? '?')} 条`}
+                      mono
+                    />
+                  ) : null}
                 </div>
               </div>
             ) : null}
@@ -416,6 +499,114 @@ function RunStatusBadge({ status }: { status: OrchestrationRunV1['status'] }) {
   return <Badge tone={meta.tone} dot={false}>{meta.label}</Badge>;
 }
 
+/**
+ * Narration controls for a new run.
+ *
+ * The toggle is the only thing that can turn voice off, and it is honest about
+ * what that means: a silent MP4 with no SRT. When the server has no TTS
+ * configured the start button is disabled rather than letting the run fail.
+ */
+function NarrationOptionsPanel({
+  options,
+  onChange,
+  speech,
+  disabled,
+}: {
+  options: NarrationOptions;
+  onChange: (options: NarrationOptions) => void;
+  speech: ServerOrchestrationApi['speech'];
+  disabled: boolean;
+}) {
+  const set = (patch: Partial<NarrationOptions>) => onChange({ ...options, ...patch });
+  const unconfigured = speech !== null && !speech.configured;
+  return (
+    <div className="rounded-sm border border-line bg-raised/20 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Switch
+            checked={options.enabled}
+            onCheckedChange={(checked) => set({ enabled: checked })}
+            disabled={disabled}
+            label="合成旁白音轨"
+          />
+          <div>
+            <div className="text-[10.5px] font-medium text-fg">合成旁白音轨（TTS）</div>
+            <div className="text-[8.5px] text-faint">
+              按镜头合成 → 规整为 48kHz WAV → 混入 MP4 并生成 SRT；文本相同则命中缓存、不重复计费。
+            </div>
+          </div>
+        </div>
+        {speech ? (
+          speech.synthetic ? (
+            <Badge tone="warn" dot={false}>测试合成音轨 · 非真人配音</Badge>
+          ) : speech.configured ? (
+            <Badge tone="success" dot={false}>真实配音 · {speech.provider}</Badge>
+          ) : (
+            <Badge tone="danger" dot={false}>TTS 未配置</Badge>
+          )
+        ) : (
+          <Badge tone="outline" dot={false}>TTS 状态未知</Badge>
+        )}
+      </div>
+
+      {options.enabled ? (
+        <div className="mt-3 grid gap-2 sm:grid-cols-3">
+          <Field label="音色 voiceId" optional>
+            <Input
+              value={options.voiceId}
+              placeholder="留空使用服务端默认音色"
+              disabled={disabled}
+              onChange={(event) => set({ voiceId: event.target.value })}
+            />
+          </Field>
+          <Field label="语速" hint="0.75–1.35 为服务端允许范围">
+            <Select
+              value={String(options.speed)}
+              disabled={disabled}
+              onChange={(event) => set({ speed: Number(event.target.value) })}
+            >
+              {SPEED_OPTIONS.map((speed) => (
+                <option key={speed} value={speed}>
+                  {speed.toFixed(2)}×
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="时长策略">
+            <Select
+              value={options.timingPolicy}
+              disabled={disabled}
+              onChange={(event) =>
+                set({ timingPolicy: event.target.value as NarrationOptions['timingPolicy'] })
+              }
+            >
+              <option value="extend_scene">延长镜头以容纳旁白（extend_scene）</option>
+              <option value="fail_on_overflow">溢出即失败（fail_on_overflow）</option>
+            </Select>
+          </Field>
+        </div>
+      ) : null}
+
+      {unconfigured ? (
+        <div className="mt-2 flex items-start gap-1.5 rounded-sm border border-warn/25 bg-warn-soft/20 px-2.5 py-2 text-[9px] leading-4 text-warn">
+          <AlertTriangle size={10} className="mt-0.5 shrink-0" />
+          服务端未配置 TTS（ASVS_TTS_PROVIDER / ASVS_TTS_API_URL / ASVS_TTS_API_KEY）。启用旁白时创建运行会返回 503；
+          不会静默降级为伪造音轨。也可以关闭旁白，只渲染无声 MP4。
+        </div>
+      ) : options.enabled ? (
+        <p className="mt-2 text-[9px] leading-4 text-faint">
+          旁白绝不截断、绝不跨镜头；extend_scene 只延长镜头，保证音画同长。{speech ? `许可：${speech.license}` : ''}
+        </p>
+      ) : (
+        <p className="mt-2 flex items-start gap-1.5 text-[9px] leading-4 text-warn">
+          <AlertTriangle size={10} className="mt-0.5 shrink-0" />
+          关闭旁白将产出无声 MP4，且不生成 SRT；导出包会因缺少字幕被拒绝（export_incomplete）。
+        </p>
+      )}
+    </div>
+  );
+}
+
 function FactCard({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-sm border border-line bg-raised/20 px-2.5 py-2">
@@ -452,6 +643,10 @@ function stepName(stepKey: OrchestrationStepKey): string {
       return '核验声明';
     case 'prepare_media':
       return '准备素材';
+    case 'synthesize_voice':
+      return '合成旁白';
+    case 'generate_subtitles':
+      return '生成字幕';
     case 'render_video':
       return '渲染视频';
     case 'register_artifacts':

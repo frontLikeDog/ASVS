@@ -1,16 +1,20 @@
 import { z } from 'zod';
 import {
+  exportBundleDetailV1Schema,
   orchestrationApprovalV1Schema,
   orchestrationArtifactV1Schema,
   orchestrationRunDetailV1Schema,
   orchestrationRunV1Schema,
+  type ExportBundleDetailV1,
   type OrchestrationArtifactKind,
   type OrchestrationRunDetailV1,
   type OrchestrationRunV1,
 } from '@asvs/domain';
 import type {
+  CreateExportBundleInput,
   CreateOrchestrationRunRequest,
   CreateOrchestrationRunResponse,
+  ExportBundleListOptions,
   ListOrchestrationRunsQuery,
   OrchestrationClientPort,
 } from '@asvs/ports';
@@ -52,6 +56,24 @@ const latestArtifactResponseSchema = z.object({
   run: orchestrationRunV1Schema,
   artifact: orchestrationArtifactV1Schema,
   downloadUrl: z.string().min(1),
+});
+
+const exportBundleListResponseSchema = z.object({
+  bundles: z.array(exportBundleDetailV1Schema),
+});
+
+// `/v1/health` is intentionally permissive about unknown fields but requires
+// the `tts` block so the UI can render an honest "narration unavailable" state.
+const healthResponseSchema = z.object({
+  ok: z.boolean().optional(),
+  orchestrationReady: z.boolean().optional(),
+  tts: z.object({
+    configured: z.boolean(),
+    provider: z.string(),
+    model: z.string().optional(),
+    synthetic: z.boolean(),
+    license: z.string(),
+  }),
 });
 
 function trimTrailingSlash(value: string): string {
@@ -206,7 +228,34 @@ export class HttpOrchestrationClient implements OrchestrationClientPort {
     _kind?: OrchestrationArtifactKind,
   ): string {
     void _kind;
-    return this.url(workspaceId, `/artifacts/${encodeURIComponent(artifactId)}`);
+    return this.url(workspaceId, `/artifacts/${encodeURIComponent(artifactId)}/download`);
+  }
+
+  async createExportBundle(
+    workspaceId: string,
+    input: CreateExportBundleInput,
+  ): Promise<ExportBundleDetailV1> {
+    const response = await this.request(this.url(workspaceId, '/exports'), {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) throw await readError(response);
+    return exportBundleDetailV1Schema.parse(await response.json());
+  }
+
+  async listExportBundles(
+    workspaceId: string,
+    options: ExportBundleListOptions = {},
+  ): Promise<ExportBundleDetailV1[]> {
+    const search = new URLSearchParams();
+    if (options.videoId) search.set('videoId', options.videoId);
+    if (options.limit) search.set('limit', String(options.limit));
+    const query = search.toString();
+    const response = await this.request(
+      this.url(workspaceId, `/exports${query ? `?${query}` : ''}`),
+    );
+    if (!response.ok) throw await readError(response);
+    return exportBundleListResponseSchema.parse(await response.json()).bundles;
   }
 
   /** Latest succeeded run's MP4 for a video, plus its download URL. */
@@ -220,6 +269,25 @@ export class HttpOrchestrationClient implements OrchestrationClientPort {
     if (response.status === 404) return null;
     if (!response.ok) throw await readError(response);
     return latestArtifactResponseSchema.parse(await response.json());
+  }
+
+  async getHealth(): Promise<{
+    configured: boolean;
+    provider: string;
+    synthetic: boolean;
+    license: string;
+  }> {
+    const response = await this.fetchImpl(`${this.baseUrl}/v1/health`, {
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) throw await readError(response);
+    const body = healthResponseSchema.parse(await response.json());
+    return {
+      configured: body.tts.configured,
+      provider: body.tts.provider,
+      synthetic: body.tts.synthetic,
+      license: body.tts.license,
+    };
   }
 
   async isReachable(): Promise<boolean> {

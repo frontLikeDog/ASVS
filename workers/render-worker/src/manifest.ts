@@ -1,7 +1,8 @@
-import { statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import type {
   ArtifactReceiptV1,
+  RenderAudioAssetV1,
   RenderInputV1,
   RenderManifestV1,
   RenderMediaAssetV1,
@@ -12,9 +13,16 @@ import {
   renderManifestV1Schema,
   storyboardDurationMs,
 } from '@asvs/domain';
-import { digestOf, sha256File } from './hash';
+import { digestOf, sha256Buffer, sha256File } from './hash';
 import type { ProbeResult } from './ffprobe';
 import { workspaceRoot } from './paths';
+
+export interface SubtitleBinding {
+  file: string;
+  /** Absolute timeline anchored to the frozen storyboard, for validation. */
+  durationMs: number;
+  cueCount: number;
+}
 
 export interface ArtifactInput {
   jobId: string;
@@ -27,6 +35,20 @@ export interface ArtifactInput {
   createdAt: string;
   /** Real capture files actually copied into the render public dir. */
   media?: RenderMediaAssetV1[];
+  /** Narration WAV files copied into the public dir (5B). */
+  audio?: RenderAudioAssetV1[];
+  /** Mean volume measured with volumedetect; required with narration. */
+  audioMeanVolumeDb?: number;
+  /** Server-verified SRT bound to this render (5B). */
+  subtitles?: SubtitleBinding;
+  /** Scene duration adjustments applied when reconciling narration. */
+  timingAdjustments?: Array<{
+    sceneId: string;
+    originalDurationFrames: number;
+    effectiveDurationFrames: number;
+    audioDurationMs: number;
+    overflowMs: number;
+  }>;
 }
 
 export interface ArtifactRecords {
@@ -44,6 +66,10 @@ export function buildArtifactRecords({
   rendererVersion,
   createdAt,
   media = [],
+  audio = [],
+  audioMeanVolumeDb,
+  subtitles,
+  timingAdjustments = [],
 }: ArtifactInput): ArtifactRecords {
   const sha256 = sha256File(file);
   const byteSize = statSync(file).size;
@@ -77,6 +103,7 @@ export function buildArtifactRecords({
     };
   });
 
+  const durationMs = storyboardDurationMs(input.storyboard);
   const receipt = artifactReceiptV1Schema.parse({
     schemaVersion: '1',
     jobId,
@@ -85,7 +112,7 @@ export function buildArtifactRecords({
     mimeType: 'video/mp4',
     byteSize,
     storageRef,
-    durationMs: storyboardDurationMs(input.storyboard),
+    durationMs,
     width: input.renderProfile.width,
     height: input.renderProfile.height,
     fps: input.storyboard.fps,
@@ -94,6 +121,55 @@ export function buildArtifactRecords({
     createdAt,
   });
 
+  const narrationInput = input.narration;
+  const fps = input.storyboard.fps;
+  const sceneStarts = new Map<string, number>();
+  let offsetFrames = 0;
+  for (const scene of input.storyboard.scenes) {
+    sceneStarts.set(scene.id, Math.round((offsetFrames / fps) * 1000));
+    offsetFrames += scene.durationFrames;
+  }
+  const narration = narrationInput
+    ? {
+        provider: narrationInput.voice.provider,
+        model: narrationInput.voice.model,
+        voiceId: narrationInput.voice.voiceId,
+        language: narrationInput.voice.language,
+        license: narrationInput.voice.license,
+        synthetic: narrationInput.voice.synthetic,
+        timingPolicy: narrationInput.timingPolicy,
+        adjustments: timingAdjustments,
+        clips: narrationInput.clips.map((clip) => {
+          const sceneStart = sceneStarts.get(clip.sceneId) ?? 0;
+          const startMs = sceneStart + clip.startOffsetMs;
+          return {
+            sceneId: clip.sceneId,
+            sha256: clip.sha256,
+            durationMs: clip.durationMs,
+            startMs,
+            endMs: startMs + clip.durationMs,
+          };
+        }),
+      }
+    : undefined;
+
+  let subtitlesRecord: RenderManifestV1['subtitles'];
+  if (subtitles) {
+    if (!existsSync(subtitles.file)) {
+      throw new Error(`SRT 文件不存在：${subtitles.file}`);
+    }
+    const bytes = readFileSync(subtitles.file);
+    subtitlesRecord = {
+      fileName: path.basename(subtitles.file),
+      mimeType: 'application/x-subrip',
+      byteSize: bytes.byteLength,
+      sha256: sha256Buffer(bytes),
+      cueCount: subtitles.cueCount,
+      durationMs: subtitles.durationMs,
+    };
+  }
+
+  const audioProbe = probe.audio;
   const manifest = renderManifestV1Schema.parse({
     schemaVersion: '1',
     jobId,
@@ -118,7 +194,20 @@ export function buildArtifactRecords({
       height: probe.height,
       fps: probe.fps,
       frameCount: probe.frameCount,
+      ...(audioProbe
+        ? {
+            audio: {
+              codecName: audioProbe.codecName,
+              sampleRate: audioProbe.sampleRate,
+              channels: audioProbe.channels,
+              durationMs: audioProbe.durationMs,
+              ...(audioMeanVolumeDb !== undefined ? { meanVolumeDb: audioMeanVolumeDb } : {}),
+            },
+          }
+        : {}),
     },
+    ...(narration ? { narration } : {}),
+    ...(subtitlesRecord ? { subtitles: subtitlesRecord } : {}),
     createdAt,
   });
 
@@ -127,4 +216,9 @@ export function buildArtifactRecords({
 
 export function storageRefFor(file: string): string {
   return path.relative(workspaceRoot, file).split(path.sep).join('/');
+}
+
+/** True when the job carries narration and therefore must render an AAC track. */
+export function jobExpectsAudio(input: RenderInputV1, audio: RenderAudioAssetV1[]): boolean {
+  return (input.narration?.clips.length ?? 0) > 0 || audio.length > 0;
 }

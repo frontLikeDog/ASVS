@@ -78,6 +78,10 @@ export default defineConfig({
         ASVS_API_PORT: '4300',
         ASVS_DB_PATH: apiDbPath,
         ASVS_LOG_LEVEL: 'warn',
+        // The E2E suite is offline: narrate with the deterministic test voice.
+        // It labels itself `synthetic: true` everywhere, so the UI assertions
+        // stay honest instead of implying a real commercial voice.
+        ASVS_TTS_PROVIDER: 'deterministic_test',
       },
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,

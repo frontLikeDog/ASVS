@@ -99,7 +99,11 @@ jobs:
           # Workspace sync e2e starts apps/api and drives two browser contexts,
           # so API, adapter and port changes must run it too.
           E2E_PROJECTS="web-studio|state|ui|domain|ports|adapters-http|api|mock-services|mock-data|project-hub|video-studio|production-suite"
-          RENDER_PROJECTS="domain|render|render-worker|mock-data"
+          # `api` is in the render set because `pnpm export:verify` (5B, AC-10)
+          # lives there and drives the real render worker; the render gate is
+          # the only job with ffmpeg + Remotion + fonts, so it is where the
+          # narrated export is proven.
+          RENDER_PROJECTS="domain|render|render-worker|mock-data|api|ports|adapters-http"
           # The DemoPlan drives the shipped UI, so any page, store or contract
           # change can invalidate its assertions. Capture is also the only gate
           # that proves the real-footage → render handoff.
@@ -160,6 +164,19 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
+
+      # 5B narration tests normalize provider output with real ffmpeg/ffprobe
+      # (`apps/api/src/speech`). Without them every speech test fails on a bare
+      # runner with `spawnSync ffmpeg ENOENT`, so the unit suite installs them
+      # just like the render and capture gates do.
+      - name: Install ffmpeg
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 ffmpeg
+          ffmpeg -version
+          ffprobe -version
 
       - name: Lint, typecheck and unit tests (affected only)
         run: >-
@@ -273,6 +290,16 @@ jobs:
       - name: Re-verify artifact against manifest and receipt
         run: pnpm verify:render
 
+      # Step 5B / AC-10: real narration (deterministic test voice, honestly
+      # labelled), AAC muxing, server SRT and the Gate 3 export bundle. Runs
+      # after the golden fixture so a broken silent path fails first and fast.
+      - name: Verify narrated export (AC-10)
+        run: pnpm export:verify
+        env:
+          # Absolute so it does not depend on the nx target's cwd (apps/api);
+          # the upload step below resolves `dist/audio-verify` from the repo root.
+          ASVS_VERIFY_EXPORT_DIR: ${{ github.workspace }}/dist/audio-verify
+
       - name: Upload render artifact
         uses: actions/upload-artifact@v4
         with:
@@ -282,6 +309,17 @@ jobs:
             dist/render-worker/golden-30s/manifest.json
             dist/render-worker/golden-30s/receipt.json
           retention-days: 7
+
+      # The narrated MP4 / SRT / manifest live in a temp dir that export:verify
+      # deletes; keep the run here so the PR carries inspectable audio evidence.
+      - name: Upload narrated export artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: narration-export-verify
+          path: |
+            dist/audio-verify/**
+          retention-days: 7
+          if-no-files-found: warn
 
   # Step 2 Exit Gate: execute the approved DemoPlan against the production
   # build, require UI assertions (exit code alone is never enough), repeat it

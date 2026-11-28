@@ -282,6 +282,7 @@ describe('SQLite migration v5 · 编排表', () => {
         renderProfile: { width: 1920, height: 1080, codec: 'h264', crf: 18 },
       } as unknown as RenderJobInputV1['input'],
       media: [],
+      audio: [],
       outputFileName: `${RUN_ID}.mp4`,
       createdAt: ISO,
     };

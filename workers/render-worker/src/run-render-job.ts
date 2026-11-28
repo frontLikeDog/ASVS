@@ -1,9 +1,10 @@
-import { mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { bundle, type WebpackOverrideFn } from '@remotion/bundler';
 import { renderMedia, selectComposition } from '@remotion/renderer';
 import {
   COMPOSITION_ID,
+  parseAndValidateSrt,
   renderJobDigest,
   stableJson,
   storyboardDurationMs,
@@ -14,9 +15,14 @@ import {
   type RenderManifestV1,
   type WorkerEvent,
 } from '@asvs/domain';
-import { assertDecodable, probeVideo, validateProbe } from './ffprobe';
-import { buildArtifactRecords } from './manifest';
-import { preparePublicDir } from './media';
+import {
+  assertDecodable,
+  measureAudioVolumeDb,
+  probeVideo,
+  validateProbe,
+} from './ffprobe';
+import { buildArtifactRecords, jobExpectsAudio, type SubtitleBinding } from './manifest';
+import { prepareAudioDir, preparePublicDir } from './media';
 import { renderEntry, workspaceRoot } from './paths';
 import { rendererVersion } from './renderer-version';
 import {
@@ -104,6 +110,9 @@ export async function runRenderJob(options: RenderJobOptions): Promise<RenderJob
     artifactId: job.artifactId,
     renderInput: job.input,
     media: job.media,
+    audio: job.audio,
+    subtitlesPath: job.subtitlesPath,
+    timingAdjustments: job.timingAdjustments,
   });
   if (digest !== job.jobDigest) {
     throw new RenderJobError(
@@ -138,6 +147,11 @@ export async function runRenderJob(options: RenderJobOptions): Promise<RenderJob
   const version = rendererVersion();
   const totalFrames = totalStoryboardFrames(job.input.storyboard);
   const expectedDurationMs = storyboardDurationMs(job.input.storyboard);
+  const expectsAudio = jobExpectsAudio(job.input, job.audio);
+  const timingAdjustments = job.timingAdjustments ?? [];
+  // The SRT must be re-validated here, not trusted: a tampered or stale file
+  // bound into manifest.json would otherwise be exported with the video.
+  const subtitles = loadSubtitleBinding(job, expectedDurationMs);
 
   log(
     'info',
@@ -187,6 +201,10 @@ export async function runRenderJob(options: RenderJobOptions): Promise<RenderJob
           version,
           emit,
           recordCheckpoint,
+          audio: job.audio,
+          expectsAudio,
+          subtitles,
+          timingAdjustments,
         });
         log('info', '命中 video_rendered checkpoint：跳过打包与渲染，仅复核回执。');
         cleanupWorkDirs(bundleDir, publicDir, options.keepWorkDirs);
@@ -209,6 +227,7 @@ export async function runRenderJob(options: RenderJobOptions): Promise<RenderJob
     } else {
       progress('prepare_media', 0);
       preparePublicDir({ input: job.input, media: job.media, publicDir });
+      prepareAudioDir({ input: job.input, audio: job.audio, publicDir });
       progress('prepare_media', 100);
 
       progress('bundle', 0);
@@ -274,6 +293,11 @@ export async function runRenderJob(options: RenderJobOptions): Promise<RenderJob
       crf: job.input.renderProfile.crf,
       overwrite: true,
       concurrency: options.concurrency ?? null,
+      // With narration the container must carry an AAC track alongside H.264;
+      // Remotion muxes the <Audio> tags into exactly this codec.
+      ...(expectsAudio
+        ? { audioCodec: 'aac' as const, audioBitrate: '192k' as const }
+        : {}),
       onProgress: ({ progress: value }) => {
         const percent = Math.floor(value * 100);
         if (percent >= lastPercent + 5 || percent === 100) {
@@ -295,12 +319,14 @@ export async function runRenderJob(options: RenderJobOptions): Promise<RenderJob
     progress('verify', 0);
     assertDecodable(outputFile);
     const probe = probeVideo(outputFile);
+    const audioMeanVolumeDb = expectsAudio ? measureAudioVolumeDb(outputFile) : undefined;
     const probeErrors = validateProbe(probe, {
       width: job.input.renderProfile.width,
       height: job.input.renderProfile.height,
       fps: job.input.storyboard.fps,
       durationMs: expectedDurationMs,
       frameCount: totalFrames,
+      ...(expectsAudio ? { expectAudio: { meanVolumeDb: audioMeanVolumeDb } } : {}),
     });
     if (probeErrors.length > 0) {
       throw new RenderJobError(
@@ -320,6 +346,10 @@ export async function runRenderJob(options: RenderJobOptions): Promise<RenderJob
       rendererVersion: version,
       createdAt: nowIso(),
       media: job.media,
+      audio: job.audio,
+      audioMeanVolumeDb,
+      subtitles: subtitles ?? undefined,
+      timingAdjustments,
     });
     const receiptFile = path.join(outDir, 'receipt.json');
     const manifestFile = path.join(outDir, 'manifest.json');
@@ -395,6 +425,10 @@ function finalizeExistingVideo({
   version,
   emit,
   recordCheckpoint,
+  audio,
+  expectsAudio,
+  subtitles,
+  timingAdjustments,
 }: {
   job: RenderJobInputV1;
   outputFile: string;
@@ -405,15 +439,21 @@ function finalizeExistingVideo({
   version: string;
   emit: (event: WorkerEvent) => void;
   recordCheckpoint: (phase: string, payload: Record<string, unknown>) => void;
+  audio: RenderJobInputV1['audio'];
+  expectsAudio: boolean;
+  subtitles: SubtitleBinding | null;
+  timingAdjustments: NonNullable<RenderJobInputV1['timingAdjustments']>;
 }): Pick<RenderJobOutcome, 'receipt' | 'manifest' | 'outputFile'> {
   assertDecodable(outputFile);
   const probe = probeVideo(outputFile);
+  const audioMeanVolumeDb = expectsAudio ? measureAudioVolumeDb(outputFile) : undefined;
   const probeErrors = validateProbe(probe, {
     width: job.input.renderProfile.width,
     height: job.input.renderProfile.height,
     fps: job.input.storyboard.fps,
     durationMs: expectedDurationMs,
     frameCount: totalFrames,
+    ...(expectsAudio ? { expectAudio: { meanVolumeDb: audioMeanVolumeDb } } : {}),
   });
   if (probeErrors.length > 0) {
     throw new RenderJobError('artifact_mismatch', probeErrors.join('；'), true);
@@ -429,6 +469,10 @@ function finalizeExistingVideo({
     rendererVersion: version,
     createdAt: nowIso(),
     media: job.media,
+    audio,
+    audioMeanVolumeDb,
+    subtitles: subtitles ?? undefined,
+    timingAdjustments,
   });
   const receiptFile = path.join(outDir, 'receipt.json');
   const manifestFile = path.join(outDir, 'manifest.json');
@@ -443,6 +487,35 @@ function finalizeExistingVideo({
   return { receipt, manifest, outputFile };
 }
 
+/**
+ * Loads and independently re-validates the SRT named by the job. Returns null
+ * for a silent render; throws when the file is missing or fails the timeline
+ * rules, so a bad SRT can never be bound into a manifest (AC-10).
+ */
+function loadSubtitleBinding(
+  job: RenderJobInputV1,
+  videoDurationMs: number,
+): SubtitleBinding | null {
+  if (!job.subtitlesPath) return null;
+  if (!existsSync(job.subtitlesPath)) {
+    throw new RenderJobError('invalid_input', `SRT 文件不存在：${job.subtitlesPath}`, false);
+  }
+  const content = readFileSync(job.subtitlesPath, 'utf8');
+  const validation = parseAndValidateSrt(content, { totalDurationMs: videoDurationMs });
+  if (!validation.ok) {
+    throw new RenderJobError(
+      'invalid_input',
+      `SRT 校验失败：${validation.issues.join('；')}`,
+      false,
+    );
+  }
+  return {
+    file: job.subtitlesPath,
+    durationMs: videoDurationMs,
+    cueCount: validation.cues.length,
+  };
+}
+
 /** Canonical JSON of a render job, handy for debugging digest mismatches. */
 export function renderJobCanonicalJson(job: RenderJobInputV1): string {
   return stableJson({
@@ -450,5 +523,8 @@ export function renderJobCanonicalJson(job: RenderJobInputV1): string {
     artifactId: job.artifactId,
     input: job.input,
     media: job.media,
+    audio: job.audio,
+    subtitlesPath: job.subtitlesPath ?? null,
+    timingAdjustments: job.timingAdjustments ?? [],
   });
 }

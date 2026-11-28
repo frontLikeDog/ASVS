@@ -64,3 +64,60 @@ describe('validateProbe', () => {
     expect(validateProbe(probe({ durationMs: 30260 }), expected)).not.toEqual([]);
   });
 });
+
+describe('validateProbe · 5B 音轨门禁', () => {
+  const withAudio = {
+    ...expected,
+    expectAudio: { meanVolumeDb: -18.2 },
+  };
+
+  function audioProbe(overrides: Partial<NonNullable<ProbeResult['audio']>> = {}): ProbeResult {
+    return probe({
+      audio: {
+        codecName: 'aac',
+        sampleRate: 48000,
+        channels: 1,
+        durationMs: 30000,
+        ...overrides,
+      },
+    });
+  }
+
+  it('合法 AAC 音轨没有错误', () => {
+    expect(validateProbe(audioProbe(), withAudio)).toEqual([]);
+  });
+
+  it('静音样片（无 expectAudio）不得携带音轨', () => {
+    expect(validateProbe(audioProbe(), expected).join()).toMatch(/不应包含音轨/);
+  });
+
+  it('要求音轨但缺失时报错', () => {
+    expect(validateProbe(probe(), withAudio).join()).toMatch(/未找到音频流/);
+  });
+
+  it('拒绝非 AAC、低采样率与音画时长漂移', () => {
+    const errors = validateProbe(
+      audioProbe({ codecName: 'mp3', sampleRate: 16000, durationMs: 30800 }),
+      withAudio,
+    );
+    const joined = errors.join('\n');
+    expect(joined).toMatch(/aac/);
+    expect(joined).toMatch(/22050/);
+    expect(joined).toMatch(/音画时长不一致/);
+  });
+
+  it('拒绝静音音轨（meanVolumeDb ≤ -90）', () => {
+    const errors = validateProbe(audioProbe(), {
+      ...expected,
+      expectAudio: { meanVolumeDb: -91 },
+    });
+    expect(errors.join()).toMatch(/静音/);
+    // -inf for a fully silent track is also rejected.
+    expect(
+      validateProbe(audioProbe(), {
+        ...expected,
+        expectAudio: { meanVolumeDb: Number.NEGATIVE_INFINITY },
+      }).join(),
+    ).toMatch(/静音/);
+  });
+});

@@ -60,9 +60,10 @@ test('连接工作区后生产页展示服务端真实渲染入口与恢复策�
     await expect(page.getByRole('button', { name: '启动服务端渲染' })).toBeVisible();
     await expect(page.getByText('Remotion · 独立子进程')).toBeVisible();
     await expect(page.getByText('SIGKILL / API 重启后按 checkpoint 续跑')).toBeVisible();
-    await expect(
-      page.getByText('16:9 · H.264 · 无音轨（5B 接入配音与 SRT）').first(),
-    ).toBeVisible();
+    await expect(page.getByText('16:9 · H.264 + AAC 48kHz').first()).toBeVisible();
+    // Narration controls are present and the offline test voice is labelled honestly.
+    await expect(page.getByText('合成旁白音轨（TTS）')).toBeVisible();
+    await expect(page.getByText('测试合成音轨 · 非真人配音').first()).toBeVisible();
     // The simulated DAG still renders below it.
     await expect(page.getByRole('button', { name: /标准成功路径/ })).toBeVisible();
   } finally {

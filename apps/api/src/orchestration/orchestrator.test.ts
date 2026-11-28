@@ -207,9 +207,12 @@ function createHarness(
   return harness;
 }
 
+// These tests exercise the 5A silent render path: no speech service is wired,
+// so narration must be explicitly disabled (the server fails closed otherwise).
 const RUN_INPUT: CreateOrchestrationRunInput = {
   videoId: VIDEO_ID,
   idempotencyKey: 'idem-orch-test-0001',
+  narration: { enabled: false },
 };
 
 async function waitForRun(
@@ -385,14 +388,18 @@ describe('编排器 · DAG 推进', () => {
     };
 
     const detail = await waitForRun(orchestrator, created.run.id, (run) => run.status === 'succeeded');
+    // 5B inserts synthesize_voice + generate_subtitles (skipped here because
+    // narration is off); render_video is index 5 and crashed once.
     expect(detail.run.steps.map((step) => step.status)).toEqual([
       'succeeded',
       'succeeded',
       'succeeded',
+      'skipped',
+      'skipped',
       'succeeded',
       'succeeded',
     ]);
-    expect(detail.run.steps[3]!.attempt).toBe(2);
+    expect(detail.run.steps[5]!.attempt).toBe(2);
     const eventTypes = detail.events.map((event) => event.eventType);
     expect(eventTypes).toContain('worker_crash');
     expect(eventTypes).toContain('retry');
@@ -486,6 +493,14 @@ describe('编排器 · DAG 推进', () => {
     await orchestrator.start();
     const created = await orchestrator.createRun(WORKSPACE_ID, RUN_INPUT);
     await waitForRun(orchestrator, created.run.id, (run) => run.status === 'running' && run.currentStepKey === 'render_video');
+    // `currentStepKey` is written before the async job digest, so wait for the
+    // executor to actually start: this test is "cancel while rendering", not
+    // "cancel in the window before the renderer spawned" (which returns early).
+    const deadline = Date.now() + 3000;
+    while (executor.calls === 0) {
+      if (Date.now() > deadline) throw new Error('执行器未在 3 秒内启动');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     const cancelled = await orchestrator.cancelRun(WORKSPACE_ID, created.run.id);
     expect(cancelled.status).toBe('cancelled');
     expect(executor.aborted).toBe(true);
@@ -494,6 +509,52 @@ describe('编排器 · DAG 推进', () => {
     const detail = await orchestrator.getRun(WORKSPACE_ID, created.run.id);
     expect(detail?.run.status).toBe('cancelled');
     expect(executor.calls).toBe(1);
+  });
+
+  it('取消落在渲染启动前的窗口时，绝不留下无人终止的渲染进程', async () => {
+    let release: (() => void) | undefined;
+    const executor = new FakeExecutor(
+      async (_call, callbacks) =>
+        new Promise<RenderJobExecutionResult>((resolve) => {
+          callbacks.onHeartbeat?.(777);
+          // Never settles on its own, so the run stays in render_video and the
+          // test controls exactly when the renderer finishes.
+          release = () =>
+            resolve({
+              ok: false,
+              workerPid: 777,
+              exitCode: null,
+              signal: 'SIGKILL',
+              crashed: true,
+              code: 'cancelled',
+              message: '渲染进程已被取消',
+              checkpoints: [],
+            });
+        }),
+    );
+    const { orchestrator } = createHarness({ executor });
+    await orchestrator.start();
+    const created = await orchestrator.createRun(WORKSPACE_ID, RUN_INPUT);
+    // `currentStepKey` is persisted before `executeRenderStep` awaits the job
+    // digest, so cancelling here exercises the pre-spawn window. The invariant:
+    // the renderer is either never started or aborted — `cancelRun` must never
+    // walk away letting a renderer run for a run whose output is discarded.
+    await waitForRun(
+      orchestrator,
+      created.run.id,
+      (run) => run.status === 'running' && run.currentStepKey === 'render_video',
+    );
+    const cancelled = await orchestrator.cancelRun(WORKSPACE_ID, created.run.id);
+    expect(cancelled.status).toBe('cancelled');
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    release?.();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const detail = await orchestrator.getRun(WORKSPACE_ID, created.run.id);
+    expect(detail?.run.status).toBe('cancelled');
+    if (executor.calls > 0) {
+      // Started in time: the cancel must have aborted it.
+      expect(executor.aborted).toBe(true);
+    }
   });
 
   it('非法状态迁移返回 409：成功运行不能取消/重试，未审批运行不能重试', async () => {

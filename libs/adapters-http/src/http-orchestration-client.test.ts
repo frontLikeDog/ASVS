@@ -21,6 +21,8 @@ function run(overrides: Partial<OrchestrationRunV1> = {}): OrchestrationRunV1 {
       { stepKey: 'freeze_input', status: 'pending', attempt: 0, checkpointPhases: [] },
       { stepKey: 'verify_claims', status: 'pending', attempt: 0, checkpointPhases: [] },
       { stepKey: 'prepare_media', status: 'pending', attempt: 0, checkpointPhases: [] },
+      { stepKey: 'synthesize_voice', status: 'pending', attempt: 0, checkpointPhases: [] },
+      { stepKey: 'generate_subtitles', status: 'pending', attempt: 0, checkpointPhases: [] },
       { stepKey: 'render_video', status: 'pending', attempt: 0, checkpointPhases: [] },
       { stepKey: 'register_artifacts', status: 'pending', attempt: 0, checkpointPhases: [] },
     ],
@@ -163,6 +165,119 @@ describe('HttpOrchestrationClient', () => {
 
   it('artifactDownloadUrl 生成编码后的下载路径', () => {
     const url = client(vi.fn()).artifactDownloadUrl(WORKSPACE_ID, 'artifact a/b');
-    expect(url).toBe(`/api/v1/workspaces/${WORKSPACE_ID}/orchestration/artifacts/artifact%20a%2Fb`);
+    // Export bundles hand out explicit `/download` URLs; this helper matches
+    // them so an `<a download>` and a bundle file resolve to the same route.
+    expect(url).toBe(
+      `/api/v1/workspaces/${WORKSPACE_ID}/orchestration/artifacts/artifact%20a%2Fb/download`,
+    );
+  });
+
+  it('getHealth 返回 TTS 状态，且响应里没有凭证字段', async () => {
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      response({
+        ok: true,
+        orchestrationReady: true,
+        tts: {
+          configured: true,
+          provider: 'deterministic_test',
+          synthetic: true,
+          license: 'internal-deterministic-test-only',
+        },
+      }),
+    );
+    await expect(client(fetchImpl).getHealth()).resolves.toEqual({
+      configured: true,
+      provider: 'deterministic_test',
+      synthetic: true,
+      license: 'internal-deterministic-test-only',
+    });
+  });
+
+  it('createExportBundle 发送 videoId/runId 并校验返回的出口包', async () => {
+    const detail = exportDetail();
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      response(detail, 201),
+    );
+    const created = await client(fetchImpl).createExportBundle(WORKSPACE_ID, {
+      videoId: 'vid_lumen_release',
+      runId: DETAIL.run.id,
+    });
+    expect(created.bundle.mp4Sha256).toBe(detail.bundle.mp4Sha256);
+    expect(fetchImpl.mock.calls[0]![0]).toBe(
+      `/api/v1/workspaces/${WORKSPACE_ID}/orchestration/exports`,
+    );
+    const init = fetchImpl.mock.calls[0]![1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toEqual({
+      videoId: 'vid_lumen_release',
+      runId: DETAIL.run.id,
+    });
+  });
+
+  it('createExportBundle 把 409 门禁错误透出为 OrchestrationHttpError', async () => {
+    const fetchImpl = vi.fn(async () =>
+      response({ error: { code: 'export_not_approved', message: '尚未批准' } }, 409),
+    );
+    await expect(
+      client(fetchImpl).createExportBundle(WORKSPACE_ID, { videoId: 'vid_lumen_release' }),
+    ).rejects.toMatchObject({ status: 409, code: 'export_not_approved' });
+  });
+
+  it('listExportBundles 传递 videoId/limit 并解析 bundles 数组', async () => {
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      response({ bundles: [exportDetail()] }),
+    );
+    const list = await client(fetchImpl).listExportBundles(WORKSPACE_ID, {
+      videoId: 'vid_lumen_release',
+      limit: 5,
+    });
+    expect(list).toHaveLength(1);
+    expect(fetchImpl.mock.calls[0]![0]).toBe(
+      `/api/v1/workspaces/${WORKSPACE_ID}/orchestration/exports?videoId=vid_lumen_release&limit=5`,
+    );
   });
 });
+
+/** A minimal Gate-3 export detail, shaped exactly like the server's response. */
+function exportDetail() {
+  const sha = (char: string) => char.repeat(64);
+  return {
+    bundle: {
+      schemaVersion: '1' as const,
+      id: 'exportbundle_0123456789abcdef',
+      workspaceId: WORKSPACE_ID,
+      projectId: 'proj_lumen',
+      videoId: 'vid_lumen_release',
+      runId: DETAIL.run.id,
+      mp4ArtifactId: 'artifact_1_video_mp4',
+      srtArtifactId: 'artifact_1_subtitles_srt',
+      manifestArtifactId: 'artifact_1_render_manifest',
+      receiptArtifactId: 'artifact_1_artifact_receipt',
+      mp4Sha256: sha('a'),
+      srtSha256: sha('b'),
+      manifestSha256: sha('c'),
+      scriptVersion: 2,
+      createdAt: ISO,
+    },
+    files: [
+      {
+        artifactId: 'artifact_1_video_mp4',
+        kind: 'video_mp4' as const,
+        fileName: 'vid_lumen_release.mp4',
+        mimeType: 'video/mp4',
+        byteSize: 2048,
+        sha256: sha('a'),
+        downloadUrl: `/v1/workspaces/${WORKSPACE_ID}/orchestration/artifacts/artifact_1_video_mp4/download`,
+      },
+    ],
+    videoDurationMs: 30_000,
+    audioDurationMs: 29_800,
+    narration: {
+      provider: 'deterministic_test',
+      voiceId: 'test-voice-zh',
+      language: 'zh-CN',
+      license: 'internal-deterministic-test-only',
+      synthetic: true,
+      timingPolicy: 'extend_scene',
+    },
+  };
+}
