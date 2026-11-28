@@ -13,6 +13,7 @@ import type {
   CreateExportBundleInput,
   ExportBundleListOptions,
 } from './orchestration';
+import type { QaReportResponse } from './qa';
 
 export interface CreateOrchestrationRunRequest {
   videoId: string;
@@ -101,6 +102,21 @@ export interface OrchestrationClientPort {
     artifact: OrchestrationArtifactV1;
     downloadUrl: string;
   } | null>;
+  /**
+   * 5D · QA report for one run. `stage` omitted returns `final`, or the
+   * `capture` report for a run blocked before rendering. `null` on 404.
+   */
+  getRunQaReport(
+    workspaceId: string,
+    runId: string,
+    stage?: 'capture' | 'final',
+  ): Promise<QaReportResponse | null>;
+  /**
+   * Gate 3 core query: newest QA report for a video, **including runs that QA
+   * blocked** (a failed run with no new MP4 still explains itself). `null` on
+   * 404. A tampered report file rejects with a 409 `qa_report_tampered`.
+   */
+  getLatestQaReport(workspaceId: string, videoId: string): Promise<QaReportResponse | null>;
   /** Base-relative URL usable in an `<a download>`. */
   artifactDownloadUrl(
     workspaceId: string,
@@ -130,6 +146,13 @@ export interface OrchestrationClientPort {
     license: string;
     /** 5C capture capability; absent when the server predates Step 5C. */
     capture?: CaptureHealth;
+    /** 5D QA capability; absent when the server predates Step 5D. */
+    qa?: {
+      enabled: boolean;
+      ocrProvider: string;
+      ocrConfigured: boolean;
+      policyVersion: string;
+    };
   }>;
   /** Cheap reachability probe; resolves false instead of throwing. */
   isReachable(): Promise<boolean>;

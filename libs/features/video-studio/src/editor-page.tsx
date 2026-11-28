@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { Claim, Scene } from '@asvs/domain';
 import {
   formatTimecode,
@@ -85,6 +85,10 @@ export function EditorPage() {
   const [speed, setSpeed] = useState(1);
   const [showCaption, setShowCaption] = useState(true);
   const [selectedSceneId, setSelectedSceneId] = useState<string | undefined>(scenes[0]?.id);
+  // 5D · Gate 3 deep link: `/videos/:id/editor?scene=<sceneId>` preselects the
+  // scene a QA finding points at, so "定位到第 N 镜" lands on the right shot.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const deepLinkedSceneId = searchParams.get('scene') ?? undefined;
   const frameRef = useRef<number | undefined>(undefined);
   const lastTsRef = useRef<number | undefined>(undefined);
 
@@ -130,6 +134,29 @@ export function EditorPage() {
     if (selectedSceneId && scenes.some((scene) => scene.id === selectedSceneId)) return;
     setSelectedSceneId(scenes[0]?.id);
   }, [scenes, selectedSceneId]);
+
+  // Consume `?scene=` once per value: select the scene, seek to its start and
+  // drop the param so a later manual selection is not fought by the URL. An
+  // unknown id (e.g. a scene deleted since the QA run) falls back to the first
+  // scene and still clears the param.
+  useEffect(() => {
+    if (!deepLinkedSceneId) return;
+    const index = scenes.findIndex((scene) => scene.id === deepLinkedSceneId);
+    if (index >= 0) {
+      setSelectedSceneId(deepLinkedSceneId);
+      const start = sceneStartTimes(scenes)[index] ?? 0;
+      setCurrentTime(Math.min(totalDuration(scenes), Math.max(0, Number(start.toFixed(2)))));
+      setPlaying(false);
+    }
+    setSearchParams(
+      (params) => {
+        const next = new URLSearchParams(params);
+        next.delete('scene');
+        return next;
+      },
+      { replace: true },
+    );
+  }, [deepLinkedSceneId, scenes, setSearchParams]);
 
   const playbackRef = useRef({ currentTime: 0, total: 0, playing: false });
   playbackRef.current = { currentTime, total, playing };

@@ -358,12 +358,16 @@ jobs:
           path: ~/.local/share/fonts
           key: noto-cjk-1:20240730+repack1-1build1
 
-      - name: Install ffmpeg, CJK fonts and Chromium
+      - name: Install ffmpeg, CJK fonts, Tesseract and Chromium
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update -o Acquire::Retries=5
           sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 ffmpeg
+          # Step 5D / AC-07: `pnpm qa:verify` proves real OCR (#8 screenshot,
+          # #9 clip frame) only when a Tesseract binary exists; otherwise it
+          # reports those two as SKIPPED rather than faking a pass.
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 tesseract-ocr
           if [ "${{ steps.font-cache.outputs.cache-hit }}" != "true" ]; then
             sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 fonts-noto-cjk
             mkdir -p "$HOME/.local/share/fonts"
@@ -383,10 +387,11 @@ jobs:
           path: node_modules/.remotion
           key: remotion-browser-${{ runner.os }}-4.0.545
 
-      - name: Verify ffmpeg and ffprobe are available
+      - name: Verify ffmpeg, ffprobe and tesseract are available
         run: |
           ffmpeg -version
           ffprobe -version
+          tesseract --version
 
       # The capture worker serves this build with `vite preview`; a dev server
       # would show compiled-on-demand loading screens inside the recording.
@@ -411,6 +416,16 @@ jobs:
 
       - name: Verify rendered MP4, receipt and real-media hashes
         run: pnpm verify:render:captured
+
+      # Step 5D / WP-16 / AC-07: independent QA + privacy gate. Real ffmpeg
+      # media, a real trace.zip, real PNG tEXt secrets, server-side redacted
+      # evidence frames — and real Tesseract OCR, installed above, so #8/#9 are
+      # proven here instead of skipped. Run it *before* Gate 2 so a privacy
+      # regression fails this job with the narrower evidence.
+      - name: Verify independent QA and privacy gate (5D)
+        run: pnpm qa:verify
+        env:
+          ASVS_VERIFY_EXPORT_DIR: ${{ github.workspace }}/dist/qa-verify
 
       # Step 5C / WP-14: Gate 2 through the real server orchestration — planner,
       # approval binding, API restart, both tamper layers, real Chromium capture

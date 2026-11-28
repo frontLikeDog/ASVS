@@ -28,6 +28,10 @@ import { OrchestrationHttpError } from '../orchestration/errors';
 import { SpeechService } from '../speech/speech-service';
 import { SpeechCacheStore } from '../speech/speech-cache-store';
 import { createSpeechPort, speechAudioRoot, DETERMINISTIC_TEST_LICENSE } from '../speech';
+import { QaReportStore } from '../db/qa-report-store';
+import { IndependentQaRunner } from '../qa/independent-qa-runner';
+import { DeterministicTestOcrAdapter } from '../qa/ocr-adapters';
+import { loadQaConfig } from '../config';
 import type { SpeechRuntimeConfig } from '@asvs/ports';
 
 /**
@@ -57,11 +61,12 @@ const VIDEO_ID = 'vid_audio_export';
 const UNAPPROVED_VIDEO_ID = 'vid_audio_unapproved';
 const ISO = '2026-11-27T10:00:00.000Z';
 /**
- * 5C Gate 2 steps; `skipped` here means "capture was never requested". Typed as
- * `OrchestrationStepKey[]` (not a bare literal array) so it can index the
+ * 5C/5D capture-dependent steps; `skipped` here means "capture was never
+ * requested" — `qa_capture` has nothing to scan and is skipped with them. Typed
+ * as `OrchestrationStepKey[]` (not a bare literal array) so it can index the
  * step-keyed Map without widening to `string`.
  */
-const CAPTURE_STEP_KEYS: OrchestrationStepKey[] = ['plan_demo', 'capture_demo'];
+const CAPTURE_STEP_KEYS: OrchestrationStepKey[] = ['plan_demo', 'capture_demo', 'qa_capture'];
 
 /**
  * ~150 characters of Chinese. The deterministic adapter estimates 4.2 chars/s,
@@ -415,6 +420,16 @@ async function main(): Promise<void> {
       executor: new RenderProcessExecutor({}),
       speech,
       exportStore,
+      // Step 5D made QA mandatory: without a runner every run would stop at
+      // `qa_execution_failed`. The real runner over real ffmpeg media, with the
+      // labelled deterministic OCR (this script proves AC-10, not OCR; the
+      // AC-07 proof with real OCR is `pnpm qa:verify`).
+      qaRunner: new IndependentQaRunner({
+        config: loadQaConfig({ ...process.env, ASVS_QA_OCR_PROVIDER: 'deterministic_test' }),
+        ocr: new DeterministicTestOcrAdapter(),
+        logger: { warn: () => undefined },
+      }),
+      qaReportStore: new QaReportStore(db),
       instanceId: 'api_audio_verify',
       maxAttempts: 2,
       schedulerIntervalMs: 200,
@@ -446,13 +461,14 @@ async function main(): Promise<void> {
         `运行未成功：${finished?.run.status ?? 'n/a'} ${finished?.run.failure?.code ?? ''} ${finished?.run.failure?.message ?? ''}`,
       );
     }
-    // 5C widened the DAG to nine steps. This script never requests capture, so
-    // `plan_demo` / `capture_demo` must be `skipped` — not failed, not silently
-    // absent — and every other step must have succeeded.
+    // 5D widened the DAG to eleven steps. This script never requests capture, so
+    // `plan_demo` / `capture_demo` / `qa_capture` must be `skipped` — not
+    // failed, not silently absent — and every other step must have succeeded
+    // (including `qa_final`, which always runs).
     const stepStatus = new Map(finished.run.steps.map((step) => [step.stepKey, step.status]));
     record(
-      '九个步骤全部到达终态（5C 未请求录屏时两步 skipped）',
-      finished.run.steps.length === 9 &&
+      '十一个步骤全部到达终态（未请求录屏时三步 skipped，qa_final 仍执行）',
+      finished.run.steps.length === 11 &&
         finished.run.steps.every(
           (step) =>
             step.status === 'succeeded' ||
@@ -610,12 +626,15 @@ async function main(): Promise<void> {
         approvalNote: 'AC-10 验收导出',
       }),
     );
+    // Step 5D added Gate 5: every bundle now carries the `qa_final` report, so
+    // the honest expectation is five files, not four.
     record(
-      'Gate 3 导出包已生成（MP4 + SRT + manifest + receipt）',
-      bundle.files.length === 4 &&
+      'Gate 3 导出包已生成（MP4 + SRT + manifest + receipt + QA 报告）',
+      bundle.files.length === 5 &&
         bundle.files.some((file) => file.kind === 'video_mp4') &&
-        bundle.files.some((file) => file.kind === 'subtitles_srt'),
-      `${bundle.bundle.id} · ${bundle.files.length} 个文件`,
+        bundle.files.some((file) => file.kind === 'subtitles_srt') &&
+        bundle.files.some((file) => file.kind === 'qa_report'),
+      `${bundle.bundle.id} · ${bundle.files.length} 个文件 · ${bundle.files.map((file) => file.kind).join('/')}`,
     );
     record(
       '导出包绑定脚本版本与运行',

@@ -21,12 +21,16 @@ import type { DatabaseSync } from 'node:sqlite';
 import type {
   CaptureJobExecutorPort,
   OrchestrationServicePort,
+  QaRuntimeConfig,
+  QaRunnerPort,
   RenderJobExecutorPort,
 } from '@asvs/ports';
-import { loadCaptureConfig, loadSpeechConfig } from './config';
+import { loadCaptureConfig, loadQaConfig, loadSpeechConfig } from './config';
 import { openDatabase } from './db/database';
 import { ExportBundleStore } from './db/export-bundle-store';
 import { SqliteOrchestrationStore } from './db/orchestration-store';
+import { QaReportStore } from './db/qa-report-store';
+import { createQaRunner } from './qa';
 import { CaptureProcessExecutor } from './orchestration/capture-process-executor';
 import { Orchestrator } from './orchestration/orchestrator';
 import { RenderProcessExecutor } from './orchestration/render-process-executor';
@@ -87,6 +91,13 @@ export interface BuildAppOptions {
   speechService?: SpeechService | null;
   /** Overrides `ASVS_TTS_*` env when building the default speech service. */
   speechConfig?: SpeechRuntimeConfig;
+  /**
+   * 5D · independent QA runner. Defaults to the real ffmpeg/OCR runner over
+   * `qaConfig`; tests inject a deterministic double (docs/16 red line 4).
+   */
+  qaRunner?: QaRunnerPort | null;
+  /** Overrides `ASVS_QA_*` env when building the default runner. */
+  qaConfig?: QaRuntimeConfig;
 }
 
 export interface BuiltApp {
@@ -101,6 +112,8 @@ export interface BuiltApp {
   orchestration: OrchestrationServicePort;
   orchestrator: Orchestrator;
   exportStore: ExportBundleStore;
+  /** Step 5D: exposed so fixtures can seed a report the export gate accepts. */
+  qaReportStore: QaReportStore;
   speech: SpeechService | null;
   speechHealth: SpeechHealth;
 }
@@ -141,6 +154,10 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
       ? createDefaultSpeechService(db, artifactDir, options.speechConfig)
       : options.speechService;
   const captureConfig = options.captureConfig ?? loadCaptureConfig(process.env);
+  const qaConfig = options.qaConfig ?? loadQaConfig(process.env);
+  const qaRunner =
+    options.qaRunner === undefined ? createQaRunner({ config: qaConfig }) : options.qaRunner;
+  const qaReportStore = new QaReportStore(db);
   const orchestrator = new Orchestrator({
     store: orchestrationStore,
     artifactDir,
@@ -156,6 +173,8 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     captureConfig,
     speech,
     exportStore,
+    qaRunner,
+    qaReportStore,
     maxAttempts: options.maxAttempts,
     leaseTtlMs: options.leaseTtlMs,
     schedulerIntervalMs: options.schedulerIntervalMs,
@@ -222,6 +241,9 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     // The capture allowlist is public information (docs/08 §3): the UI shows
     // the exact origins a capture may target. No credentials, no paths.
     capture: orchestrator.captureHealth(),
+    // 5D: whether independent QA can actually run. `ocrConfigured: false`
+    // means image privacy scanning is fail-closed, not silently skipped.
+    qa: orchestrator.qaHealth(),
   }));
 
   registerGitHubRoutes(app, github);
@@ -334,6 +356,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     orchestration: orchestrator,
     orchestrator,
     exportStore,
+    qaReportStore,
     speech,
     speechHealth,
   };

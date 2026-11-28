@@ -1,4 +1,5 @@
 import { Suspense, lazy, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Link } from 'react-router-dom';
 import type {
   OrchestrationArtifactV1,
   OrchestrationRunV1,
@@ -58,6 +59,20 @@ const Gate2ApprovalPanel = lazy(() => import('./gate2-approval-panel'));
 
 /** UI-bounded speed range; the domain allows 0.75–1.35 but 0.85–1.2 is sane. */
 const SPEED_OPTIONS = [0.85, 0.9, 1, 1.1, 1.2] as const;
+
+/**
+ * 5D · failure codes that mean "independent QA blocked this run". The findings
+ * themselves are only on the Gate 3 review page — this log deliberately shows
+ * the code and a link, never a redacted match or a finding summary, so a
+ * sensitive value can never reach the production log.
+ */
+const QA_FAILURE_CODES = new Set([
+  'qa_privacy_blocked',
+  'qa_ocr_unavailable',
+  'qa_technical_blocked',
+  'qa_fact_blocked',
+  'qa_content_blocked',
+]);
 
 /**
  * Format line for a server render. Never claims audio the file does not have:
@@ -289,6 +304,18 @@ export function ServerOrchestrationPanel({
                     {run.failure.stepKey ? `失败步骤：${stepName(run.failure.stepKey)} · ` : ''}
                     {run.failure.retryable ? '可从最近 checkpoint 手动重试。' : '需要先修复输入或知识状态。'}
                   </p>
+                  {/* 5D · independent QA blocked the run: the findings live on
+                      the Gate 3 review page, never in this log. */}
+                  {QA_FAILURE_CODES.has(run.failure.code) ? (
+                    <p>
+                      <Link
+                        to={`/videos/${run.videoId}/review`}
+                        className="text-[10px] underline underline-offset-2"
+                      >
+                        到审核页查看独立 QA 报告与定位 →
+                      </Link>
+                    </p>
+                  ) : null}
                 </div>
               </Callout>
             ) : null}
@@ -654,9 +681,10 @@ function NarrationOptionsPanel({
 /**
  * Capture controls for a new run (Gate 2 input).
  *
- * The toggle is the opt-in: leaving it off records `plan_demo`/`capture_demo`
- * as skipped at creation. Turning it on without a `real_demo` scene is a
- * server-side 400, so the button says why instead of letting the create fail.
+ * The toggle is the opt-in: leaving it off records `plan_demo`/`capture_demo`/
+ * `qa_capture` as skipped at creation. Turning it on without a `real_demo`
+ * scene is a server-side 400, so the button says why instead of letting the
+ * create fail.
  */
 function CaptureOptionsPanel({
   options,
@@ -754,7 +782,7 @@ function CaptureOptionsPanel({
         </p>
       ) : (
         <p className="mt-2 text-[9px] leading-4 text-faint">
-          未启用时 plan_demo / capture_demo 会在创建运行时记为 skipped，DAG 仍完整展示这两步。
+          未启用时 plan_demo / capture_demo / qa_capture 会在创建运行时记为 skipped，DAG 仍完整展示这些步骤。
         </p>
       )}
     </div>
@@ -799,6 +827,8 @@ function stepName(stepKey: OrchestrationStepKey): string {
       return '生成计划';
     case 'capture_demo':
       return '真实录屏';
+    case 'qa_capture':
+      return '录屏 QA';
     case 'prepare_media':
       return '准备素材';
     case 'synthesize_voice':
@@ -807,6 +837,8 @@ function stepName(stepKey: OrchestrationStepKey): string {
       return '生成字幕';
     case 'render_video':
       return '渲染视频';
+    case 'qa_final':
+      return '成片 QA';
     case 'register_artifacts':
       return '登记产物';
   }

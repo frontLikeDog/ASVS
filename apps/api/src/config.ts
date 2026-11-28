@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { parseGitHubRepoRef, type GitHubRepoRef } from '@asvs/domain';
-import type { GitHubReadOnlyPort, SpeechRuntimeConfig } from '@asvs/ports';
+import type { GitHubReadOnlyPort, QaRuntimeConfig, SpeechRuntimeConfig } from '@asvs/ports';
 import type { CaptureServiceConfig } from './orchestration/demo-planner-service';
 import {
   GitHubAppReadOnlyClient,
@@ -41,6 +41,8 @@ export interface ApiConfig {
   capture: CaptureServiceConfig;
   /** Explicit browser-worker script path; defaults to the in-repo tsx entry. */
   captureWorkerScript?: string;
+  /** Step 5D · independent QA (AC-07 privacy gate). */
+  qa: QaRuntimeConfig;
 }
 
 const DEFAULT_CAPTURE_ORIGINS = ['http://localhost:4200', 'http://127.0.0.1:4200'];
@@ -130,6 +132,50 @@ export function loadSpeechConfig(env: NodeJS.ProcessEnv = process.env): SpeechRu
   };
 }
 
+const QA_OCR_PROVIDERS = ['tesseract_cli', 'deterministic_test', 'unconfigured'] as const;
+
+/**
+ * Reads Step 5D QA settings (docs/16 §6.3). The OCR provider defaults to the
+ * real Tesseract CLI; choosing `unconfigured` is an explicit decision to make
+ * image scanning fail closed, never a silent skip.
+ */
+export function loadQaConfig(env: NodeJS.ProcessEnv = process.env): QaRuntimeConfig {
+  const rawProvider = env.ASVS_QA_OCR_PROVIDER?.trim() || 'tesseract_cli';
+  const ocrProvider = QA_OCR_PROVIDERS.find((item) => item === rawProvider);
+  if (!ocrProvider) {
+    throw new Error(
+      `ASVS_QA_OCR_PROVIDER 无效：${rawProvider}（可选 ${QA_OCR_PROVIDERS.join(' / ')}）`,
+    );
+  }
+  const allowlistedDomains = (env.ASVS_QA_PRIVACY_ALLOWLIST_DOMAINS ?? '')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+  return {
+    enabled: readBoolean(env, 'ASVS_QA_ENABLED', true),
+    ocrProvider,
+    tesseractBin: env.ASVS_QA_TESSERACT_BIN?.trim() || 'tesseract',
+    ocrLanguage: env.ASVS_QA_OCR_LANG?.trim() || 'eng',
+    ocrTimeoutMs: readPositiveInt(env, 'ASVS_QA_OCR_TIMEOUT_MS', 15_000, {
+      min: 1_000,
+      max: 120_000,
+    }),
+    maxFrames: readPositiveInt(env, 'ASVS_QA_MAX_FRAMES', 40, { min: 5, max: 200 }),
+    blackBlockMs: readPositiveInt(env, 'ASVS_QA_BLACK_BLOCK_MS', 1_000, {
+      min: 100,
+      max: 60_000,
+    }),
+    freezeBlockMs: readPositiveInt(env, 'ASVS_QA_FREEZE_BLOCK_MS', 6_000, {
+      min: 1_000,
+      max: 600_000,
+    }),
+    allowlistedDomains,
+    ffmpegBin: env.ASVS_QA_FFMPEG_BIN?.trim() || 'ffmpeg',
+    ffprobeBin: env.ASVS_QA_FFPROBE_BIN?.trim() || 'ffprobe',
+    maxTraceFrames: readPositiveInt(env, 'ASVS_QA_MAX_TRACE_FRAMES', 12, { min: 1, max: 60 }),
+  };
+}
+
 const DEFAULT_CORS_ORIGINS = ['http://localhost:4200', 'http://127.0.0.1:4200'];
 
 function readPositiveInt(
@@ -191,6 +237,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     workerScript: env.ASVS_RENDER_WORKER_SCRIPT?.trim() || undefined,
     capture: loadCaptureConfig(env),
     captureWorkerScript: env.ASVS_CAPTURE_WORKER_SCRIPT?.trim() || undefined,
+    qa: loadQaConfig(env),
   };
 }
 

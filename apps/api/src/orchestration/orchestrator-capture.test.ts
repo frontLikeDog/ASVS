@@ -24,6 +24,8 @@ import type {
 import { openDatabase } from '../db/database';
 import { OrchestrationApprovalStore } from '../db/orchestration-approval-store';
 import { SqliteOrchestrationStore } from '../db/orchestration-store';
+import { QaReportStore } from '../db/qa-report-store';
+import { DeterministicQaRunner } from '../qa/testing/deterministic-qa-runner';
 import {
   DeterministicTestSpeechAdapter,
   DETERMINISTIC_TEST_LICENSE,
@@ -495,6 +497,7 @@ interface Harness {
   orchestrator: Orchestrator;
   capture: FakeCaptureExecutor;
   render: FakeRenderExecutor;
+  qaRunner: DeterministicQaRunner;
   artifactDir: string;
 }
 
@@ -503,13 +506,14 @@ let harness: Harness | undefined;
 function createHarness(
   behaviour: CaptureBehaviour,
   snapshot: StudioSnapshot = SNAPSHOT,
-  options: { narration?: boolean } = {},
+  options: { narration?: boolean; qaScript?: ConstructorParameters<typeof DeterministicQaRunner>[0] } = {},
 ): Harness {
   const artifactDir = mkdtempSync(path.join(os.tmpdir(), 'asvs-cap-'));
   const db = openDatabase(':memory:');
   const store = new SqliteOrchestrationStore(db);
   const render = new FakeRenderExecutor(() => artifactDir);
   const capture = new FakeCaptureExecutor(behaviour);
+  const qaRunner = new DeterministicQaRunner(options.qaScript);
   // Narration off by default so the 5A/5C paths stay free of TTS; the rewrite
   // of `input.json` that `synthesize_voice` performs is under test in one case.
   const speech = options.narration
@@ -534,6 +538,8 @@ function createHarness(
     executor: render,
     speech,
     captureExecutor: capture,
+    qaRunner,
+    qaReportStore: new QaReportStore(db),
     captureConfig: {
       enabled: true,
       allowedOrigins: ['http://localhost:4200'],
@@ -544,7 +550,7 @@ function createHarness(
     maxAttempts: 2,
     schedulerIntervalMs: 60_000,
   });
-  harness = { db, store, orchestrator, capture, render, artifactDir };
+  harness = { db, store, orchestrator, capture, render, qaRunner, artifactDir };
   return harness;
 }
 
@@ -707,7 +713,7 @@ describe('编排器 · Gate 2 审批与执行', () => {
     expect(detail.run.input.capture?.assertions).toEqual({ total: 4, passed: 4 });
     expect(detail.run.captureFailure).toBeUndefined();
     expect(detail.run.currentStepKey).toBeNull();
-    expect(detail.run.steps).toHaveLength(9);
+    expect(detail.run.steps).toHaveLength(11);
   });
 
   it('旁白启用时 synthesize_voice 重写 input.json 仍保留录屏溯源块', async () => {
@@ -994,5 +1000,81 @@ describe('编排器 · capture 健康信息', () => {
     expect(health.allowedOrigins).toEqual(['http://localhost:4200']);
     expect(health.policyVersion).toBe('gate2-v1');
     expect(JSON.stringify(health)).not.toMatch(/secret|token|password/i);
+  });
+});
+
+describe('编排器 · qa_capture 早阻断（Step 5D）', () => {
+  it('qa_capture 在 capture_demo 之后、prepare_media 之前执行；阻断时运行失败且不进入下采样', async () => {
+    const { orchestrator, capture, render, qaRunner } = createHarness(
+      async (_call, job) => {
+        const written = writeCaptureArtifacts(harness!.artifactDir, job.runId, job);
+        return {
+          ok: true,
+          workerPid: 5151,
+          exitCode: 0,
+          checkpoints: [],
+          result: completedResult(job, written.clipSha),
+        };
+      },
+      SNAPSHOT,
+      {
+        qaScript: {
+          findings: {
+            capture: [
+              {
+                category: 'privacy',
+                severity: 'blocker',
+                ruleId: 'privacy.email',
+                title: '截图命中邮箱',
+                sourceKind: 'capture_screenshot',
+                matchRedacted: 'c***@corp.internal',
+              },
+            ],
+          },
+          evidenceFor: [
+            {
+              category: 'privacy',
+              severity: 'blocker',
+              ruleId: 'privacy.email',
+            },
+          ],
+        },
+      },
+    );
+    await orchestrator.start();
+    const created = await orchestrator.createRun(WORKSPACE_ID, RUN_INPUT);
+    const waiting = await waitForRun(orchestrator, created.run.id, (run) => run.status === 'awaiting_approval');
+    await orchestrator.approveRun(WORKSPACE_ID, created.run.id, {
+      approvalId: waiting.run.approval!.approvalId,
+      subjectDigest: waiting.run.demoPlan!.planDigest,
+    });
+    const detail = await waitForRun(orchestrator, created.run.id, (run) => run.status === 'failed');
+
+    expect(detail.run.failure?.code).toBe('qa_privacy_blocked');
+    const byKey = new Map(detail.run.steps.map((step) => [step.stepKey, step.status]));
+    expect(byKey.get('capture_demo')).toBe('succeeded');
+    expect(byKey.get('qa_capture')).toBe('failed');
+    expect(byKey.get('prepare_media')).toBe('pending');
+    // Early block: the renderer never runs.
+    expect(render.calls).toBe(0);
+    // The runner saw the real capture evidence, including the trace.
+    const call = qaRunner.calls.find((entry) => entry.stage === 'capture')!;
+    expect(call).toBeDefined();
+    expect(detail.artifacts.some((artifact) => artifact.kind === 'capture_trace')).toBe(true);
+    const captureInput = call.input as {
+      clips: Array<{ sha256: string }>;
+      screenshots: Array<{ file: string }>;
+      captureTraceFile?: string;
+      captureReceiptFile?: string;
+    };
+    expect(captureInput.clips).toHaveLength(1);
+    expect(captureInput.clips[0]!.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(captureInput.screenshots).toHaveLength(1);
+    expect(captureInput.captureTraceFile).toBeDefined();
+    expect(captureInput.captureReceiptFile).toBeDefined();
+    // Evidence frame registered with the privacy redaction flag.
+    const evidence = detail.artifacts.filter((artifact) => artifact.kind === 'qa_evidence_frame');
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]!.metadata.redacted).toBe(true);
   });
 });

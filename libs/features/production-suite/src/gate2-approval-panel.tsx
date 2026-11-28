@@ -268,7 +268,7 @@ export function Gate2ApprovalPanel({ api }: Gate2ApprovalPanelProps) {
         {!plan && !failedCapture ? (
           <p className="text-[10px] leading-5 text-faint">
             {run.input.capture && run.input.capture.enabled === false
-              ? '本运行未启用真实录屏：plan_demo / capture_demo 已在创建时标记为 skipped，不会启动浏览器。'
+              ? '本运行未启用真实录屏：plan_demo / capture_demo / qa_capture 已在创建时标记为 skipped，不会启动浏览器。'
               : captureHealth && !captureHealth.enabled
                 ? '服务端未启用真实录屏（ASVS_CAPTURE_ENABLED=false）。'
                 : '等待服务端生成演示计划…'}

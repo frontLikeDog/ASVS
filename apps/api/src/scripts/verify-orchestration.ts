@@ -30,6 +30,11 @@ import { SqliteOrchestrationStore } from '../db/orchestration-store';
 import { Orchestrator } from '../orchestration/orchestrator';
 import { RenderProcessExecutor } from '../orchestration/render-process-executor';
 import { OrchestrationHttpError } from '../orchestration/errors';
+import { QaReportStore } from '../db/qa-report-store';
+import { IndependentQaRunner } from '../qa/independent-qa-runner';
+import { DeterministicTestOcrAdapter } from '../qa/ocr-adapters';
+import { loadQaConfig } from '../config';
+import type { QaRunnerPort } from '@asvs/ports';
 
 /**
  * `pnpm orchestration:verify` — the AC-06 acceptance check.
@@ -446,6 +451,20 @@ async function main(): Promise<void> {
   const db = openDatabase(dbPath);
   insertWorkspace(db, snapshot);
   const store = new SqliteOrchestrationStore(db);
+  // Step 5D made `qa_final` mandatory. This script proves the 5A recovery
+  // contract, so it uses the real runner over real ffmpeg output with the
+  // labelled deterministic OCR — never a pass-by-default double. Every
+  // orchestrator instance below gets its own wrapper (the runner tracks the
+  // active run in-process, so sharing one across overlapping instances would
+  // let a stop() abort the other instance's QA).
+  const qaConfig = loadQaConfig({ ...process.env, ASVS_QA_OCR_PROVIDER: 'deterministic_test' });
+  const qaReports = new QaReportStore(db);
+  const qaRunner = (): QaRunnerPort =>
+    new IndependentQaRunner({
+      config: qaConfig,
+      ocr: new DeterministicTestOcrAdapter(),
+      logger: { warn: () => undefined },
+    });
   const loadWorkspace = () => snapshot;
 
   try {
@@ -456,6 +475,8 @@ async function main(): Promise<void> {
       artifactDir,
       loadWorkspace,
       executor: firstKiller,
+      qaRunner: qaRunner(),
+      qaReportStore: qaReports,
       instanceId: 'api_first',
       maxAttempts: 4,
       schedulerIntervalMs: 200,
@@ -546,6 +567,8 @@ async function main(): Promise<void> {
       artifactDir,
       loadWorkspace,
       executor: new RenderProcessExecutor({}),
+      qaRunner: qaRunner(),
+      qaReportStore: qaReports,
       instanceId: 'api_second',
       maxAttempts: 4,
       schedulerIntervalMs: 200,
@@ -812,6 +835,8 @@ async function main(): Promise<void> {
       artifactDir,
       loadWorkspace,
       executor: new RenderProcessExecutor({}),
+      qaRunner: qaRunner(),
+      qaReportStore: qaReports,
       instanceId: 'api_cancel',
       schedulerIntervalMs: 200,
     });

@@ -100,6 +100,10 @@ const exportLookupSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional(),
 });
 
+const qaReportQuerySchema = z.object({
+  stage: z.enum(['capture', 'final']).optional(),
+});
+
 // `note` and `decidedBy` are audit fields: they land in the approval ledger
 // next to the decision. Gate 2 additionally requires `subjectDigest` — the
 // orchestrator, not this schema, decides whether the gate type needs it.
@@ -318,8 +322,11 @@ export function registerOrchestrationRoutes(
     }
     const query = (request.query ?? {}) as Record<string, unknown>;
     const inlineRequested = query.inline === '1' || query.inline === 'true' || query.inline === 1;
+    // 5D adds `qa_evidence_frame`: a privacy-hit frame the server already
+    // blurred before registering it, so an inline preview cannot re-leak the
+    // raw secret. Both kinds still need `nosniff` + an exact `image/png` type.
     const isPng =
-      artifact.kind === 'capture_screenshot' &&
+      (artifact.kind === 'capture_screenshot' || artifact.kind === 'qa_evidence_frame') &&
       artifact.mimeType === 'image/png' &&
       /\.png$/i.test(artifact.fileName);
     const inline = inlineRequested && isPng;
@@ -403,6 +410,63 @@ export function registerOrchestrationRoutes(
         artifact: found.artifact,
         downloadUrl: `${base.replace(':workspaceId', request.params.workspaceId)}/artifacts/${found.artifact.id}`,
       };
+    },
+  );
+
+  /**
+   * 5D · QA report for one run. `?stage=capture|final` narrows it; omitted
+   * returns the `final` report, or the `capture` report for a run blocked
+   * before rendering. A tampered report file is a 409, never a stale verdict.
+   */
+  app.get<{ Params: { workspaceId: string; runId: string } }>(
+    `${base}/runs/:runId/qa-report`,
+    async (request, reply) => {
+      const query = qaReportQuerySchema.safeParse(request.query);
+      if (!query.success) {
+        return reply
+          .code(400)
+          .send(errorBody('invalid_request', 'stage 只能是 capture 或 final。', query.error.issues));
+      }
+      try {
+        const envelope = await service.getRunQaReport(
+          request.params.workspaceId,
+          request.params.runId,
+          query.data.stage,
+        );
+        if (!envelope) {
+          return reply
+            .code(404)
+            .send(errorBody('not_found', `运行 ${request.params.runId} 还没有 QA 报告。`));
+        }
+        return envelope;
+      } catch (error) {
+        return sendOrchestrationError(reply, error);
+      }
+    },
+  );
+
+  /**
+   * Gate 3's core query (5D): newest QA report for a video, deliberately
+   * including runs that were *blocked* by QA and therefore `failed`. This is
+   * what lets the review page explain a block even though no new MP4 exists.
+   */
+  app.get<{ Params: { workspaceId: string; videoId: string } }>(
+    `${base}/videos/:videoId/latest-qa-report`,
+    async (request, reply) => {
+      try {
+        const envelope = await service.getLatestQaReport(
+          request.params.workspaceId,
+          request.params.videoId,
+        );
+        if (!envelope) {
+          return reply
+            .code(404)
+            .send(errorBody('not_found', '该视频还没有独立 QA 报告。'));
+        }
+        return envelope;
+      } catch (error) {
+        return sendOrchestrationError(reply, error);
+      }
     },
   );
 }

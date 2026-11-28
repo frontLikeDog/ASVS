@@ -82,6 +82,27 @@ export default defineConfig({
     // manifest to map route chunks and their static import closures.
     manifest: true,
     rollupOptions: {
+      treeshake: {
+        /**
+         * docs/16 red line 1: the full `QaReportV1` schema must never enter the
+         * initial chunk. `libs/domain/src/qa.ts` is re-exported from the
+         * `@asvs/domain` barrel and builds ~20 zod schemas at module top level;
+         * Rollup cannot prove those `z.object(...)` calls pure, so without this
+         * declaration it keeps the whole module whenever anything imports the
+         * barrel. Declaring only that module side-effect-free lets Rollup drop
+         * it for consumers that use nothing from it, while the API — which
+         * imports `qaReportV1Schema` for real — is unaffected.
+         *
+         * This is deliberately narrow: we do not mark the whole domain lib
+         * side-effect-free, because `defaults.ts` / `mock` seeds may rely on
+         * module evaluation order.
+         */
+        moduleSideEffects(id: string) {
+          const normalized = id.replace(/\\/g, '/');
+          if (normalized.endsWith('/libs/domain/src/qa.ts')) return false;
+          return true;
+        },
+      },
       output: {
         manualChunks(id) {
           const normalized = id.replace(/\\/g, '/');

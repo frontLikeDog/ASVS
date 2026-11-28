@@ -17,6 +17,7 @@
     "orchestration:verify": "nx run api:verify-orchestration",
     "export:verify": "nx run api:verify-audio-export",
     "gate2:verify": "nx run api:verify-capture-orchestration",
+    "qa:verify": "nx run api:verify-qa-privacy",
     "build": "nx build web-studio",
     "budget": "node scripts/check-bundle-budget.mjs",
     "lint": "nx run-many -t lint",

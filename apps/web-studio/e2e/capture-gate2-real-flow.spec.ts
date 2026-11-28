@@ -432,7 +432,8 @@ test('Gate 2：未启用录屏时两个步骤在创建即跳过，DAG 仍完整'
     );
     expect(byKey.get('plan_demo')).toBe('skipped');
     expect(byKey.get('capture_demo')).toBe('skipped');
-    expect(byKey.size).toBe(9);
+    expect(byKey.get('qa_capture')).toBe('skipped');
+    expect(byKey.size).toBe(11);
 
     const context = await browser.newContext();
     try {
@@ -446,7 +447,7 @@ test('Gate 2：未启用录屏时两个步骤在创建即跳过，DAG 仍完整'
       // The server's own event log says why, rather than leaving the reviewer
       // to guess why the two steps never ran.
       await expect(
-        page.getByText('未请求真实录屏：plan_demo / capture_demo 已标记为 skipped。'),
+        page.getByText('未请求真实录屏：plan_demo / capture_demo / qa_capture 已标记为 skipped。'),
       ).toBeVisible();
     } finally {
       await context.close();
